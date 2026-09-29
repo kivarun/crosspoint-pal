@@ -45,3 +45,32 @@ bool toneLutQuantizerCanonical(const ToneLut* tone, bool fallback) {
   if (tone == nullptr || tone->quantizer < 0) return fallback;
   return tone->quantizer != 0;
 }
+
+void normalizeToneProfile(ToneProfile& profile) {
+  profile.brightnessPct =
+      labStepClamped(profile.brightnessPct, 0, LAB_BRIGHTNESS_MIN, LAB_BRIGHTNESS_MAX);
+  profile.gammaPct = labStepClamped(profile.gammaPct, 0, LAB_GAMMA_MIN, LAB_GAMMA_MAX);
+  profile.contrastPct = labStepClamped(profile.contrastPct, 0, LAB_CONTRAST_MIN, LAB_CONTRAST_MAX);
+  // Only the explicit overrides are meaningful persisted; anything else folds
+  // to the default (no override), matching the settings-load convention of
+  // folding out-of-range values to the field default.
+  if (profile.quantizer != 0 && profile.quantizer != 1) profile.quantizer = -1;
+}
+
+ToneLut toneLutFromProfile(const ToneProfile& profile) {
+  ToneLut lut;
+  lut.brightnessPct = profile.brightnessPct;
+  lut.gammaPct = profile.gammaPct;
+  lut.contrastPct = profile.contrastPct;
+  lut.quantizer = profile.quantizer;
+  return lut;  // enabled + map come from buildToneLut()
+}
+
+ToneProfile toneProfileFromTone(const ToneLut& tone) {
+  ToneProfile profile;
+  profile.brightnessPct = tone.brightnessPct;
+  profile.gammaPct = tone.gammaPct;
+  profile.contrastPct = tone.contrastPct;
+  profile.quantizer = (tone.quantizer == 0 || tone.quantizer == 1) ? tone.quantizer : -1;
+  return profile;
+}

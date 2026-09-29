@@ -110,6 +110,13 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   if (keyboardLayouts != 0) {
     doc["keyboardLayouts"] = keyboardLayouts;
   }
+
+  // Sleep render profile (Image Lab) — one nested object, not loose fields.
+  JsonObject profileObj = doc["sleepRenderProfile"].to<JsonObject>();
+  profileObj["brightness"] = sleepRenderProfile.brightnessPct;
+  profileObj["gammaX100"] = sleepRenderProfile.gammaPct;
+  profileObj["contrast"] = sleepRenderProfile.contrastPct;
+  profileObj["quantizer"] = sleepRenderProfile.quantizer;
 }
 
 bool CrossPointSettings::fromJson(JsonVariantConst doc) {
@@ -257,6 +264,21 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   // Absent means unconfigured, which is the default.
   if (doc["keyboardLayouts"].is<uint16_t>()) {
     keyboardLayouts = doc["keyboardLayouts"].as<uint16_t>();
+  }
+
+  // Sleep render profile (Image Lab) — absent in older files leaves the
+  // default (B100 G1.00 C100, quantizer = no override), so existing installs
+  // keep rendering sleep images exactly as before. Values are clamped through
+  // the shared Image Lab ranges.
+  JsonObjectConst profileObj = doc["sleepRenderProfile"];
+  if (!profileObj.isNull()) {
+    ToneProfile loaded;
+    loaded.brightnessPct = profileObj["brightness"] | 100;
+    loaded.gammaPct = profileObj["gammaX100"] | 100;
+    loaded.contrastPct = profileObj["contrast"] | 100;
+    loaded.quantizer = profileObj["quantizer"] | static_cast<int8_t>(-1);
+    normalizeToneProfile(loaded);
+    sleepRenderProfile = loaded;
   }
 
   if (needsResave) {

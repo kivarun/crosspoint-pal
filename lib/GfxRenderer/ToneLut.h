@@ -56,3 +56,26 @@ inline uint8_t labStepClamped(const uint8_t value, const int delta, const uint8_
   const int stepped = value + LAB_STEP * delta;
   return static_cast<uint8_t>(stepped < lo ? lo : (stepped > hi ? hi : stepped));
 }
+
+// Persisted render profile (Image Lab "Use for sleep rendering"): pure data,
+// shared by the settings store, the viewer draft and the sleep renderer.
+// ToneLut below remains the derived rendering implementation; the profile
+// carries no persistence concerns and no map.
+struct ToneProfile {
+  uint8_t brightnessPct = 100;  // 70..110, step 5
+  uint8_t gammaPct = 100;       // gamma * 100: 70..130, step 5
+  uint8_t contrastPct = 100;    // 80..130, step 5
+  int8_t quantizer = -1;        // -1 = no override (UI labels it "Legacy"), 0 = legacy, 1 = canonical
+  bool operator==(const ToneProfile&) const = default;
+};
+
+// Clamp a profile into the lab ranges; out-of-range quantizer folds to the
+// default (-1). Shared by the settings save and load paths so the constraints
+// live in exactly one place.
+void normalizeToneProfile(ToneProfile& profile);
+
+// Rendering ToneLut for a profile (caller runs buildToneLut() before decode).
+ToneLut toneLutFromProfile(const ToneProfile& profile);
+
+// Persisted subset of a draft/active ToneLut (the UI save path input).
+ToneProfile toneProfileFromTone(const ToneLut& tone);

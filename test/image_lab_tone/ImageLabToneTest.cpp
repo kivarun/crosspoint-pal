@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstring>
 
 #include "lib/GfxRenderer/BitmapHelpers.h"
 #include "lib/GfxRenderer/LabSettingsInput.h"
@@ -150,6 +151,86 @@ TEST(ImageLabSettingsInput, NoEventMeansNoAction) {
   for (int b = 0; b <= 6; ++b) {
     EXPECT_EQ(event(static_cast<Button>(b), false, false), Action::None);
   }
+}
+
+// ---- Sleep render profile (data/config type + shared normalization) ----
+
+TEST(ImageLabSleepProfile, DefaultsArePristineRendering) {
+  const ToneProfile profile{};
+  EXPECT_EQ(profile.brightnessPct, 100);
+  EXPECT_EQ(profile.gammaPct, 100);
+  EXPECT_EQ(profile.contrastPct, 100);
+  EXPECT_EQ(profile.quantizer, -1);  // no override: Bitmap keeps its fallback quantizer
+
+  // The default profile must produce the SAME rendering decision the viewer
+  // produces without any profile: identity LUT + fallback quantizer.
+  ToneLut sleep = toneLutFromProfile(profile);
+  buildToneLut(sleep);
+  EXPECT_FALSE(sleep.enabled);  // baseline decode path (adjustPixel pass-through)
+  EXPECT_EQ(toneLutQuantizerCanonical(&sleep, true), true);   // SSD1677 fallback preserved
+  EXPECT_EQ(toneLutQuantizerCanonical(&sleep, false), false); // legacy-panel fallback preserved
+  for (int i = 0; i < 256; ++i) EXPECT_EQ(sleep.map[i], i) << "i=" << i;
+}
+
+TEST(ImageLabSleepProfile, NormalizeClampsToLabRanges) {
+  ToneProfile wild{255, 0, 200, 7};
+  normalizeToneProfile(wild);
+  EXPECT_EQ(wild.brightnessPct, LAB_BRIGHTNESS_MAX);
+  EXPECT_EQ(wild.gammaPct, LAB_GAMMA_MIN);
+  EXPECT_EQ(wild.contrastPct, LAB_CONTRAST_MAX);
+  EXPECT_EQ(wild.quantizer, -1);  // out-of-range folds to default (settings-load convention)
+
+  ToneProfile floor{0, 5, 10, 0};
+  normalizeToneProfile(floor);
+  EXPECT_EQ(floor.brightnessPct, LAB_BRIGHTNESS_MIN);
+  EXPECT_EQ(floor.gammaPct, LAB_GAMMA_MIN);
+  EXPECT_EQ(floor.contrastPct, LAB_CONTRAST_MIN);
+  EXPECT_EQ(floor.quantizer, 0);
+
+  ToneProfile valid{85, 90, 110, 1};
+  normalizeToneProfile(valid);
+  EXPECT_EQ(valid, (ToneProfile{85, 90, 110, 1}));  // in-range values pass through untouched
+}
+
+TEST(ImageLabSleepProfile, ProfileTransformMatchesViewerTransform) {
+  // Same shared implementation: a ToneLut built from a persisted profile must
+  // be identical to a ToneLut built directly from viewer values.
+  const ToneLut viewer = makeLut(85, 90, 110);
+  ToneLut sleep = toneLutFromProfile(ToneProfile{85, 90, 110, 1});
+  buildToneLut(sleep);
+  EXPECT_EQ(sleep.enabled, viewer.enabled);
+  EXPECT_EQ(0, memcmp(sleep.map, viewer.map, sizeof(sleep.map)));
+  EXPECT_EQ(toneLutQuantizerCanonical(&sleep, true), toneLutQuantizerCanonical(&viewer, true));
+
+  const ToneLut viewerLegacy = makeLut(110, 70, 80);
+  ToneLut sleepLegacy = toneLutFromProfile(ToneProfile{110, 70, 80, 0});
+  buildToneLut(sleepLegacy);
+  EXPECT_EQ(0, memcmp(sleepLegacy.map, viewerLegacy.map, sizeof(sleepLegacy.map)));
+  EXPECT_EQ(toneLutQuantizerCanonical(&sleepLegacy, false), toneLutQuantizerCanonical(&viewerLegacy, false));
+}
+
+TEST(ImageLabSleepProfile, PersistedSubsetExtraction) {
+  // toneProfileFromTone is the save path input: it reads EXACTLY the draft it
+  // is given (the activity passes settingsDraft, never labTone) and normalizes
+  // the quantizer subset (-1 default kept, explicit 0/1 kept).
+  ToneLut draft = makeLut(85, 90, 110);
+  draft.quantizer = 1;
+  EXPECT_EQ(toneProfileFromTone(draft), (ToneProfile{85, 90, 110, 1}));
+
+  draft.quantizer = -1;  // untouched quantizer: stored as "no override"
+  EXPECT_EQ(toneProfileFromTone(draft), (ToneProfile{85, 90, 110, -1}));
+
+  ToneLut garbage = makeLut(100, 100, 100);
+  garbage.quantizer = 42;  // cannot happen via the UI; folds to the default
+  EXPECT_EQ(toneProfileFromTone(garbage), (ToneProfile{100, 100, 100, -1}));
+}
+
+TEST(ImageLabSleepProfile, NormalizeIsIdempotent) {
+  ToneProfile a{200, 65, 140, 9};
+  normalizeToneProfile(a);
+  ToneProfile b = a;
+  normalizeToneProfile(b);
+  EXPECT_EQ(a, b);  // save -> load -> save keeps the same values
 }
 
 TEST(ImageLabSettingsInput, PressWinsOverSimultaneousReleaseWindow) {

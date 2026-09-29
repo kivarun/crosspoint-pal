@@ -303,6 +303,7 @@ int BmpViewerActivity::buildLabPageItems() {
       add(tr(STR_FILTER_CONTRAST), labValueScratch[2]);
       add(tr(STR_QUANTIZER), labValueScratch[3]);
       add(tr(STR_APPLY), nullptr);
+      add(tr(STR_USE_FOR_SLEEP_RENDERING), nullptr);
       break;
     }
 
@@ -336,7 +337,7 @@ int BmpViewerActivity::labPageRowCount() const {
       return rows;
     }
     case LabScreen::ImageSettings:
-      return static_cast<int>(LabParam::Count) + 1;  // 4 value rows + Apply
+      return static_cast<int>(LabParam::Count) + 2;  // 4 value rows + Apply + Use for sleep rendering
     case LabScreen::ImageInfo:
       return static_cast<int>(infoRows.size());
     case LabScreen::DeleteConfirm:
@@ -585,7 +586,9 @@ void BmpViewerActivity::activateLabRow() {
       break;
 
     case LabScreen::ImageSettings:
-      // Value rows: Confirm does nothing (Left/Right step). Apply commits.
+      // Value rows: Confirm does nothing (Left/Right step). Apply commits the
+      // draft into the session viewer state; Use for sleep rendering persists
+      // the draft as the sleep render profile. The two rows are independent.
       if (labModalRow == static_cast<int>(LabParam::Count)) {
         // Apply: commit the draft once, close the ENTIRE modal UI, and render
         // the current image exactly once — no return to the root menu first.
@@ -593,6 +596,8 @@ void BmpViewerActivity::activateLabRow() {
         buildToneLut(labTone);
         labScreen = LabScreen::Viewer;
         renderBmp(false);
+      } else if (labModalRow == static_cast<int>(LabParam::Count) + 1) {
+        saveSleepRenderProfile();
       }
       break;
 
@@ -670,6 +675,23 @@ void BmpViewerActivity::labModalAdjust(int delta) {
     default:
       return;
   }
+  repaintLabModal();
+}
+
+void BmpViewerActivity::saveSleepRenderProfile() {
+  // "Use for sleep rendering": persist the STAGED draft (not labTone — the two
+  // may differ) as the sleep render profile. Nothing else happens: no image
+  // render, no labTone change, no sleep-cover file/mode touch. Same
+  // confirmation idiom as the sleep-cover flow, then back to the root menu
+  // page (the modal stays on its single surface; the image is untouched).
+  ToneProfile profile = toneProfileFromTone(settingsDraft);
+  normalizeToneProfile(profile);
+  SETTINGS.sleepRenderProfile = profile;
+  SETTINGS.saveToFile();
+  GUI.drawPopup(renderer, tr(STR_DONE));
+  delay(1000);
+  labScreen = LabScreen::ContextMenu;
+  labModalRow = 0;
   repaintLabModal();
 }
 
