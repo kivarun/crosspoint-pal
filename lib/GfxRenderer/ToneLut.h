@@ -41,3 +41,18 @@ void buildToneLut(ToneLut& lut);
 // Quantizer selection for Bitmap::parseHeaders(): the lab override when set,
 // otherwise the constructor fallback (current behavior).
 bool toneLutQuantizerCanonical(const ToneLut* tone, bool fallback);
+
+// Image Lab settings-screen helpers (same ranges the tone formula consumes).
+constexpr uint8_t LAB_BRIGHTNESS_MIN = 70;
+constexpr uint8_t LAB_BRIGHTNESS_MAX = 110;
+constexpr uint8_t LAB_GAMMA_MIN = 70;   // gamma 0.70 * 100
+constexpr uint8_t LAB_GAMMA_MAX = 130;  // gamma 1.30 * 100
+constexpr uint8_t LAB_CONTRAST_MIN = 80;
+constexpr uint8_t LAB_CONTRAST_MAX = 130;
+constexpr uint8_t LAB_STEP = 5;
+
+// One Left/Right step on a percent-encoded parameter, clamped to [lo, hi].
+inline uint8_t labStepClamped(const uint8_t value, const int delta, const uint8_t lo, const uint8_t hi) {
+  const int stepped = value + LAB_STEP * delta;
+  return static_cast<uint8_t>(stepped < lo ? lo : (stepped > hi ? hi : stepped));
+}

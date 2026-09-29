@@ -99,3 +99,14 @@ TEST(ImageLabTone, QuantizerThresholdSetsDiverge) {
   EXPECT_EQ(legacy.processPixel(200, 1), 3);
   EXPECT_EQ(canonical.processPixel(200, 1), 2);
 }
+
+TEST(ImageLabTone, SettingsStepClampsAtRangeBounds) {
+  // Brightness 70..110 step 5: cannot exceed the bounds in either direction.
+  EXPECT_EQ(labStepClamped(110, 1, LAB_BRIGHTNESS_MIN, LAB_BRIGHTNESS_MAX), 110);
+  EXPECT_EQ(labStepClamped(70, -1, LAB_BRIGHTNESS_MIN, LAB_BRIGHTNESS_MAX), 70);
+  EXPECT_EQ(labStepClamped(105, 1, LAB_BRIGHTNESS_MIN, LAB_BRIGHTNESS_MAX), 110);
+  // Gamma (x100) 70..130, Contrast 80..130 use the same helper.
+  EXPECT_EQ(labStepClamped(130, 1, LAB_GAMMA_MIN, LAB_GAMMA_MAX), 130);
+  EXPECT_EQ(labStepClamped(80, -1, LAB_CONTRAST_MIN, LAB_CONTRAST_MAX), 80);
+  EXPECT_EQ(labStepClamped(100, 1, LAB_CONTRAST_MIN, LAB_CONTRAST_MAX), 105);
+}

@@ -22,11 +22,21 @@ constexpr char TRANSPARENT_SLEEP_ROOT_BMP[] = "/sleep-overlay.bmp";
 constexpr char TRANSPARENT_SLEEP_ROOT_PNG[] = "/sleep-overlay.png";
 constexpr size_t COPY_BUFFER_SIZE = 2048;
 
-// Image Lab indicator HUD patch (logical px, drawn over the image)
-constexpr int LAB_PATCH_X = 2;
-constexpr int LAB_PATCH_Y = 2;
-constexpr int LAB_PATCH_W = 160;
-constexpr int LAB_PATCH_H = 17;
+// Image Lab HUD: offset added to the oriented viewable insets. Physical inset
+// from the panel edge is bezel + offset; the X4C's smallest bezel inset is 3 px
+// (bottom), so +8 keeps the HUD >= 11 px from the glass edge in every
+// orientation (spec: 10-12 px minimum), instead of a blind constant.
+constexpr int LAB_HUD_INSET = 8;
+constexpr int LAB_HUD_W = 132;
+constexpr int LAB_HUD_H = 17;
+
+// Image Lab settings panel (bottom-right, above the button-hint strip).
+constexpr int LAB_PANEL_W = 200;
+constexpr int LAB_PANEL_MARGIN = 12;
+constexpr int LAB_PANEL_ROW_H = 16;
+constexpr int LAB_PANEL_PAD = 6;
+
+constexpr int INFO_LINE_MAX_CHARS = 60;
 }  // namespace
 
 BmpViewerActivity::BmpViewerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string path)
@@ -93,39 +103,270 @@ bool BmpViewerActivity::renderPng() {
   return converter.decodeToFramebuffer(filePath, renderer, config);
 }
 
-void BmpViewerActivity::drawLabIndicatorText() {
-  char buf[40];
-  snprintf(buf, sizeof(buf), "B%u G%d.%02d C%u Q:%c  [%c]", labTone.brightnessPct, labTone.gammaPct / 100,
-           labTone.gammaPct % 100, labTone.contrastPct, labTone.quantizer == 1 ? 'C' : 'L',
-           labSelected == LabParam::Brightness ? 'B'
-           : labSelected == LabParam::Gamma    ? 'G'
-           : labSelected == LabParam::Contrast ? 'C'
-                                               : 'Q');
-  renderer.drawText(UI_10_FONT_ID, LAB_PATCH_X + 4, LAB_PATCH_Y + 1, buf, true);
+void BmpViewerActivity::drawLabIndicatorText(int x, int y) {
+  char buf[32];
+  snprintf(buf, sizeof(buf), "B%u G%d.%02d C%u Q:%c", labTone.brightnessPct, labTone.gammaPct / 100,
+           labTone.gammaPct % 100, labTone.contrastPct, labTone.quantizer == 1 ? 'C' : 'L');
+  renderer.drawText(UI_10_FONT_ID, x + 4, y + 2, buf, true);
 }
 
 void BmpViewerActivity::drawLabIndicator(LabPass pass) {
   if (isPng) return;
 
+  // Safe inset from the physical panel edge, derived from the live orientation
+  // (not blind constants): logical x/y = viewable inset + LAB_HUD_INSET.
+  int top, right, bottom, left;
+  renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+  const int hudX = left + LAB_HUD_INSET;
+  const int hudY = top + LAB_HUD_INSET;
+
   if (pass == LabPass::PlaneLsb || pass == LabPass::PlaneMsb) {
-    const bool absolute = renderer.grayPlanesAreAbsolute();
-    if (absolute) {
+    if (renderer.grayPlanesAreAbsolute()) {
       // Absolute planes: white patch (bits 1) + black text (bits 0) in each
       // plane -> black text on white patch in the composited output.
-      renderer.fillRect(LAB_PATCH_X, LAB_PATCH_Y, LAB_PATCH_W, LAB_PATCH_H, false);
-      drawLabIndicatorText();
+      renderer.fillRect(hudX, hudY, LAB_HUD_W, LAB_HUD_H, false);
+      drawLabIndicatorText(hudX, hudY);
     } else {
       // Overlay mask planes: bit 0 = no gray change -> keep the base pass
       // rendering of the indicator visible.
-      renderer.fillRect(LAB_PATCH_X, LAB_PATCH_Y, LAB_PATCH_W, LAB_PATCH_H, true);
-      drawLabIndicatorText();
+      renderer.fillRect(hudX, hudY, LAB_HUD_W, LAB_HUD_H, true);
+      drawLabIndicatorText(hudX, hudY);
     }
     return;
   }
 
   // BW base / BW rebuild passes: white patch + black text.
-  renderer.fillRect(LAB_PATCH_X, LAB_PATCH_Y, LAB_PATCH_W, LAB_PATCH_H, false);
-  drawLabIndicatorText();
+  renderer.fillRect(hudX, hudY, LAB_HUD_W, LAB_HUD_H, false);
+  drawLabIndicatorText(hudX, hudY);
+}
+
+void BmpViewerActivity::drawLabSettingsPanel() {
+  const int screenH = renderer.getScreenHeight();
+  const int panelH = LAB_PANEL_ROW_H * static_cast<int>(LabParam::Count) + LAB_PANEL_PAD * 2;
+  const int px = renderer.getScreenWidth() - LAB_PANEL_W - LAB_PANEL_MARGIN;
+  const int py = screenH - panelH - LAB_PANEL_ROW_H * 2;  // above the button-hint strip
+
+  renderer.fillRect(px, py, LAB_PANEL_W, panelH, false);
+
+  const char* valueStrings[] = {"Legacy", "Canonical"};
+  for (int i = 0; i < static_cast<int>(LabParam::Count); i++) {
+    char row[32];
+    const int rowY = py + LAB_PANEL_PAD + i * LAB_PANEL_ROW_H;
+    switch (static_cast<LabParam>(i)) {
+      case LabParam::Brightness:
+        snprintf(row, sizeof(row), "Brightness  %u %%", labTone.brightnessPct);
+        break;
+      case LabParam::Gamma:
+        snprintf(row, sizeof(row), "Gamma       %d.%02d", labTone.gammaPct / 100, labTone.gammaPct % 100);
+        break;
+      case LabParam::Contrast:
+        snprintf(row, sizeof(row), "Contrast    %u %%", labTone.contrastPct);
+        break;
+      case LabParam::Quantizer:
+        snprintf(row, sizeof(row), "Quantizer   %s",
+                 valueStrings[labTone.quantizer == 1 ? 1 : 0]);
+        break;
+      default:
+        continue;
+    }
+    if (static_cast<int>(labSelected) == i) {
+      renderer.drawText(UI_10_FONT_ID, px + 2, rowY, ">", true);
+    }
+    renderer.drawText(UI_10_FONT_ID, px + 10, rowY, row, true);
+  }
+}
+
+void BmpViewerActivity::openContextMenu() {
+  labScreen = LabScreen::ContextMenu;
+  labSelected = LabParam::Brightness;
+
+  if (isPng) {
+    // PNG decode is not tuned by the lab: only Info and Delete.
+    const char* options[] = {tr(STR_INFO), tr(STR_DELETE)};
+    menuPopup.show(tr(STR_IMAGE_LAB), options, 2, 0, [this](int choice) { menuAction(choice + 1); });
+  } else {
+    const char* options[] = {tr(STR_IMAGE_SETTINGS), tr(STR_INFO), tr(STR_DELETE)};
+    menuPopup.show(tr(STR_IMAGE_LAB), options, 3, 0, [this](int choice) { menuAction(choice); });
+  }
+  menuPopup.processRender(renderer, mappedInput);
+}
+
+void BmpViewerActivity::menuAction(int choice) {
+  switch (choice) {
+    case 0:  // Image settings (BMP only; the menu hides this entry for PNG)
+      labScreen = LabScreen::Settings;
+      drawLabSettingsPanel();
+      renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+      break;
+    case 1:
+      openInfo();
+      break;
+    case 2:
+      openDeleteConfirm();
+      break;
+    default:
+      break;
+  }
+}
+
+void BmpViewerActivity::openInfo() {
+  labScreen = LabScreen::Info;
+  infoLines.clear();
+  infoLines.reserve(5);
+
+  // Filename + path
+  size_t lastSlash = filePath.find_last_of('/');
+  const std::string fileName = (lastSlash != std::string::npos) ? filePath.substr(lastSlash + 1) : filePath;
+  std::string pathLine = filePath;
+  if (pathLine.size() > INFO_LINE_MAX_CHARS) {
+    pathLine.resize(INFO_LINE_MAX_CHARS);
+    pathLine += "...";
+  }
+  infoLines.push_back(fileName);
+  infoLines.push_back(pathLine);
+
+  // Dimensions, format, size through the existing decode APIs only.
+  char line[80];
+  if (isPng) {
+    ImageDimensions dimensions;
+    if (PngToFramebufferConverter::getDimensionsStatic(filePath, dimensions)) {
+      snprintf(line, sizeof(line), "%d x %d, PNG", dimensions.width, dimensions.height);
+    } else {
+      snprintf(line, sizeof(line), "PNG (dimensions unavailable)");
+    }
+    infoLines.push_back(line);
+  } else {
+    HalFile file;
+    if (Storage.openFileForRead("BMP", filePath, file)) {
+      Bitmap bitmap(file);
+      if (bitmap.parseHeaders() == BmpReaderError::Ok) {
+        snprintf(line, sizeof(line), "%d x %d, BMP %ubpp%s", bitmap.getWidth(), bitmap.getHeight(),
+                 bitmap.getBpp(), bitmap.is1Bit() ? " (BW)" : " (gray)");
+        infoLines.push_back(line);
+      } else {
+        infoLines.push_back("BMP (parse failed)");
+      }
+      snprintf(line, sizeof(line), "%u bytes", static_cast<unsigned>(file.size()));
+      infoLines.push_back(line);
+    } else {
+      infoLines.push_back("File unavailable");
+    }
+  }
+
+  renderer.clearScreen();
+  int y = 10;
+  for (const auto& textLine : infoLines) {
+    renderer.drawText(UI_10_FONT_ID, 12, y, textLine.c_str(), true);
+    y += renderer.getLineHeight(UI_10_FONT_ID);
+  }
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+}
+
+void BmpViewerActivity::openDeleteConfirm() {
+  labScreen = LabScreen::DeleteConfirm;
+
+  size_t lastSlash = filePath.find_last_of('/');
+  const std::string fileName = (lastSlash != std::string::npos) ? filePath.substr(lastSlash + 1) : filePath;
+  const char* options[] = {tr(STR_CANCEL), tr(STR_CONFIRM)};
+  confirmPopup.show(tr(STR_DELETE), fileName.c_str(), options, 2, 0, [this](int idx) {
+    labScreen = LabScreen::Viewer;
+    if (idx == 1) {
+      performDelete();
+    } else {
+      renderBmp(false);  // cancelled: restore the image view
+    }
+  });
+  confirmPopup.processRender(renderer, mappedInput);
+}
+
+void BmpViewerActivity::performDelete() {
+  const std::string dirPath = FsHelpers::extractFolderPath(filePath);
+  const int oldCount = static_cast<int>(siblingImages.size());
+  const int deletedIndex = currentImageIndex;
+
+  if (!Storage.remove(filePath.c_str())) {
+    LOG_ERR("BMP", "Failed to delete %s", filePath.c_str());
+  }
+  // Viewer images have no generated cache artifacts in this firmware (there is
+  // no removeImageCache() mechanism; BMP/PNG viewers decode from source), so
+  // nothing else to clean up.
+
+  const int next = FsHelpers::nextImageIndexAfterDelete(oldCount, deletedIndex);
+  if (next < 0) {
+    // Folder is empty: exit to the file browser at its folder.
+    activityManager.goToFileBrowser(dirPath);
+    return;
+  }
+  if (deletedIndex < 0 || deletedIndex >= oldCount) return;  // inconsistent state: do not corrupt indices
+
+  siblingImages.erase(siblingImages.begin() + deletedIndex);
+  currentImageIndex = next;
+  std::string navPath = dirPath;
+  if (!navPath.empty() && navPath.back() != '/') navPath += "/";
+  filePath = navPath + siblingImages[currentImageIndex];
+  isPng = FsHelpers::hasPngExtension(filePath);
+  onEnter();
+}
+
+void BmpViewerActivity::labMoveSelection(int delta) {
+  const int count = static_cast<int>(LabParam::Count);
+  const int next = (static_cast<int>(labSelected) + delta + count) % count;
+  labSelected = static_cast<LabParam>(next);
+  drawLabSettingsPanel();
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);  // cursor-only partial update
+}
+
+void BmpViewerActivity::labAdjust(int delta) {
+  // Image Lab settings: adjust the selected parameter (Left = decrease,
+  // Right = increase, clamped to the range bounds); the quantizer toggles.
+  switch (labSelected) {
+    case LabParam::Brightness:
+      labTone.brightnessPct = labStepClamped(labTone.brightnessPct, delta, LAB_BRIGHTNESS_MIN, LAB_BRIGHTNESS_MAX);
+      break;
+    case LabParam::Gamma:
+      labTone.gammaPct = labStepClamped(labTone.gammaPct, delta, LAB_GAMMA_MIN, LAB_GAMMA_MAX);
+      break;
+    case LabParam::Contrast:
+      labTone.contrastPct = labStepClamped(labTone.contrastPct, delta, LAB_CONTRAST_MIN, LAB_CONTRAST_MAX);
+      break;
+    case LabParam::Quantizer:
+      labTone.quantizer = (labTone.quantizer == 1) ? 0 : 1;
+      break;
+    default:
+      return;
+  }
+  buildToneLut(labTone);
+  renderBmp(false);  // current image with the new parameters
+  drawLabSettingsPanel();
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+}
+
+void BmpViewerActivity::handleLabSettingsInput() {
+  // Image settings modal: Up/Down (side keys) select the row, Left/Right
+  // adjust the value, Confirm/Back close and return to the image view.
+  if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+    labMoveSelection(-1);
+    return;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
+    labMoveSelection(1);
+    return;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+    labAdjust(-1);
+    return;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+    labAdjust(1);
+    return;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) ||
+      mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    labScreen = LabScreen::Viewer;
+    renderBmp(false);
+  }
 }
 
 void BmpViewerActivity::onEnter() {
@@ -226,7 +467,8 @@ void BmpViewerActivity::renderBmp(bool showPopup) {
   bool hasNext = (siblingImages.size() > 1 && currentImageIndex != -1 &&
                   currentImageIndex < static_cast<int>(siblingImages.size()) - 1);
 
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", (hasPrevious ? "-" : ""), (hasNext ? "+" : ""));
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), canSetSleepCover() ? tr(STR_SET_SLEEP_COVER) : "",
+                                            (hasPrevious ? "<" : ""), (hasNext ? ">" : ""));
 
   if (showPopup) GUI.fillPopupProgress(renderer, popupRect, 50);
 
@@ -336,35 +578,6 @@ void BmpViewerActivity::doSetSleepCover() {
   onEnter();
 }
 
-void BmpViewerActivity::labAdjust(int delta) {
-  // Image Lab: adjust the selected parameter (Left = decrease, Right = increase;
-  // clamped to the range bounds). Quantizer toggles on either press.
-  switch (labSelected) {
-    case LabParam::Brightness:
-      labTone.brightnessPct = std::clamp<uint8_t>(labTone.brightnessPct + 5 * delta, 70, 110);
-      break;
-    case LabParam::Gamma:
-      labTone.gammaPct = std::clamp<uint8_t>(labTone.gammaPct + 5 * delta, 70, 130);
-      break;
-    case LabParam::Contrast:
-      labTone.contrastPct = std::clamp<uint8_t>(labTone.contrastPct + 5 * delta, 80, 130);
-      break;
-    case LabParam::Quantizer:
-      labTone.quantizer = (labTone.quantizer == 1) ? 0 : 1;
-      break;
-    default:
-      return;
-  }
-  buildToneLut(labTone);
-  renderBmp(false);
-}
-
-void BmpViewerActivity::labCycle() {
-  // Image Lab: select the next parameter (Brightness -> Gamma -> Contrast -> Quantizer).
-  labSelected = static_cast<LabParam>((static_cast<uint8_t>(labSelected) + 1) % static_cast<uint8_t>(LabParam::Count));
-  renderBmp(false);
-}
-
 void BmpViewerActivity::loop() {
   // Keep CPU awake/polling so 1st click works
   Activity::loop();
@@ -386,6 +599,47 @@ void BmpViewerActivity::loop() {
     return true;
   };
 
+  // Modal surfaces own the buttons first (existing OptionPopup abstraction).
+  if (labScreen == LabScreen::ContextMenu) {
+    menuPopup.handleInput(mappedInput, [] {});
+    if (labScreen == LabScreen::ContextMenu) {
+      // Dismissed without a selection: restore the image view.
+      labScreen = LabScreen::Viewer;
+      renderBmp(false);
+    }
+    return;
+  }
+
+  if (labScreen == LabScreen::DeleteConfirm) {
+    confirmPopup.handleInput(mappedInput, [] {});
+    if (labScreen == LabScreen::DeleteConfirm) {
+      // Cancelled (Back or outside-tap): restore the image view.
+      labScreen = LabScreen::Viewer;
+      renderBmp(false);
+    }
+    return;
+  }
+
+  if (labScreen == LabScreen::Settings) {
+    handleLabSettingsInput();
+    return;
+  }
+
+  if (labScreen == LabScreen::Info) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back) ||
+        mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      labScreen = LabScreen::Viewer;
+      renderBmp(false);
+    }
+    return;
+  }
+
+  // Viewer mode — native Image Viewer controls plus the lab menu trigger:
+  //   Up (side, left of the right-side pair) -> context menu
+  //   Down (side) / Right (front) -> next image
+  //   Left (front) -> previous image
+  //   Confirm -> set sleep cover (native)
+  //   Back -> exit to the file browser
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     activityManager.goToFileBrowser(filePath);
     return;
@@ -401,35 +655,24 @@ void BmpViewerActivity::loop() {
     return;
   }
 
-  // Image Lab mapping (BMP only; PNG decode is not tuned by the lab):
-  // Up / Down -> previous / next image
-  // Left / Right -> decrease / increase the selected parameter
-  // Confirm -> select the next parameter
-  // Back -> exit viewer
   if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
-    openSibling(-1);
+    openContextMenu();
     return;
   }
-
-  if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
-    openSibling(1);
-    return;
-  }
-
-  if (isPng) return;  // PNG: parameter keys are no-ops
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    labCycle();
+    if (canSetSleepCover()) doSetSleepCover();
     return;
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
-    labAdjust(-1);
+    openSibling(-1);
     return;
   }
 
-  if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
-    labAdjust(1);
+  if (mappedInput.wasReleased(MappedInputManager::Button::Right) ||
+      mappedInput.wasReleased(MappedInputManager::Button::Down)) {
+    openSibling(1);
     return;
   }
 }

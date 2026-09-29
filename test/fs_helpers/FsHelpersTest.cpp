@@ -67,4 +67,24 @@ TEST(SanitizePathComponentForFat32, DoesNotSplitLetterAtBufferLimit) {
   EXPECT_EQ(sanitize(kTitle2103), "Богиня-глюкозы.-Нормализуйте-уров");
 }
 
+TEST(NextImageIndexAfterDelete, PointsAtNextImageForMiddleDelete) {
+  // [a b c d e], delete c(2): the slot now holds d.
+  EXPECT_EQ(FsHelpers::nextImageIndexAfterDelete(5, 2), 2);
+}
+
+TEST(NextImageIndexAfterDelete, FallsBackToPreviousForLastDelete) {
+  // [a b c d e], delete e(4): open d at slot 3.
+  EXPECT_EQ(FsHelpers::nextImageIndexAfterDelete(5, 4), 3);
+}
+
+TEST(NextImageIndexAfterDelete, EmptyListMeansExitToBrowser) {
+  EXPECT_EQ(FsHelpers::nextImageIndexAfterDelete(1, 0), -1);  // only image
+  EXPECT_EQ(FsHelpers::nextImageIndexAfterDelete(0, 0), -1);  // degenerate
+}
+
+TEST(NextImageIndexAfterDelete, OutOfRangeDeletedIndexIsSafe) {
+  EXPECT_EQ(FsHelpers::nextImageIndexAfterDelete(3, 99), 0);
+  EXPECT_EQ(FsHelpers::nextImageIndexAfterDelete(3, -1), 0);
+}
+
 }  // namespace

@@ -210,4 +210,11 @@ void sanitizePathComponentForFat32(const char* input, char* output, size_t maxLe
   output[i] = '\0';
 }
 
+int nextImageIndexAfterDelete(const int oldCount, const int deletedIndex) {
+  const int newCount = oldCount - 1;
+  if (newCount <= 0) return -1;
+  if (deletedIndex < 0 || deletedIndex >= oldCount) return 0;
+  return deletedIndex < newCount ? deletedIndex : newCount - 1;
+}
+
 }  // namespace FsHelpers

@@ -86,4 +86,12 @@ inline bool isSafePathComponent(const String& name) {
  */
 void sanitizePathComponentForFat32(const char* input, char* output, size_t maxLen);
 
+/**
+ * Index into the (post-erase) sibling list of the image to show after deleting
+ * the entry at `deletedIndex` from a sorted list of `oldCount` entries.
+ * Prefers the next image at the same slot, falls back to the previous one.
+ * Returns -1 when the list becomes empty (exit to the file browser).
+ */
+int nextImageIndexAfterDelete(int oldCount, int deletedIndex);
+
 }  // namespace FsHelpers
