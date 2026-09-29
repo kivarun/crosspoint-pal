@@ -180,28 +180,46 @@ void BmpViewerActivity::openContextMenu() {
   labScreen = LabScreen::ContextMenu;
   labSelected = LabParam::Brightness;
 
-  if (isPng) {
-    // PNG decode is not tuned by the lab: only Info and Delete.
-    const char* options[] = {tr(STR_INFO), tr(STR_DELETE)};
-    menuPopup.show(tr(STR_IMAGE_LAB), options, 2, 0, [this](int choice) { menuAction(choice + 1); });
-  } else {
-    const char* options[] = {tr(STR_IMAGE_SETTINGS), tr(STR_INFO), tr(STR_DELETE)};
-    menuPopup.show(tr(STR_IMAGE_LAB), options, 3, 0, [this](int choice) { menuAction(choice); });
+  // Option rows are built dynamically; actions[] keeps the row->action mapping
+  // so the selection callback never relies on positional guessing. Set sleep
+  // cover appears only when the viewer can actually set one.
+  const char* options[4];
+  menuActionCount = 0;
+  if (!isPng) {
+    options[menuActionCount] = tr(STR_IMAGE_SETTINGS);
+    menuActions[menuActionCount++] = LAB_ACT_SETTINGS;
   }
+  options[menuActionCount] = tr(STR_INFO);
+  menuActions[menuActionCount++] = LAB_ACT_INFO;
+  if (canSetSleepCover()) {
+    options[menuActionCount] = tr(STR_SET_SLEEP_COVER);
+    menuActions[menuActionCount++] = LAB_ACT_SLEEP;
+  }
+  options[menuActionCount] = tr(STR_DELETE);
+  menuActions[menuActionCount++] = LAB_ACT_DELETE;
+
+  menuPopup.show(tr(STR_IMAGE_LAB), options, menuActionCount, 0, [this](int choice) {
+    if (choice < 0 || choice >= menuActionCount) return;
+    menuAction(menuActions[choice]);
+  });
   menuPopup.processRender(renderer, mappedInput);
 }
 
-void BmpViewerActivity::menuAction(int choice) {
-  switch (choice) {
-    case 0:  // Image settings (BMP only; the menu hides this entry for PNG)
+void BmpViewerActivity::menuAction(int action) {
+  switch (action) {
+    case LAB_ACT_SETTINGS:  // BMP only; the menu hides this entry for PNG
       labScreen = LabScreen::Settings;
       drawLabSettingsPanel();
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
       break;
-    case 1:
+    case LAB_ACT_INFO:
       openInfo();
       break;
-    case 2:
+    case LAB_ACT_SLEEP:
+      labScreen = LabScreen::Viewer;  // menu closes; the sleep-cover flow re-renders itself
+      doSetSleepCover();              // existing implementation, unchanged; now menu-driven
+      break;
+    case LAB_ACT_DELETE:
       openDeleteConfirm();
       break;
     default:
@@ -477,8 +495,8 @@ void BmpViewerActivity::renderBmp(bool showPopup) {
   bool hasNext = (siblingImages.size() > 1 && currentImageIndex != -1 &&
                   currentImageIndex < static_cast<int>(siblingImages.size()) - 1);
 
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), canSetSleepCover() ? tr(STR_SET_SLEEP_COVER) : "",
-                                            (hasPrevious ? "<" : ""), (hasNext ? ">" : ""));
+  // Confirm opens the context menu now; the hint stays blank.
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", (hasPrevious ? "<" : ""), (hasNext ? ">" : ""));
 
   if (showPopup) GUI.fillPopupProgress(renderer, popupRect, 50);
 
@@ -610,9 +628,14 @@ void BmpViewerActivity::loop() {
   };
 
   // Modal surfaces own the buttons first (existing OptionPopup abstraction).
+  // OptionPopup contract: handleInput() returning true means the popup OWNS
+  // input right now — NOT that it finished. Dismissal is detected via
+  // !isActive(); a selection is detected via the callback having switched
+  // labScreen away. Treating plain `true` as "popup ended" closed the menu on
+  // the next idle tick (the v2 auto-close bug).
   if (labScreen == LabScreen::ContextMenu) {
     menuPopup.handleInput(mappedInput, [] {});
-    if (labScreen == LabScreen::ContextMenu) {
+    if (!menuPopup.isActive() && labScreen == LabScreen::ContextMenu) {
       // Dismissed without a selection: restore the image view.
       labScreen = LabScreen::Viewer;
       renderBmp(false);
@@ -622,7 +645,7 @@ void BmpViewerActivity::loop() {
 
   if (labScreen == LabScreen::DeleteConfirm) {
     confirmPopup.handleInput(mappedInput, [] {});
-    if (labScreen == LabScreen::DeleteConfirm) {
+    if (!confirmPopup.isActive() && labScreen == LabScreen::DeleteConfirm) {
       // Cancelled (Back or outside-tap): restore the image view.
       labScreen = LabScreen::Viewer;
       renderBmp(false);
@@ -645,10 +668,9 @@ void BmpViewerActivity::loop() {
   }
 
   // Viewer mode — native Image Viewer controls plus the lab menu trigger:
-  //   Up (side, left of the right-side pair) -> context menu
+  //   Up (side, left of the right-side pair) / Left -> previous image
   //   Down (side) / Right (front) -> next image
-  //   Left (front) -> previous image
-  //   Confirm -> set sleep cover (native)
+  //   Confirm (GPIO8) -> context menu
   //   Back -> exit to the file browser
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     activityManager.goToFileBrowser(filePath);
@@ -666,12 +688,12 @@ void BmpViewerActivity::loop() {
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
-    openContextMenu();
+    openSibling(-1);
     return;
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    if (canSetSleepCover()) doSetSleepCover();
+    openContextMenu();
     return;
   }
 

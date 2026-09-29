@@ -19,6 +19,9 @@ enum class LabParam : uint8_t { Brightness = 0, Gamma = 1, Contrast = 2, Quantiz
 // image; Viewer is the plain image view with native controls.
 enum class LabScreen : uint8_t { Viewer, ContextMenu, Settings, Info, DeleteConfirm };
 
+// Action codes for the dynamic context-menu option rows (order built at show()).
+enum LabMenuAction : uint8_t { LAB_ACT_SETTINGS = 0, LAB_ACT_INFO, LAB_ACT_SLEEP, LAB_ACT_DELETE };
+
 // Where the lab HUD is being drawn (each pass must carry it so it survives
 // grayscale compositing).
 enum class LabPass : uint8_t {
@@ -64,6 +67,11 @@ class BmpViewerActivity final : public Activity {
   LabParam labSelected = LabParam::Brightness;
   ToneLut labTone{};
   std::vector<std::string> infoLines;  // filled by openInfo()
+
+  // Context-menu option rows and their action codes, built by openContextMenu()
+  // (Set sleep cover appears only when canSetSleepCover()).
+  uint8_t menuActions[4] = {};
+  int menuActionCount = 0;
 
   // Existing CrossPoint modal surfaces (shared menu abstraction, no parallel mechanism)
   OptionPopup menuPopup;      // Image settings / Info / Delete
