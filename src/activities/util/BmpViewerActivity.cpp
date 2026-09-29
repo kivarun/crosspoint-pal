@@ -286,23 +286,33 @@ void BmpViewerActivity::performDelete() {
   const int oldCount = static_cast<int>(siblingImages.size());
   const int deletedIndex = currentImageIndex;
 
-  if (!Storage.remove(filePath.c_str())) {
+  const bool removed = Storage.remove(filePath.c_str());
+  if (!removed) {
     LOG_ERR("BMP", "Failed to delete %s", filePath.c_str());
   }
   // Viewer images have no generated cache artifacts in this firmware (there is
   // no removeImageCache() mechanism; BMP/PNG viewers decode from source), so
   // nothing else to clean up.
 
-  const int next = FsHelpers::nextImageIndexAfterDelete(oldCount, deletedIndex);
-  if (next < 0) {
-    // Folder is empty: exit to the file browser at its folder.
-    activityManager.goToFileBrowser(dirPath);
+  // Delete contract: a failed physical delete aborts BEFORE any list/index
+  // mutation — siblingImages/currentImageIndex/filePath stay untouched, the
+  // viewer returns to the current image.
+  const auto next = FsHelpers::imageIndexAfterRemove(removed, oldCount, deletedIndex);
+  if (!next.has_value()) {
+    GUI.drawPopup(renderer, tr(STR_FAILED_LOWER));
+    delay(1000);
+    renderBmp(false);
     return;
   }
   if (deletedIndex < 0 || deletedIndex >= oldCount) return;  // inconsistent state: do not corrupt indices
 
   siblingImages.erase(siblingImages.begin() + deletedIndex);
-  currentImageIndex = next;
+  currentImageIndex = *next;
+  if (*next < 0) {
+    // Folder is empty: exit to the file browser at its folder.
+    activityManager.goToFileBrowser(dirPath);
+    return;
+  }
   std::string navPath = dirPath;
   if (!navPath.empty() && navPath.back() != '/') navPath += "/";
   filePath = navPath + siblingImages[currentImageIndex];

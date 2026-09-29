@@ -87,4 +87,17 @@ TEST(NextImageIndexAfterDelete, OutOfRangeDeletedIndexIsSafe) {
   EXPECT_EQ(FsHelpers::nextImageIndexAfterDelete(3, -1), 0);
 }
 
+// Image Viewer delete contract: a failed physical delete must abort BEFORE
+// any list/index mutation — the viewer stays on the current image.
+TEST(ImageIndexAfterRemove, FailedRemoveAbortsBeforeStateChange) {
+  EXPECT_FALSE(FsHelpers::imageIndexAfterRemove(false, 5, 2).has_value());
+  EXPECT_FALSE(FsHelpers::imageIndexAfterRemove(false, 1, 0).has_value());
+}
+
+TEST(ImageIndexAfterRemove, SuccessfulRemovePlansNextOrBrowserExit) {
+  EXPECT_EQ(FsHelpers::imageIndexAfterRemove(true, 5, 2), 2);    // next at same slot
+  EXPECT_EQ(FsHelpers::imageIndexAfterRemove(true, 5, 4), 3);    // previous
+  EXPECT_EQ(FsHelpers::imageIndexAfterRemove(true, 1, 0), -1);   // empty -> file browser
+}
+
 }  // namespace

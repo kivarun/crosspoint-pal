@@ -217,4 +217,9 @@ int nextImageIndexAfterDelete(const int oldCount, const int deletedIndex) {
   return deletedIndex < newCount ? deletedIndex : newCount - 1;
 }
 
+std::optional<int> imageIndexAfterRemove(const bool removeOk, const int oldCount, const int deletedIndex) {
+  if (!removeOk) return std::nullopt;
+  return nextImageIndexAfterDelete(oldCount, deletedIndex);
+}
+
 }  // namespace FsHelpers

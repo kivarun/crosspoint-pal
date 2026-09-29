@@ -1,6 +1,7 @@
 #pragma once
 #include <WString.h>
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -93,5 +94,13 @@ void sanitizePathComponentForFat32(const char* input, char* output, size_t maxLe
  * Returns -1 when the list becomes empty (exit to the file browser).
  */
 int nextImageIndexAfterDelete(int oldCount, int deletedIndex);
+
+/**
+ * Image Viewer delete contract: a FAILED physical delete aborts before any
+ * list/index mutation (result: nullopt — stay on the current image). On
+ * success, plans the post-delete navigation: the new sibling index, or -1
+ * when the folder becomes empty.
+ */
+std::optional<int> imageIndexAfterRemove(bool removeOk, int oldCount, int deletedIndex);
 
 }  // namespace FsHelpers
