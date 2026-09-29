@@ -71,6 +71,7 @@ add_subdirectory(image_lab_tone)
 
 add_subdirectory(inflate_stream)
 add_subdirectory(fs_helpers)
+add_subdirectory(txt_to_html)
 
 add_subdirectory(absolute_grayscale)
 
