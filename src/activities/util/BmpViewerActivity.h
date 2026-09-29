@@ -20,7 +20,13 @@ enum class LabParam : uint8_t { Brightness = 0, Gamma = 1, Contrast = 2, Quantiz
 enum class LabScreen : uint8_t { Viewer, ContextMenu, Settings, Info, DeleteConfirm };
 
 // Action codes for the dynamic context-menu option rows (order built at show()).
-enum LabMenuAction : uint8_t { LAB_ACT_SETTINGS = 0, LAB_ACT_INFO, LAB_ACT_SLEEP, LAB_ACT_DELETE };
+enum LabMenuAction : uint8_t {
+  LAB_ACT_SETTINGS = 0,
+  LAB_ACT_INFO,
+  LAB_ACT_DEBUG_HUD,
+  LAB_ACT_SLEEP,
+  LAB_ACT_DELETE
+};
 
 // Where the lab HUD is being drawn (each pass must carry it so it survives
 // grayscale compositing).
@@ -66,11 +72,12 @@ class BmpViewerActivity final : public Activity {
   LabScreen labScreen = LabScreen::Viewer;
   LabParam labSelected = LabParam::Brightness;
   ToneLut labTone{};
+  bool debugHudEnabled = true;  // lab HUD visible on entry (research workflow), toggle from the menu
   std::vector<std::string> infoLines;  // filled by openInfo()
 
   // Context-menu option rows and their action codes, built by openContextMenu()
-  // (Set sleep cover appears only when canSetSleepCover()).
-  uint8_t menuActions[4] = {};
+  // (Show debug info is BMP-only; Set sleep cover appears only when canSetSleepCover()).
+  uint8_t menuActions[5] = {};
   int menuActionCount = 0;
 
   // Existing CrossPoint modal surfaces (shared menu abstraction, no parallel mechanism)

@@ -111,7 +111,9 @@ void BmpViewerActivity::drawLabIndicatorText(int x, int y) {
 }
 
 void BmpViewerActivity::drawLabIndicator(LabPass pass) {
-  if (isPng) return;
+  // Lab HUD is BMP-only and user-togglable from the context menu; when off it
+  // is skipped in EVERY pass (base, both plane passes, BW rebuild).
+  if (isPng || !debugHudEnabled) return;
 
   // Safe inset from the physical panel edge, derived from the live orientation
   // (not blind constants): logical x/y = viewable inset + LAB_HUD_INSET.
@@ -181,9 +183,11 @@ void BmpViewerActivity::openContextMenu() {
   labSelected = LabParam::Brightness;
 
   // Option rows are built dynamically; actions[] keeps the row->action mapping
-  // so the selection callback never relies on positional guessing. Set sleep
+  // so the selection callback never relies on positional guessing.
+  // Show debug info is BMP-only (the HUD never renders for PNG); Set sleep
   // cover appears only when the viewer can actually set one.
-  const char* options[4];
+  const char* options[5];
+  std::string debugLabel;
   menuActionCount = 0;
   if (!isPng) {
     options[menuActionCount] = tr(STR_IMAGE_SETTINGS);
@@ -191,6 +195,14 @@ void BmpViewerActivity::openContextMenu() {
   }
   options[menuActionCount] = tr(STR_INFO);
   menuActions[menuActionCount++] = LAB_ACT_INFO;
+  if (!isPng) {
+    debugLabel.reserve(32);
+    debugLabel += tr(STR_SHOW_DEBUG_INFO);
+    debugLabel += ": ";
+    debugLabel += debugHudEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+    options[menuActionCount] = debugLabel.c_str();
+    menuActions[menuActionCount++] = LAB_ACT_DEBUG_HUD;
+  }
   if (canSetSleepCover()) {
     options[menuActionCount] = tr(STR_SET_SLEEP_COVER);
     menuActions[menuActionCount++] = LAB_ACT_SLEEP;
@@ -214,6 +226,14 @@ void BmpViewerActivity::menuAction(int action) {
       break;
     case LAB_ACT_INFO:
       openInfo();
+      break;
+    case LAB_ACT_DEBUG_HUD:
+      // Toggle the lab HUD and repaint the image so the old HUD physically
+      // leaves the e-ink panel; then re-show the menu with the new state.
+      debugHudEnabled = !debugHudEnabled;
+      labScreen = LabScreen::Viewer;
+      renderBmp(false);
+      openContextMenu();
       break;
     case LAB_ACT_SLEEP:
       labScreen = LabScreen::Viewer;  // menu closes; the sleep-cover flow re-renders itself
@@ -415,7 +435,7 @@ void BmpViewerActivity::onEnter() {
     const bool hasPrevious = siblingImages.size() > 1 && currentImageIndex > 0;
     const bool hasNext = siblingImages.size() > 1 && currentImageIndex != -1 &&
                          currentImageIndex < static_cast<int>(siblingImages.size()) - 1;
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_OPTIONS), "", "");
     if (renderPng()) {
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
@@ -495,8 +515,9 @@ void BmpViewerActivity::renderBmp(bool showPopup) {
   bool hasNext = (siblingImages.size() > 1 && currentImageIndex != -1 &&
                   currentImageIndex < static_cast<int>(siblingImages.size()) - 1);
 
-  // Confirm opens the context menu now; the hint stays blank.
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", (hasPrevious ? "<" : ""), (hasNext ? ">" : ""));
+  // Confirm opens the context menu; its hint reads as an active viewer action.
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_OPTIONS), (hasPrevious ? "<" : ""),
+                                            (hasNext ? ">" : ""));
 
   if (showPopup) GUI.fillPopupProgress(renderer, popupRect, 50);
 
@@ -627,14 +648,15 @@ void BmpViewerActivity::loop() {
     return true;
   };
 
-  // Modal surfaces own the buttons first (existing OptionPopup abstraction).
-  // OptionPopup contract: handleInput() returning true means the popup OWNS
-  // input right now — NOT that it finished. Dismissal is detected via
-  // !isActive(); a selection is detected via the callback having switched
-  // labScreen away. Treating plain `true` as "popup ended" closed the menu on
-  // the next idle tick (the v2 auto-close bug).
-  if (labScreen == LabScreen::ContextMenu) {
-    menuPopup.handleInput(mappedInput, [] {});
+  // Modal input ordering: an active OptionPopup owns ALL viewer input. While
+  // it is active, handleInput() runs and loop() returns — no viewer action,
+  // no sibling navigation, no image repaint runs. Its requestUpdate callback
+  // repaints the popup synchronously (this activity renders in-loop, unlike
+  // the render-task activities that pass requestUpdate() and repaint via
+  // render()); an empty lambda would move the selection without ever
+  // repainting — the "menu ignores navigation keys" bug.
+  if (menuPopup.isActive()) {
+    menuPopup.handleInput(mappedInput, [this] { menuPopup.processRender(renderer, mappedInput); });
     if (!menuPopup.isActive() && labScreen == LabScreen::ContextMenu) {
       // Dismissed without a selection: restore the image view.
       labScreen = LabScreen::Viewer;
@@ -643,8 +665,8 @@ void BmpViewerActivity::loop() {
     return;
   }
 
-  if (labScreen == LabScreen::DeleteConfirm) {
-    confirmPopup.handleInput(mappedInput, [] {});
+  if (confirmPopup.isActive()) {
+    confirmPopup.handleInput(mappedInput, [this] { confirmPopup.processRender(renderer, mappedInput); });
     if (!confirmPopup.isActive() && labScreen == LabScreen::DeleteConfirm) {
       // Cancelled (Back or outside-tap): restore the image view.
       labScreen = LabScreen::Viewer;
