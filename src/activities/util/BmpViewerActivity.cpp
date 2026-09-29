@@ -232,10 +232,11 @@ void BmpViewerActivity::renderLabModal() {
 
   // Button hints reflect the REAL page semantics: 1D pages use the standard
   // Back/Select/Up/Down labels; the 2-axis settings page shows Back | Apply
-  // (when the Apply row is selected) or Select | - | + — never a hint that
-  // Left/Right list rows.
+  // on every row whose Confirm applies the draft to the viewer (editable rows
+  // and the Apply row) and Select on the dedicated sleep row — never a hint
+  // that Left/Right list rows.
   if (labScreen == LabScreen::ImageSettings) {
-    const auto hint = mappedInput.mapLabels(tr(STR_BACK), labModalRow == static_cast<int>(LabParam::Count)
+    const auto hint = mappedInput.mapLabels(tr(STR_BACK), labModalRow <= static_cast<int>(LabParam::Count)
                                                                ? tr(STR_APPLY)
                                                                : tr(STR_SELECT),
                                             "-", "+");
@@ -585,21 +586,23 @@ void BmpViewerActivity::activateLabRow() {
       if (labModalRow >= 0 && labModalRow < menuActionCount) menuAction(menuActions[labModalRow]);
       break;
 
-    case LabScreen::ImageSettings:
-      // Value rows: Confirm does nothing (Left/Right step). Apply commits the
-      // draft into the session viewer state; Use for sleep rendering persists
-      // the draft as the sleep render profile. The two rows are independent.
-      if (labModalRow == static_cast<int>(LabParam::Count)) {
-        // Apply: commit the draft once, close the ENTIRE modal UI, and render
-        // the current image exactly once — no return to the root menu first.
-        labTone = settingsDraft;
-        buildToneLut(labTone);
-        labScreen = LabScreen::Viewer;
-        renderBmp(false);
-      } else if (labModalRow == static_cast<int>(LabParam::Count) + 1) {
-        saveSleepRenderProfile();
+    case LabScreen::ImageSettings: {
+      // Editable value rows AND the explicit Apply row share ONE viewer-Apply
+      // implementation (Confirm applies without navigating to Apply); the
+      // dedicated sleep row keeps its own action. Routing is the pure,
+      // host-tested labSettingsInput policy — mutually exclusive by return.
+      switch (labSettingsInput::confirmActionForRow(labModalRow, static_cast<int>(LabParam::Count))) {
+        case labSettingsInput::RowAction::ApplyViewer:
+          applyLabSettings();
+          break;
+        case labSettingsInput::RowAction::SaveSleepProfile:
+          saveSleepRenderProfile();
+          break;
+        default:
+          break;
       }
       break;
+    }
 
     case LabScreen::ImageInfo:
       // Confirm returns to the root menu page (same surface, no image render).
@@ -678,16 +681,34 @@ void BmpViewerActivity::labModalAdjust(int delta) {
   repaintLabModal();
 }
 
+void BmpViewerActivity::applyLabSettings() {
+  // The ONLY viewer-Apply implementation: commit the draft once, close the
+  // ENTIRE modal UI, and render the current image exactly once — no return to
+  // the root menu first. Reachable from every editable row and the Apply row.
+  labTone = settingsDraft;
+  buildToneLut(labTone);
+  labScreen = LabScreen::Viewer;
+  renderBmp(false);
+}
+
 void BmpViewerActivity::saveSleepRenderProfile() {
   // "Use for sleep rendering": persist the STAGED draft (not labTone — the two
-  // may differ) as the sleep render profile. Nothing else happens: no image
-  // render, no labTone change, no sleep-cover file/mode touch. Same
-  // confirmation idiom as the sleep-cover flow, then back to the root menu
-  // page (the modal stays on its single surface; the image is untouched).
-  ToneProfile profile = toneProfileFromTone(settingsDraft);
-  normalizeToneProfile(profile);
-  SETTINGS.sleepRenderProfile = profile;
-  SETTINGS.saveToFile();
+  // may differ) as the sleep render profile. Transactional: a failed SD write
+  // restores the previous profile (no unsaved-but-active state), shows the
+  // failure popup (never a false Done), and stays on the settings page with
+  // the draft intact for a retry. No image render, no labTone change, no
+  // sleep-cover file/mode touch.
+  ToneProfile candidate = toneProfileFromTone(settingsDraft);
+  normalizeToneProfile(candidate);
+  const ToneProfile previous = SETTINGS.sleepRenderProfile;
+  SETTINGS.sleepRenderProfile = candidate;
+  if (!SETTINGS.saveToFile()) {
+    SETTINGS.sleepRenderProfile = previous;
+    GUI.drawPopup(renderer, tr(STR_FAILED_LOWER));
+    delay(1000);
+    repaintLabModal();
+    return;
+  }
   GUI.drawPopup(renderer, tr(STR_DONE));
   delay(1000);
   labScreen = LabScreen::ContextMenu;

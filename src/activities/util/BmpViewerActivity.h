@@ -74,6 +74,7 @@ class BmpViewerActivity final : public Activity {
   void activateLabRow();
   void labModalBack();
   void labModalAdjust(int delta);
+  void applyLabSettings();
   void saveSleepRenderProfile();
   void menuAction(int action);
   void openInfoPage();

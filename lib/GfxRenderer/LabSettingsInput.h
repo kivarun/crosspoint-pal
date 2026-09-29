@@ -48,4 +48,14 @@ inline Action actionFor(const Button button, const bool press, const bool releas
   return Action::None;
 }
 
+// Confirm-activation routing for the Image settings page rows (pure policy).
+// Every editable value row AND the explicit Apply row share the one
+// viewer-Apply route; the dedicated sleep row is the only save-profile route;
+// anything out of range activates nothing. Mutually exclusive by construction.
+enum class RowAction : uint8_t { None = 0, ApplyViewer, SaveSleepProfile };
+inline RowAction confirmActionForRow(const int row, const int paramCount) {
+  if (row < 0 || row > paramCount + 1) return RowAction::None;
+  return row == paramCount + 1 ? RowAction::SaveSleepProfile : RowAction::ApplyViewer;
+}
+
 }  // namespace labSettingsInput

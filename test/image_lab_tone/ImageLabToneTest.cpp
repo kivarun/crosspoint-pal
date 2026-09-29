@@ -153,6 +153,22 @@ TEST(ImageLabSettingsInput, NoEventMeansNoAction) {
   }
 }
 
+TEST(ImageLabSettingsInput, ConfirmRoutesSettingsRows) {
+  using labSettingsInput::confirmActionForRow;
+  using labSettingsInput::RowAction;
+  // Every editable value row AND the explicit Apply row share one route:
+  // apply the draft to the viewer (Confirm applies without navigating down).
+  for (int row = 0; row <= 4; ++row) {
+    EXPECT_EQ(confirmActionForRow(row, 4), RowAction::ApplyViewer) << "row=" << row;
+  }
+  // The dedicated sleep row is the ONLY save-profile route — not viewer Apply.
+  EXPECT_EQ(confirmActionForRow(5, 4), RowAction::SaveSleepProfile);
+  // Out-of-range rows activate nothing; routes are mutually exclusive by
+  // construction (an enum return can carry only one action).
+  EXPECT_EQ(confirmActionForRow(-1, 4), RowAction::None);
+  EXPECT_EQ(confirmActionForRow(6, 4), RowAction::None);
+}
+
 // ---- Sleep render profile (data/config type + shared normalization) ----
 
 TEST(ImageLabSleepProfile, DefaultsArePristineRendering) {
