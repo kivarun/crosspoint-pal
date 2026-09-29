@@ -2,6 +2,8 @@
 
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "components/OptionPopup.h"
 
@@ -13,6 +15,11 @@
 // Image Lab (experiment/x4-image-lab): runtime BMP display parameter tuning.
 // Diagnostic firmware only — settings live in RAM for the duration of the
 // activity; no persistence, no production settings subsystem.
+//
+// Modal model (a stack of owned surfaces over the image):
+//   Image -> [context menu -> settings dialog / info dialog / delete confirm]
+// labTone holds the ACTIVE session-global tone settings; settingsDraft holds
+// staged values while the settings dialog is open (committed only by Apply).
 enum class LabParam : uint8_t { Brightness = 0, Gamma = 1, Contrast = 2, Quantizer = 3, Count = 4 };
 
 // Which surface owns the buttons right now. Modal surfaces are drawn over the
@@ -46,21 +53,36 @@ class BmpViewerActivity final : public Activity {
   void loop() override;
 
  private:
+  // Centered modal dialog frame drawn from font/theme metrics (no screen-relative
+  // magic coordinates): opaque body, theme border, centered title.
+  struct LabDialogLayout {
+    int x = 0, y = 0, w = 0, h = 0;
+    int textX = 0, textY = 0;  // content origin below the title
+    int valueColX = 0;         // second column origin (0 = single column)
+    int lineH = 0;
+    int rowH = 0;
+  };
+  LabDialogLayout drawLabDialogFrame(const char* title, int colW, int labelColW, int rowCount);
+
   void loadSiblingImages();
   void doSetSleepCover();
   bool canSetSleepCover() const;
   bool renderPng();
   void renderBmp(bool showPopup);
+  bool rebuildBwFramebuffer();
   void drawLabIndicator(LabPass pass);
   void drawLabIndicatorText(int x, int y);
-  void drawLabSettingsPanel();
+  void drawLabSettingsDialog();
+  void drawInfoDialog();
   void openContextMenu();
-  void menuAction(int choice);
+  void menuAction(int action);
+  void openLabSettings();
+  void applyLabSettings();
   void openInfo();
   void openDeleteConfirm();
   void performDelete();
-  void labAdjust(int delta);
-  void labMoveSelection(int delta);
+  void labAdjustDraft(int delta);
+  void labMoveSettingsRow(int delta);
   void handleLabSettingsInput();
 
   std::string filePath;
@@ -71,9 +93,11 @@ class BmpViewerActivity final : public Activity {
   // Image Lab state (RAM-only, survives image navigation within the session)
   LabScreen labScreen = LabScreen::Viewer;
   LabParam labSelected = LabParam::Brightness;
-  ToneLut labTone{};
-  bool debugHudEnabled = true;  // lab HUD visible on entry (research workflow), toggle from the menu
-  std::vector<std::string> infoLines;  // filled by openInfo()
+  ToneLut labTone{};        // ACTIVE session-wide settings (consumed by the decoder)
+  ToneLut settingsDraft{};  // staged values while Image Settings is open
+  int labSettingsRow = 0;   // 0..3 = parameter rows, 4 = Apply
+  bool debugHudEnabled = true;  // lab HUD visible on entry, toggle from the menu
+  std::vector<std::pair<std::string, std::string>> infoRows;  // filled by openInfo()
 
   // Context-menu option rows and their action codes, built by openContextMenu()
   // (Show debug info is BMP-only; Set sleep cover appears only when canSetSleepCover()).
@@ -81,7 +105,7 @@ class BmpViewerActivity final : public Activity {
   int menuActionCount = 0;
 
   // Existing CrossPoint modal surfaces (shared menu abstraction, no parallel mechanism)
-  OptionPopup menuPopup;      // Image settings / Info / Delete
+  OptionPopup menuPopup;      // Image settings / Info / Show debug info / Set sleep cover / Delete
   OptionPopup confirmPopup;   // delete confirmation (Cancel / Confirm)
 };
 
