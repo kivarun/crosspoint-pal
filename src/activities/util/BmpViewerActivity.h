@@ -70,6 +70,7 @@ class BmpViewerActivity final : public Activity {
   int buildLabPageItems();
   int labPageRowCount() const;
   void handleLabModalInput();
+  void handleLabSettingsAxesInput();
   void activateLabRow();
   void labModalBack();
   void labModalAdjust(int delta);

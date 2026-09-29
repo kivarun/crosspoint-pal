@@ -10,6 +10,8 @@
 
 #include "components/UiAppHelpers.h"
 
+#include <LabSettingsInput.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -223,10 +225,25 @@ void BmpViewerActivity::renderLabModal() {
   props.labelText.font = fui::GfxRendererTarget::FONT_BODY;
   props.valueText.font = fui::GfxRendererTarget::FONT_BODY;
   fui::list(frame, fui::Rect{static_cast<int16_t>(labModalRect.x + border), static_cast<int16_t>(labModalRect.y + border),
-                        static_cast<int16_t>(labModalRect.width - border * 2),
-                        static_cast<int16_t>(labModalRect.height - border * 2)},
+                             static_cast<int16_t>(labModalRect.width - border * 2),
+                             static_cast<int16_t>(labModalRect.height - border * 2)},
             props);
   labInteractions.publish();
+
+  // Button hints reflect the REAL page semantics: 1D pages use the standard
+  // Back/Select/Up/Down labels; the 2-axis settings page shows Back | Apply
+  // (when the Apply row is selected) or Select | - | + — never a hint that
+  // Left/Right list rows.
+  if (labScreen == LabScreen::ImageSettings) {
+    const auto hint = mappedInput.mapLabels(tr(STR_BACK), labModalRow == static_cast<int>(LabParam::Count)
+                                                               ? tr(STR_APPLY)
+                                                               : tr(STR_SELECT),
+                                            "-", "+");
+    GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4);
+  } else {
+    const auto hint = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+    GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4);
+  }
 }
 
 void BmpViewerActivity::repaintLabModal() {
@@ -475,8 +492,19 @@ void BmpViewerActivity::performDelete() {  const std::string dirPath = FsHelpers
 
 void BmpViewerActivity::handleLabModalInput() {
   // The lab modal owns ALL input while labScreen != Viewer: navigation moves
-  // the page row, Confirm activates it, Left/Right step values (settings
-  // page), Back leaves the page. No viewer action ever runs underneath.
+  // the page row, Confirm activates it, Back leaves the page. No viewer action
+  // ever runs underneath.
+  // Per-page input policy: Image settings is a 2-AXIS page (Up/Down choose the
+  // row, Left/Right modify the value) and therefore uses the explicit logical
+  // buttons — NOT the merged NavNext/NavPrevious list navigation, whose
+  // Down||Right / Up||Left merge would make one front Left/Right event match
+  // both branches. The 1D pages (menu / info / delete confirm) keep the
+  // standard merged list navigation.
+  if (labScreen == LabScreen::ImageSettings) {
+    handleLabSettingsAxesInput();
+    return;
+  }
+
   const int rows = labPageRowCount();
   if (rows <= 0) return;
 
@@ -494,12 +522,54 @@ void BmpViewerActivity::handleLabModalInput() {
     activateLabRow();
     return;
   }
-  if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
-    labModalAdjust(-1);
+  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    labModalBack();
     return;
   }
-  if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
-    labModalAdjust(1);
+}
+
+void BmpViewerActivity::handleLabSettingsAxesInput() {
+  // Image settings: explicit axes. Side Up/Down = vertical row selection;
+  // front Left/Right = horizontal value stepping; Confirm/Back on release.
+  // Dispatch is mutually exclusive (one event -> one branch -> return), so a
+  // single event can never produce both a selection move and a value change.
+  const auto dispatch = [&](const MappedInputManager::Button logical,
+                            const labSettingsInput::Button axis) {
+    return labSettingsInput::actionFor(axis, mappedInput.wasPressed(logical), mappedInput.wasReleased(logical));
+  };
+
+  switch (dispatch(MappedInputManager::Button::Up, labSettingsInput::Button::Up)) {
+    case labSettingsInput::Action::RowUp:
+      labModalRow = (labModalRow - 1 + labPageRowCount()) % labPageRowCount();
+      repaintLabModal();  // modal-only repaint; the image is never re-rendered
+      return;
+    default:
+      break;
+  }
+  switch (dispatch(MappedInputManager::Button::Down, labSettingsInput::Button::Down)) {
+    case labSettingsInput::Action::RowDown:
+      labModalRow = (labModalRow + 1) % labPageRowCount();
+      repaintLabModal();
+      return;
+    default:
+      break;
+  }
+  switch (dispatch(MappedInputManager::Button::Left, labSettingsInput::Button::Left)) {
+    case labSettingsInput::Action::ValueDown:
+      labModalAdjust(-1);  // staged draft only; no image render until Apply
+      return;
+    default:
+      break;
+  }
+  switch (dispatch(MappedInputManager::Button::Right, labSettingsInput::Button::Right)) {
+    case labSettingsInput::Action::ValueUp:
+      labModalAdjust(1);
+      return;
+    default:
+      break;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    activateLabRow();
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {

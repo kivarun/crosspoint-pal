@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "lib/GfxRenderer/BitmapHelpers.h"
+#include "lib/GfxRenderer/LabSettingsInput.h"
 #include "lib/GfxRenderer/ToneLut.h"
 
 namespace {
@@ -109,4 +110,53 @@ TEST(ImageLabTone, SettingsStepClampsAtRangeBounds) {
   EXPECT_EQ(labStepClamped(130, 1, LAB_GAMMA_MIN, LAB_GAMMA_MAX), 130);
   EXPECT_EQ(labStepClamped(80, -1, LAB_CONTRAST_MIN, LAB_CONTRAST_MAX), 80);
   EXPECT_EQ(labStepClamped(100, 1, LAB_CONTRAST_MIN, LAB_CONTRAST_MAX), 105);
+}
+
+namespace {
+using labSettingsInput::Action;
+using labSettingsInput::Button;
+
+Action event(const Button b, const bool press, const bool release) {
+  return labSettingsInput::actionFor(b, press, release);
+}
+}  // namespace
+
+// The Image settings page is 2-axis: one button event -> exactly ONE action.
+// Vertical axis (row selection): side Up/Down ONLY. Horizontal axis (value
+// stepping): front Left/Right ONLY. No merged NavNext/NavPrevious semantics.
+TEST(ImageLabSettingsInput, VerticalAxisOnlyMovesRows) {
+  EXPECT_EQ(event(Button::Up, true, false), Action::RowUp);
+  EXPECT_EQ(event(Button::Down, true, false), Action::RowDown);
+  // Release edges of the vertical keys are NOT actions (no double-fire).
+  EXPECT_EQ(event(Button::Up, false, true), Action::None);
+  EXPECT_EQ(event(Button::Down, false, true), Action::None);
+}
+
+TEST(ImageLabSettingsInput, HorizontalAxisOnlyStepsValues) {
+  EXPECT_EQ(event(Button::Left, true, false), Action::ValueDown);
+  EXPECT_EQ(event(Button::Right, true, false), Action::ValueUp);
+  EXPECT_EQ(event(Button::Left, false, true), Action::None);
+  EXPECT_EQ(event(Button::Right, false, true), Action::None);
+}
+
+TEST(ImageLabSettingsInput, ActionButtonsOnReleaseOnly) {
+  EXPECT_EQ(event(Button::Confirm, false, true), Action::Activate);
+  EXPECT_EQ(event(Button::Back, false, true), Action::Back);
+  EXPECT_EQ(event(Button::Confirm, true, false), Action::None);
+  EXPECT_EQ(event(Button::Back, true, false), Action::None);
+}
+
+TEST(ImageLabSettingsInput, NoEventMeansNoAction) {
+  for (int b = 0; b <= 6; ++b) {
+    EXPECT_EQ(event(static_cast<Button>(b), false, false), Action::None);
+  }
+}
+
+TEST(ImageLabSettingsInput, PressWinsOverSimultaneousReleaseWindow) {
+  // A button observed with both edges in one dispatch window still maps to a
+  // single action (the press edge) for the directional axes.
+  EXPECT_EQ(event(Button::Left, true, true), Action::ValueDown);
+  // Confirm/Back act on release only; a physically ambiguous press+release
+  // window maps to no action (the next release event re-fires normally).
+  EXPECT_EQ(event(Button::Confirm, true, true), Action::None);
 }
