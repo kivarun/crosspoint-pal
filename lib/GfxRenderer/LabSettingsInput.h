@@ -58,4 +58,16 @@ inline RowAction confirmActionForRow(const int row, const int paramCount) {
   return row == paramCount + 1 ? RowAction::SaveSleepProfile : RowAction::ApplyViewer;
 }
 
+// DeleteConfirm page contract (pure): labModalRow indexes ACTIONS. The page
+// shows informational rows first (title header, Name label, up to two wrapped
+// filename lines — never selectable), then Cancel (action 0) and Delete
+// (action 1). Maps a visual row index to its action index, or -1 for
+// informational rows. The renderer builds exactly this order; host tests pin
+// the destructive-action invariant (what is visibly focused == what Confirm
+// will execute).
+inline int deleteConfirmActionOfVisualRow(const int visualRow, const int nameLineCount) {
+  const int action = visualRow - (2 + nameLineCount);  // title + Name label + lines
+  return (action == 0 || action == 1) ? action : -1;
+}
+
 }  // namespace labSettingsInput

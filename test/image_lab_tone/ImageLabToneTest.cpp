@@ -169,6 +169,22 @@ TEST(ImageLabSettingsInput, ConfirmRoutesSettingsRows) {
   EXPECT_EQ(confirmActionForRow(6, 4), RowAction::None);
 }
 
+TEST(ImageLabSettingsInput, DeleteConfirmActionMapping) {
+  using labSettingsInput::deleteConfirmActionOfVisualRow;
+  // For a 1- or 2-line wrapped filename: every informational row (title,
+  // Name label, filename lines) is NEVER selectable, and the two action rows
+  // map identity to labModalRow — labModalRow 0 = Cancel, 1 = Delete. This
+  // pins the destructive-action invariant: what is visibly focused is exactly
+  // what Confirm executes (no "visible Cancel + actual Delete" regression).
+  for (int nameLineCount = 1; nameLineCount <= 2; ++nameLineCount) {
+    for (int row = 0; row < 2 + nameLineCount; ++row) {
+      EXPECT_EQ(deleteConfirmActionOfVisualRow(row, nameLineCount), -1) << "row=" << row;
+    }
+    EXPECT_EQ(deleteConfirmActionOfVisualRow(2 + nameLineCount, nameLineCount), 0);  // Cancel
+    EXPECT_EQ(deleteConfirmActionOfVisualRow(3 + nameLineCount, nameLineCount), 1);  // Delete
+  }
+}
+
 // ---- Sleep render profile (data/config type + shared normalization) ----
 
 TEST(ImageLabSleepProfile, DefaultsArePristineRendering) {

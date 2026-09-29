@@ -255,16 +255,18 @@ void BmpViewerActivity::repaintLabModal() {
 int BmpViewerActivity::buildLabPageItems() {
   int count = 0;
   menuActionCount = 0;
-  // Adds the page title as a non-selectable section header row, then rows;
-  // rows get the focus state at the current selection. For the menu page the
-  // dynamic row order is recorded into menuActions[].
-  const auto add = [&](const char* label, const char* value, const bool header = false) {
+  int selectableIndex = 0;  // labModalRow indexes ACTIONS, not visual rows
+  // Adds a row; headers and informational rows (selectable=false) never take
+  // focus — the focused visual row is the labModalRow-th SELECTABLE row, so
+  // what is visibly focused is always what Confirm will execute.
+  const auto add = [&](const char* label, const char* value, const bool header = false,
+                       const bool selectable = true) {
     auto& item = labItems[count++];
     item = fui::ListItem{};
     item.label = label;
     item.value = value;
     item.isHeader = header;
-    if (!header && labModalRow == count - 2) item.state = fui::StateFocused;
+    if (!header && selectable && labModalRow == selectableIndex++) item.state = fui::StateFocused;
   };
 
   switch (labScreen) {
@@ -315,12 +317,19 @@ int BmpViewerActivity::buildLabPageItems() {
       }
       break;
 
-    case LabScreen::DeleteConfirm:
+    case LabScreen::DeleteConfirm: {
+      // Page order mirrors the pure contract (deleteConfirmActionOfVisualRow):
+      // title header + Name label + wrapped filename lines are informational
+      // (never selectable, never focused); Cancel = action 0, Delete = action 1.
       add(tr(STR_DELETE), nullptr, true);
-      add(tr(STR_NAME), labHeadline.c_str());
+      add(tr(STR_NAME), nullptr, false, false);
+      for (const auto& line : labNameLines) {
+        add(line.c_str(), nullptr, false, false);
+      }
       add(tr(STR_CANCEL), nullptr);
       add(tr(STR_DELETE), nullptr);
       break;
+    }
 
     default:
       break;
@@ -385,6 +394,17 @@ void BmpViewerActivity::menuAction(int action) {
       break;
     case LAB_ACT_DELETE:
       labHeadline = baseNameOf(filePath);
+      // Full-width wrapped filename lines (existing measured primitive: ≤2
+      // lines, UTF-8-safe split for spaceless names, ellipsis on overflow).
+      // Filled once per page entry, reused by repaints.
+      labNameLines.clear();
+      {
+        const auto& metrics = UITheme::getInstance().getMetrics();
+        const int sidePad = 8;  // list()'s raw sidePadding default
+        const int rowW =
+            labModalRect.width - metrics.popupFrameThickness * 2 - sidePad * 2;
+        labNameLines = renderer.wrappedText(uiScaleSpec().bodyFontId, labHeadline.c_str(), rowW, 2);
+      }
       labScreen = LabScreen::DeleteConfirm;
       labModalRow = 0;  // default on Cancel
       repaintLabModal();

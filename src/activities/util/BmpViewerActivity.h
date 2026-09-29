@@ -103,6 +103,7 @@ class BmpViewerActivity final : public Activity {
   freeink::ui::ListItem labItems[LAB_MAX_ROWS] = {};
   char labValueScratch[4][24] = {};  // settings page value strings
   std::string labHeadline;           // delete page filename scratch
+  std::vector<std::string> labNameLines;  // delete page: wrapped full-width filename lines (filled at page entry)
   mutable freeink::ui::InteractionBuffer<LAB_INTERACTION_CAPACITY> labInteractions;
 };
 
