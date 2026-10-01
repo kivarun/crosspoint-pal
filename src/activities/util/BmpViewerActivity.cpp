@@ -934,25 +934,31 @@ void BmpViewerActivity::saveSleepProfile() {
   openModalPage(ViewerPage::Options);
 }
 
-void BmpViewerActivity::renderCurrentImage(const bool showLoadingPopup) {
+void BmpViewerActivity::renderCurrentImage(const bool showLoadingPopup, const bool showViewerChrome) {
   if (isPng) {
     // PNG decodes through the PNG converter path and never enters renderBmp().
     const auto pageHeight = renderer.getScreenHeight();
-    Rect popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
-    GUI.fillPopupProgress(renderer, popupRect, 20);  // Initial 20% progress
+    if (showLoadingPopup) {
+      const Rect popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+      GUI.fillPopupProgress(renderer, popupRect, 20);  // Initial 20% progress
+    }
     renderer.clearScreen();
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_OPTIONS), "", "");
     if (renderPng()) {
-      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+      if (showViewerChrome) {
+        GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+      }
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     } else {
       renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_FILE_OPEN_FAILED));
-      GUI.drawButtonHints(renderer, labels.btn1, "", "", "");
+      if (showViewerChrome) {
+        GUI.drawButtonHints(renderer, labels.btn1, "", "", "");
+      }
       renderer.displayBuffer(HalDisplay::HALF_REFRESH);
     }
     return;
   }
-  renderBmp(showLoadingPopup);
+  renderBmp(showLoadingPopup, showViewerChrome);
 }
 
 void BmpViewerActivity::onEnter() {
@@ -1002,11 +1008,11 @@ void BmpViewerActivity::advanceSlideshowFrame() {
     return;
   }
 
-  renderCurrentImage(true);
+  renderCurrentImage(/*showLoadingPopup=*/false, /*showViewerChrome=*/false);
   slideshow::requestSleep(slideshow::SleepRequest::Continue);
 }
 
-void BmpViewerActivity::renderBmp(bool showPopup) {
+void BmpViewerActivity::renderBmp(const bool showPopup, const bool showViewerChrome) {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
   Rect popupRect;
@@ -1022,7 +1028,9 @@ void BmpViewerActivity::renderBmp(bool showPopup) {
     renderer.clearScreen();
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_FILE_OPEN_FAILED));
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
-    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    if (showViewerChrome) {
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    }
     renderer.displayBuffer(HalDisplay::HALF_REFRESH);
     return;
   }
@@ -1040,7 +1048,9 @@ void BmpViewerActivity::renderBmp(bool showPopup) {
     renderer.clearScreen();
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_INVALID_BMP_FILE));
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
-    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    if (showViewerChrome) {
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    }
     renderer.displayBuffer(HalDisplay::HALF_REFRESH);
     return;
   }
@@ -1067,8 +1077,12 @@ void BmpViewerActivity::renderBmp(bool showPopup) {
     return;
   }
 
-  // Draw UI hints on the base layer
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  // Draw UI hints on the base layer (viewer chrome only; slideshow frames
+  // render image-only, so no hint pixels survive in any grayscale plane or
+  // the reconstructed BW framebuffer).
+  if (showViewerChrome) {
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  }
   if (bitmap.hasGreyscale()) {
     const bool absolute = renderer.grayscaleCapabilities(HalDisplay::GrayscaleMode::Absolute).supported();
     if (absolute && !renderer.displayGrayscaleBase(HalDisplay::GrayscaleMode::Absolute)) return;
@@ -1086,7 +1100,9 @@ void BmpViewerActivity::renderBmp(bool showPopup) {
         planesReady = false;
         break;
       }
-      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+      if (showViewerChrome) {
+        GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+      }
       if (mode == GfxRenderer::GRAYSCALE_LSB) {
         renderer.copyGrayscaleLsbBuffers();
       } else {
@@ -1104,7 +1120,9 @@ void BmpViewerActivity::renderBmp(bool showPopup) {
       renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_FILE_OPEN_FAILED));
       planesReady = false;
     }
-    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    if (showViewerChrome) {
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    }
     renderer.cleanupGrayscaleWithFrameBuffer();
     if (!planesReady) renderer.displayBuffer(HalDisplay::HALF_REFRESH);
   } else {
@@ -1215,9 +1233,11 @@ void BmpViewerActivity::loop() {
         slideshowHoldStart = millis();
       } else if (millis() - slideshowHoldStart >= 2000) {
         slideshowHoldStart = 0;
-        // Frame A is already on the panel; no repaint. The main loop performs
-        // the sleep (and the one-time Start persistence).
+        // Frame A is already on the panel; repaint it ONCE image-only so the
+        // slideshow's first frame carries no viewer chrome, then let the main
+        // loop perform the sleep (and the one-time Start persistence).
         if (slideshow::arm(filePath)) {
+          renderCurrentImage(/*showLoadingPopup=*/false, /*showViewerChrome=*/false);
           slideshow::requestSleep(slideshow::SleepRequest::Start);
           return;
         }
