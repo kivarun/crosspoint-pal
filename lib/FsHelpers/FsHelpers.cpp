@@ -232,4 +232,10 @@ std::optional<int> imageIndexAfterRemove(const bool removeOk, const int oldCount
   return deletedIndex < newCount ? deletedIndex : newCount - 1;
 }
 
+std::optional<int> imageIndexAfterAdvance(const int currentIndex, const int count) {
+  if (count <= 0) return std::nullopt;                      // nothing to advance to
+  if (currentIndex < 0 || currentIndex >= count) return 0;  // absent/degenerate: restart from the first
+  return (currentIndex + 1) % count;
+}
+
 }  // namespace FsHelpers

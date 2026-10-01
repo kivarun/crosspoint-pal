@@ -19,6 +19,7 @@
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
 #include "fontIds.h"
+#include "util/ImageOnlyRenderer.h"
 #include "util/ImageSettingsInput.h"
 #include "util/SlideshowState.h"
 
@@ -34,24 +35,6 @@ constexpr size_t COPY_BUFFER_SIZE = 2048;
 // defaults (sidePadding unset = 8px); the ROW height is the resolved
 // modalRowH (see computeModalRect).
 constexpr int16_t MODAL_SIDE_PAD = 8;
-
-// Center the BMP/PNG image on the page (shared by the render paths).
-void fitImageOnScreen(const int imageW, const int imageH, const int pageW, const int pageH, int* x, int* y) {
-  if (imageW > pageW || imageH > pageH) {
-    const float ratio = static_cast<float>(imageW) / static_cast<float>(imageH);
-    const float screenRatio = static_cast<float>(pageW) / static_cast<float>(pageH);
-    if (ratio > screenRatio) {
-      *x = 0;
-      *y = std::round((static_cast<float>(pageH) - static_cast<float>(pageW) / ratio) / 2);
-    } else {
-      *x = std::round((static_cast<float>(pageW) - static_cast<float>(pageH) * ratio) / 2);
-      *y = 0;
-    }
-  } else {
-    *x = (pageW - imageW) / 2;
-    *y = (pageH - imageH) / 2;
-  }
-}
 
 std::string baseNameOf(const std::string& path) {
   const size_t lastSlash = path.find_last_of('/');
@@ -78,32 +61,9 @@ void BmpViewerActivity::loadSiblingImages() {
 
   if (filePath.empty()) return;
 
-  std::string dirPath = FsHelpers::extractFolderPath(filePath);
+  siblingImages = imageonly::listImageFiles(FsHelpers::extractFolderPath(filePath));
+
   const std::string fileName = baseNameOf(filePath);
-
-  auto dir = Storage.open(dirPath.c_str());
-  if (!dir || !dir.isDirectory()) {
-    if (dir) dir.close();
-    return;
-  }
-
-  char name[500];
-  for (auto file = dir.openNextFile(); file; file = dir.openNextFile()) {
-    if (!file.isDirectory()) {
-      file.getName(name, sizeof(name));
-      if (name[0] != '.') {
-        std::string fname(name);
-        if (FsHelpers::hasBmpExtension(fname) || FsHelpers::hasPngExtension(fname)) {
-          siblingImages.push_back(fname);
-        }
-      }
-    }
-    file.close();
-  }
-  dir.close();
-
-  FsHelpers::sortFileList(siblingImages);
-
   const auto image = std::find(siblingImages.begin(), siblingImages.end(), fileName);
   if (image != siblingImages.end()) {
     currentImageIndex = static_cast<int>(image - siblingImages.begin());
@@ -114,22 +74,6 @@ bool BmpViewerActivity::canSetSleepCover() const {
   return FsHelpers::hasBmpExtension(filePath) ||
          (SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::TRANSPARENT_CUSTOM &&
           FsHelpers::hasPngExtension(filePath));
-}
-
-bool BmpViewerActivity::renderPng() {
-  ImageDimensions dimensions;
-  if (!PngToFramebufferConverter::getDimensionsStatic(filePath, dimensions)) return false;
-  if (dimensions.width <= 0 || dimensions.height <= 0) return false;
-
-  const float scale = std::min(static_cast<float>(renderer.getScreenWidth()) / dimensions.width,
-                               static_cast<float>(renderer.getScreenHeight()) / dimensions.height);
-  const int width = std::min(renderer.getScreenWidth(), static_cast<int>(dimensions.width * std::min(scale, 1.0f)));
-  const int height = std::min(renderer.getScreenHeight(), static_cast<int>(dimensions.height * std::min(scale, 1.0f)));
-  RenderConfig config{(renderer.getScreenWidth() - width) / 2, (renderer.getScreenHeight() - height) / 2, width,
-                      height};
-
-  PngToFramebufferConverter converter;
-  return converter.decodeToFramebuffer(filePath, renderer, config);
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,9 +946,10 @@ void BmpViewerActivity::saveSleepProfile() {
   openModalPage(ViewerPage::Options);
 }
 
-void BmpViewerActivity::renderCurrentImage(const bool showLoadingPopup, const bool showViewerChrome) {
+void BmpViewerActivity::renderCurrentImage(const bool showLoadingPopup) {
   if (isPng) {
-    // PNG decodes through the PNG converter path and never enters renderBmp().
+    // PNG decodes through the shared PNG converter path and never enters
+    // renderBmp().
     const auto pageHeight = renderer.getScreenHeight();
     if (showLoadingPopup) {
       const Rect popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
@@ -1012,21 +957,17 @@ void BmpViewerActivity::renderCurrentImage(const bool showLoadingPopup, const bo
     }
     renderer.clearScreen();
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_OPTIONS), "", "");
-    if (renderPng()) {
-      if (showViewerChrome) {
-        GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-      }
+    if (imageonly::renderPngToFramebuffer(renderer, filePath)) {
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     } else {
       renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_FILE_OPEN_FAILED));
-      if (showViewerChrome) {
-        GUI.drawButtonHints(renderer, labels.btn1, "", "", "");
-      }
+      GUI.drawButtonHints(renderer, labels.btn1, "", "", "");
       renderer.displayBuffer(HalDisplay::HALF_REFRESH);
     }
     return;
   }
-  renderBmp(showLoadingPopup, showViewerChrome);
+  renderBmp(showLoadingPopup);
 }
 
 void BmpViewerActivity::onEnter() {
@@ -1056,15 +997,18 @@ void BmpViewerActivity::onEnter() {
 }
 
 void BmpViewerActivity::advanceSlideshowFrame() {
-  // Wrap-advance: the next image after the retained one; a retained image
-  // missing from the scan advances from the start of the list.
-  const std::string fileName = baseNameOf(filePath);
-  const auto image = std::find(siblingImages.begin(), siblingImages.end(), fileName);
-  currentImageIndex =
-      image != siblingImages.end() ? static_cast<int>((image - siblingImages.begin() + 1) % siblingImages.size()) : 0;
-  std::string dirPath = FsHelpers::extractFolderPath(filePath);
-  if (!dirPath.empty() && dirPath.back() != '/') dirPath += "/";
-  filePath = dirPath + siblingImages[currentImageIndex];
+  // Wrap-advance: the next image after the retained one inside its directory;
+  // a retained image missing from the scan advances from the start of the
+  // list. Nothing usable means the slideshow ends, fail closed.
+  const std::string next = imageonly::nextImageAfter(filePath);
+  if (next.empty()) {
+    slideshow::clearRetainedState();
+    // Display was initialized seamless and still holds the last slideshow
+    // frame — clean refresh so Home's first paint replaces it.
+    activityManager.goHome(HomeMenuItem::NONE, /*cleanInitialRefresh=*/true);
+    return;
+  }
+  filePath = next;
   isPng = FsHelpers::hasPngExtension(filePath);
 
   // Re-arm the retained state with the frame being rendered BEFORE sleeping
@@ -1076,11 +1020,11 @@ void BmpViewerActivity::advanceSlideshowFrame() {
     return;
   }
 
-  renderCurrentImage(/*showLoadingPopup=*/false, /*showViewerChrome=*/false);
+  renderImageOnlyFrame();
   slideshow::requestSleep(slideshow::SleepRequest::Continue);
 }
 
-void BmpViewerActivity::renderBmp(const bool showPopup, const bool showViewerChrome) {
+void BmpViewerActivity::renderBmp(const bool showPopup) {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
   Rect popupRect;
@@ -1096,9 +1040,7 @@ void BmpViewerActivity::renderBmp(const bool showPopup, const bool showViewerChr
     renderer.clearScreen();
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_FILE_OPEN_FAILED));
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
-    if (showViewerChrome) {
-      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-    }
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer(HalDisplay::HALF_REFRESH);
     return;
   }
@@ -1116,15 +1058,13 @@ void BmpViewerActivity::renderBmp(const bool showPopup, const bool showViewerChr
     renderer.clearScreen();
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_INVALID_BMP_FILE));
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
-    if (showViewerChrome) {
-      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-    }
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer(HalDisplay::HALF_REFRESH);
     return;
   }
 
   int x, y;
-  fitImageOnScreen(bitmap.getWidth(), bitmap.getHeight(), pageWidth, pageHeight, &x, &y);
+  imageonly::fitOnScreen(bitmap.getWidth(), bitmap.getHeight(), pageWidth, pageHeight, &x, &y);
 
   // 4. Prepare Rendering
   bool hasPrevious = (siblingImages.size() > 1 && currentImageIndex > 0);
@@ -1145,12 +1085,8 @@ void BmpViewerActivity::renderBmp(const bool showPopup, const bool showViewerChr
     return;
   }
 
-  // Draw UI hints on the base layer (viewer chrome only; slideshow frames
-  // render image-only, so no hint pixels survive in any grayscale plane or
-  // the reconstructed BW framebuffer).
-  if (showViewerChrome) {
-    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-  }
+  // Draw UI hints on the base layer (viewer chrome).
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   if (bitmap.hasGreyscale()) {
     const bool absolute = renderer.grayscaleCapabilities(HalDisplay::GrayscaleMode::Absolute).supported();
     if (absolute && !renderer.displayGrayscaleBase(HalDisplay::GrayscaleMode::Absolute)) return;
@@ -1168,9 +1104,7 @@ void BmpViewerActivity::renderBmp(const bool showPopup, const bool showViewerChr
         planesReady = false;
         break;
       }
-      if (showViewerChrome) {
-        GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-      }
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
       if (mode == GfxRenderer::GRAYSCALE_LSB) {
         renderer.copyGrayscaleLsbBuffers();
       } else {
@@ -1188,14 +1122,18 @@ void BmpViewerActivity::renderBmp(const bool showPopup, const bool showViewerChr
       renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_FILE_OPEN_FAILED));
       planesReady = false;
     }
-    if (showViewerChrome) {
-      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-    }
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.cleanupGrayscaleWithFrameBuffer();
     if (!planesReady) renderer.displayBuffer(HalDisplay::HALF_REFRESH);
   } else {
     renderer.displayBuffer(HalDisplay::FAST_REFRESH);
   }
+}
+
+bool BmpViewerActivity::renderImageOnlyFrame() {
+  // Slideshow frames render through the shared image-only seam: the current
+  // file, the session's active tone, no chrome, no popup, no error text.
+  return imageonly::renderImageFile(renderer, filePath, activeTone);
 }
 
 void BmpViewerActivity::onExit() {
@@ -1305,7 +1243,7 @@ void BmpViewerActivity::loop() {
         // slideshow's first frame carries no viewer chrome, then let the main
         // loop perform the sleep (and the one-time Start persistence).
         if (slideshow::arm(filePath)) {
-          renderCurrentImage(/*showLoadingPopup=*/false, /*showViewerChrome=*/false);
+          renderImageOnlyFrame();
           slideshow::requestSleep(slideshow::SleepRequest::Start);
           return;
         }

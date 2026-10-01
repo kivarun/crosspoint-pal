@@ -107,4 +107,25 @@ TEST(ImageIndexAfterRemove, FailedRemoveAbortsBeforeStateChange) {
   EXPECT_FALSE(FsHelpers::imageIndexAfterRemove(false, 1, 0).has_value());
 }
 
+// Slideshow wrap-advance contract (imageIndexAfterAdvance): the next index in
+// a cyclic list, restart-from-first for a missing current file, nullopt when
+// there are no frames at all.
+TEST(ImageIndexAfterAdvance, WalksForwardAndWraps) {
+  EXPECT_EQ(FsHelpers::imageIndexAfterAdvance(0, 5), 1);
+  EXPECT_EQ(FsHelpers::imageIndexAfterAdvance(3, 5), 4);
+  EXPECT_EQ(FsHelpers::imageIndexAfterAdvance(4, 5), 0);  // wrap at the end
+  EXPECT_EQ(FsHelpers::imageIndexAfterAdvance(0, 1), 0);  // single image wraps to itself
+}
+
+TEST(ImageIndexAfterAdvance, MissingCurrentRestartsFromFirst) {
+  EXPECT_EQ(FsHelpers::imageIndexAfterAdvance(-1, 5), 0);
+  EXPECT_EQ(FsHelpers::imageIndexAfterAdvance(5, 5), 0);
+  EXPECT_EQ(FsHelpers::imageIndexAfterAdvance(99, 5), 0);
+}
+
+TEST(ImageIndexAfterAdvance, EmptyListAdvancesNothing) {
+  EXPECT_FALSE(FsHelpers::imageIndexAfterAdvance(0, 0).has_value());
+  EXPECT_FALSE(FsHelpers::imageIndexAfterAdvance(0, -1).has_value());
+}
+
 }  // namespace

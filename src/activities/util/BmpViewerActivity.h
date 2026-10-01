@@ -63,18 +63,15 @@ class BmpViewerActivity final : public Activity {
   void loadSiblingImages();
   void doSetSleepCover();
   bool canSetSleepCover() const;
-  bool renderPng();
-  // Image render entry points. showViewerChrome gates the viewer-only chrome
-  // (button hints incl. previous/next markers): the normal Image Viewer keeps
-  // its chrome (default true); slideshow frames render image-only (false).
-  // showLoadingPopup gates the decode loading popup for BOTH pipelines.
-  void renderBmp(bool showPopup, bool showViewerChrome = true);
-  // Canonical format-aware render entry for the CURRENT image: PNG goes
-  // through the PNG converter/presentation path and never enters renderBmp();
-  // BMP renders through the grayscale pipeline. showLoadingPopup gates the
-  // loading popup for both pipelines; showViewerChrome gates the viewer-only
-  // button hints (slideshow frames render image-only).
-  void renderCurrentImage(bool showLoadingPopup, bool showViewerChrome = true);
+  // Canonical format-aware render entry for the CURRENT image (viewer chrome
+  // path): PNG goes through the PNG converter/presentation path and never
+  // enters renderBmp(); BMP renders through the grayscale pipeline.
+  // showLoadingPopup gates the decode loading popup for both pipelines.
+  void renderCurrentImage(bool showLoadingPopup);
+  void renderBmp(bool showPopup);
+  // Image-only render of the current file through the shared imageonly seam
+  // (no chrome, no popup): the slideshow frames' canonical path.
+  bool renderImageOnlyFrame();
   void openOptionsMenu();
   void computeModalRect();
   void renderModal();

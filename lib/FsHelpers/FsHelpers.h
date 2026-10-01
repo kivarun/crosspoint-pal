@@ -103,4 +103,11 @@ void sanitizePathComponentForFat32(const char* input, char* output, size_t maxLe
  */
 std::optional<int> imageIndexAfterRemove(bool removeOk, int oldCount, int deletedIndex);
 
+/**
+ * Slideshow wrap-advance plan (pure): the next index after currentIndex in a
+ * count-sized cyclic list; a currentIndex not present in the list (< 0 or out
+ * of range) restarts from 0. nullopt when count <= 0 (no frames at all).
+ */
+std::optional<int> imageIndexAfterAdvance(int currentIndex, int count);
+
 }  // namespace FsHelpers
