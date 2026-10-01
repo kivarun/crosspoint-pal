@@ -2,6 +2,7 @@
 
 #include <ToneLut.h>
 
+#include <cstddef>
 #include <cstdint>
 
 // Slideshow policy (pure, host-tested): the persisted interval cadence, the
@@ -72,6 +73,17 @@ inline const ToneProfile& renderProfileFor(const Mode mode, const ToneProfile& v
 // contract (it stays the legacy single-custom-image).
 inline constexpr const char* SLEEP_SLIDESHOW_DIR = "/.sleep";
 inline constexpr const char* SLEEP_SLIDESHOW_DIR_LEGACY = "/sleep";
+
+// Sleep-screen picker/value-list sizing (pure): a board advertises exactly
+// the modes it supports — the full SLEEP_SCREEN_MODE table on a
+// sleep-slideshow-capable board, the table minus the appended SLIDESHOW entry
+// elsewhere. Sizing the label list this way keeps the picker free of a
+// phantom entry AND makes CrossPointSettings::fromJson()'s enum clamp
+// (enumLabels().size()) fold a stored SLIDESHOW value back to the default on
+// incapable boards — without renumbering anything.
+inline constexpr size_t advertisedSleepScreenValueCount(const bool sleepSlideshowCapable, const size_t fullCount) {
+  return sleepSlideshowCapable ? fullCount : fullCount - 1;
+}
 
 // Image Viewer Slideshow page rows (pure policy): row 0 = Start slideshow;
 // row 1 = Interval (the shared persisted cadence — Left/Right and the touch

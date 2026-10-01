@@ -72,7 +72,8 @@ class BmpViewerActivity final : public Activity {
   void renderCurrentImage(bool showLoadingPopup);
   void renderBmp(bool showPopup);
   // Image-only render of the current file through the shared imageonly seam
-  // (no chrome, no popup): the slideshow frames' canonical path.
+  // with the sleep-image presentation policy (no chrome, no popup, no BW
+  // framebuffer rebuild): the slideshow frames' canonical path.
   bool renderImageOnlyFrame();
   void openOptionsMenu();
   void computeModalRect();

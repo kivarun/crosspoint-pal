@@ -35,7 +35,7 @@ TEST(SlideshowInterval, StepsCycleInBothDirections) {
   EXPECT_EQ(slideshow::intervalIndexStepped(0, 1), 1);
   EXPECT_EQ(slideshow::intervalIndexStepped(1, 1), 2);
   EXPECT_EQ(slideshow::intervalIndexStepped(2, 1), 3);
-  EXPECT_EQ(slideshow::intervalIndexStepped(3, 1), 0);  // wrap forward
+  EXPECT_EQ(slideshow::intervalIndexStepped(3, 1), 0);   // wrap forward
   EXPECT_EQ(slideshow::intervalIndexStepped(0, -1), 3);  // wrap backward
   EXPECT_EQ(slideshow::intervalIndexStepped(1, -1), 0);
   // A corrupt stored value steps from the clamped default.
@@ -46,6 +46,19 @@ TEST(SlideshowInterval, StepsCycleInBothDirections) {
 // historical value so existing numeric values never move.
 TEST(SleepScreenModeCompatibility, SlideshowValueIsAppendOnly) {
   EXPECT_EQ(slideshow::SLEEP_SCREEN_SLIDESHOW_VALUE, 8);
+}
+
+// Picker/value-list sizing (SlideshowPolicy seam): a capable board advertises
+// the full table (Slideshow at its persisted value 8); an incapable board's
+// value list stops BEFORE the appended entry — no phantom picker item, and
+// the enum clamp in CrossPointSettings::fromJson() (enumLabels().size())
+// folds a stored value 8 back to the default.
+TEST(SleepScreenModeCompatibility, AdvertisedCountTracksCapability) {
+  EXPECT_EQ(slideshow::advertisedSleepScreenValueCount(true, 9), 9);
+  EXPECT_EQ(slideshow::advertisedSleepScreenValueCount(false, 9), 8);
+  // The device contract: the full table is SLIDESHOW + the 8 historical
+  // values (CrossPointSettings.h static_asserts SLIDESHOW == 8).
+  EXPECT_EQ(9, static_cast<size_t>(slideshow::SLEEP_SCREEN_SLIDESHOW_VALUE) + 1);
 }
 
 // Fixed production storage contract: canonical /.sleep first, legacy /sleep
@@ -69,8 +82,6 @@ TEST(SlideshowRenderProfilePolicy, ModeSelectsProfile) {
 }
 
 // The retained mode discriminates the two use cases.
-TEST(SlideshowMode, ValuesAreDistinct) {
-  EXPECT_NE(slideshow::Mode::Viewer, slideshow::Mode::Sleep);
-}
+TEST(SlideshowMode, ValuesAreDistinct) { EXPECT_NE(slideshow::Mode::Viewer, slideshow::Mode::Sleep); }
 
 }  // namespace

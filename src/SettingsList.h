@@ -211,7 +211,14 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   static const std::vector<SettingInfo> baseList = [] {
     // Enum settings are persisted as numeric values. Assign these labels by enum
     // value so a reordered menu or enum cannot silently swap their behavior.
-    std::vector<StrId> sleepScreenValues(CrossPointSettings::SLEEP_SCREEN_MODE_COUNT);
+    // The sleep-screen picker lists exactly the ADVERTISED modes: on boards
+    // without the sleep-slideshow capability the value list stops before the
+    // appended SLIDESHOW entry — no phantom picker item, and the generic enum
+    // clamp in CrossPointSettings::fromJson() (enumLabels().size()) folds a
+    // stored value 8 back to the default (SlideshowPolicy sizing seam).
+    const size_t sleepScreenValueCount = slideshow::advertisedSleepScreenValueCount(
+        slideshow::sleepSlideshowSupported(), static_cast<size_t>(CrossPointSettings::SLEEP_SCREEN_MODE_COUNT));
+    std::vector<StrId> sleepScreenValues(sleepScreenValueCount);
     sleepScreenValues[CrossPointSettings::DARK] = StrId::STR_DARK;
     sleepScreenValues[CrossPointSettings::LIGHT] = StrId::STR_LIGHT;
     sleepScreenValues[CrossPointSettings::CUSTOM] = StrId::STR_CUSTOM;
@@ -220,9 +227,6 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     sleepScreenValues[CrossPointSettings::BLANK] = StrId::STR_NONE_OPT;
     sleepScreenValues[CrossPointSettings::QUICK_RESUME] = StrId::STR_QUICK_RESUME;
     sleepScreenValues[CrossPointSettings::TRANSPARENT_CUSTOM] = StrId::STR_TRANSPARENT;
-    // Slideshow is advertised only on boards proven to keep battery power
-    // through deep sleep (timer wake); a settings file carrying the value from
-    // another board clamps back to the default on load.
     if (slideshow::sleepSlideshowSupported()) {
       sleepScreenValues[CrossPointSettings::SLIDESHOW] = StrId::STR_SLIDESHOW;
     }

@@ -39,11 +39,9 @@ namespace {
 // budget): one shared buffer for the custom screens and both slideshow paths.
 ToneLut sleepTone;
 
-HalDisplay::GrayscaleMode sleepGrayscaleMode(const GfxRenderer& renderer) {
-  return renderer.grayscaleCapabilities(HalDisplay::GrayscaleMode::Direct).supported()
-             ? HalDisplay::GrayscaleMode::Direct
-             : HalDisplay::GrayscaleMode::Absolute;
-}
+// The sleep-image grayscale mode policy is shared with the slideshow
+// presentation (imageonly seam).
+using imageonly::sleepGrayscaleMode;
 
 // Kept separate from /sleep.bmp and /.sleep so alpha-overlay art does not mix with full-screen wallpapers.
 constexpr char TRANSPARENT_SLEEP_ROOT_BMP[] = "/sleep-overlay.bmp";
@@ -677,59 +675,18 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap, const bool pre
 
   LOG_DBG("SLP", "bitmap %d x %d, screen %d x %d", bitmap.getWidth(), bitmap.getHeight(), pageWidth, pageHeight);
   LOG_DBG("SLP", "drawing to %d x %d", x, y);
-  if (!preserveBackground) renderer.clearScreen();
 
+  // The presentation itself is the shared sleep-image policy (imageonly::
+  // drawSleepBitmap): draw pass + gray base/planes or the single-pass HALF
+  // transfer. Only the cover-specific bits stay here: the placement above and
+  // the cover filter's hasGreyscale downgrade + inverted step.
   const bool hasGreyscale =
       bitmap.hasGreyscale() && (preserveBackground || SETTINGS.sleepScreenCoverFilter ==
                                                           CrossPointSettings::SLEEP_SCREEN_COVER_FILTER::NO_FILTER);
-
-  if (!renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, cropX, cropY, preserveBackground)) {
-    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
-    return;
-  }
-
-  if (!preserveBackground &&
-      SETTINGS.sleepScreenCoverFilter == CrossPointSettings::SLEEP_SCREEN_COVER_FILTER::INVERTED_BLACK_AND_WHITE) {
-    renderer.invertScreen();
-  }
-
-  const bool absolute = hasGreyscale && renderer.grayscaleCapabilities(sleepGrayscaleMode(renderer)).supported();
-  if (absolute) {
-    if (!renderer.displayGrayscaleBase(sleepGrayscaleMode(renderer))) return;
-  } else if (hasGreyscale) {
-    // OEM grayscale pipeline base. Must stay HALF: the gray nudge LUT is
-    // calibrated against the pixel state the single-pass HALF waveform leaves
-    // behind. A FULL (GC) base parks pixels in a different charge state and
-    // the differential nudge then lands unevenly (blotchy noise in gray areas).
-    renderer.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
-  } else {
-    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
-  }
-
-  if (hasGreyscale) {
-    bool ready = true;
-    for (const auto plane : {GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB}) {
-      if (bitmap.rewindToData() != BmpReaderError::Ok) {
-        ready = false;
-        break;
-      }
-      if (!absolute || !preserveBackground) renderer.clearScreen(absolute ? 0xFF : 0x00);
-      renderer.setRenderMode(plane);
-      if (!renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, cropX, cropY, preserveBackground)) {
-        ready = false;
-        break;
-      }
-      if (plane == GfxRenderer::GRAYSCALE_LSB)
-        renderer.copyGrayscaleLsbBuffers();
-      else
-        renderer.copyGrayscaleMsbBuffers();
-    }
-    if (ready)
-      renderer.displayGrayBuffer();
-    else
-      LOG_ERR("SLP", "Incomplete grayscale image; keeping the current display");
-    renderer.setRenderMode(GfxRenderer::BW);
-  }
+  const bool invertAfterDraw =
+      !preserveBackground &&
+      SETTINGS.sleepScreenCoverFilter == CrossPointSettings::SLEEP_SCREEN_COVER_FILTER::INVERTED_BLACK_AND_WHITE;
+  imageonly::drawSleepBitmap(renderer, bitmap, hasGreyscale, x, y, cropX, cropY, preserveBackground, invertAfterDraw);
 }
 
 bool SleepActivity::renderSleepOverlayFile(HalFile& file, const char* pathForLog) const {

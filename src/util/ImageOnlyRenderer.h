@@ -1,5 +1,7 @@
 #pragma once
 
+#include <Bitmap.h>
+#include <HalDisplay.h>
 #include <ToneLut.h>
 
 #include <string>
@@ -8,30 +10,54 @@
 #include "GfxRenderer.h"
 #include "util/SlideshowPolicy.h"
 
-// Shared image-only rendering seam for the slideshow lifecycles (Image Viewer
-// slideshow and global sleep slideshow): ONE BMP/PNG file rendered on the
-// panel with an explicitly supplied tone LUT, no viewer chrome, no loading
-// popup, no text. The normal Image Viewer (button hints, popups) keeps its own
-// chrome path in BmpViewerActivity; both decode through the same Bitmap /
-// PngToFramebufferConverter primitives — this module adds no second decoder.
+// Shared slideshow rendering seam (Image Viewer slideshow and global sleep
+// slideshow): ONE BMP/PNG file rendered on the panel with an explicitly
+// supplied tone LUT, using the ESTABLISHED SLEEP-IMAGE PRESENTATION POLICY —
+// no chrome, no popup, no text, and NO post-presentation BW framebuffer
+// rebuild (the interactive viewer's differential-UI preparation stays in
+// BmpViewerActivity; the next content arrives with the next wake/frame
+// paint). Both decode through the same Bitmap / PngToFramebufferConverter
+// primitives — this module adds no second decoder and no third grayscale
+// policy: the presentation below is the verbatim sleep-image contract of
+// SleepActivity::renderBitmapSleepScreen().
 namespace imageonly {
 
 // Center an image on the page (shared by every BMP render path).
 void fitOnScreen(int imageW, int imageH, int pageW, int pageH, int* x, int* y);
 
+// Grayscale transfer mode the sleep-image presentation policy uses: Direct
+// when the panel supports it, Absolute otherwise.
+HalDisplay::GrayscaleMode sleepGrayscaleMode(const GfxRenderer& renderer);
+
 // Decode a PNG into the framebuffer at its centered fit — no clear, no
 // display, no text. False when the file cannot be read/decoded.
 bool renderPngToFramebuffer(GfxRenderer& renderer, const std::string& path);
 
-// Render ONE BMP/PNG file image-only with the supplied tone LUT: centered/fit,
-// full grayscale pipeline for gray sources, cleared framebuffer, no button
-// hints, no loading popup, no error text. False when the file cannot be
-// opened, parsed or drawn — the framebuffer content is then undefined and the
-// caller owns the fallback (fail closed: no timer, repaint, or exit).
+// The sleep-image presentation policy, extracted verbatim from
+// SleepActivity::renderBitmapSleepScreen(): one drawBitmap pass into the
+// cleared framebuffer, then the panel transfer the sleep pipeline uses —
+// grayscale sources get the gray base + LSB/MSB plane transfers + the gray
+// buffer (absolute vs non-absolute panel behavior preserved; the plane loop
+// honors preserveBackground so overlay mode keeps its background bits), BW
+// sources get the single-pass HALF_REFRESH transfer. hasGreyscale is the
+// CALLER's source classification (the cover filter may deliberately downgrade
+// a gray bitmap to BW). invertAfterDraw reproduces the cover screens'
+// inverted-filter step between the draw and the base transfer. Deliberately
+// NO BW framebuffer rebuild and no chrome afterward. Returns false when the
+// bitmap could not be drawn (the HALF_REFRESH fallback transfer ran, as the
+// sleep policy does).
+bool drawSleepBitmap(GfxRenderer& renderer, const Bitmap& bitmap, const bool hasGreyscale, const int x, const int y,
+                     const float cropX, const float cropY, const bool preserveBackground, const bool invertAfterDraw);
+
+// Render ONE BMP/PNG file as a slideshow frame with the supplied tone LUT:
+// centered/fit, the sleep-image presentation policy above, no button hints,
+// no loading popup, no error text, no BW framebuffer rebuild. False when the
+// file cannot be opened, parsed or drawn — the caller owns the fallback
+// (fail closed: no timer, repaint, or exit).
 bool renderImageFile(GfxRenderer& renderer, const std::string& path, const ToneLut& tone);
 
 // Deterministic sorted list of the BMP/PNG files directly inside dirPath
-// (viewer slideshow semantics: hidden files skipped, natural sort). Empty when
+// (slideshow frame semantics: hidden files skipped, natural sort). Empty when
 // the directory cannot be opened.
 std::vector<std::string> listImageFiles(const std::string& dirPath);
 

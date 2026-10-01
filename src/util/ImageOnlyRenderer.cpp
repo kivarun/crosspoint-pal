@@ -53,13 +53,81 @@ bool renderPngToFramebuffer(GfxRenderer& renderer, const std::string& path) {
   return converter.decodeToFramebuffer(path, renderer, config);
 }
 
+HalDisplay::GrayscaleMode sleepGrayscaleMode(const GfxRenderer& renderer) {
+  return renderer.grayscaleCapabilities(HalDisplay::GrayscaleMode::Direct).supported()
+             ? HalDisplay::GrayscaleMode::Direct
+             : HalDisplay::GrayscaleMode::Absolute;
+}
+
+bool drawSleepBitmap(GfxRenderer& renderer, const Bitmap& bitmap, const bool hasGreyscale, const int x, const int y,
+                     const float cropX, const float cropY, const bool preserveBackground, const bool invertAfterDraw) {
+  // Verbatim sleep-image presentation contract of
+  // SleepActivity::renderBitmapSleepScreen() (minus the cover placement): one
+  // drawBitmap pass, then the gray base + plane transfers + gray buffer for
+  // grayscale sources, or the single-pass HALF_REFRESH transfer for BW
+  // sources. No BW framebuffer rebuild — the next content arrives with the
+  // next wake/frame paint. hasGreyscale is the CALLER's source classification
+  // (the cover filter may deliberately downgrade a gray bitmap to BW).
+  const auto pageWidth = renderer.getScreenWidth();
+  const auto pageHeight = renderer.getScreenHeight();
+
+  if (!preserveBackground) renderer.clearScreen();
+
+  if (!renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, cropX, cropY, preserveBackground)) {
+    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    return false;
+  }
+
+  if (invertAfterDraw) renderer.invertScreen();
+
+  const bool absolute = hasGreyscale && renderer.grayscaleCapabilities(sleepGrayscaleMode(renderer)).supported();
+  if (absolute) {
+    if (!renderer.displayGrayscaleBase(sleepGrayscaleMode(renderer))) return true;
+  } else if (hasGreyscale) {
+    // OEM grayscale pipeline base. Must stay HALF: the gray nudge LUT is
+    // calibrated against the pixel state the single-pass HALF waveform leaves
+    // behind. A FULL (GC) base parks pixels in a different charge state and
+    // the differential nudge then lands unevenly (blotchy noise in gray areas).
+    renderer.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
+  } else {
+    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    return true;
+  }
+
+  bool ready = true;
+  for (const auto plane : {GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB}) {
+    if (bitmap.rewindToData() != BmpReaderError::Ok) {
+      ready = false;
+      break;
+    }
+    if (!absolute || !preserveBackground) renderer.clearScreen(absolute ? 0xFF : 0x00);
+    renderer.setRenderMode(plane);
+    if (!renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, cropX, cropY, preserveBackground)) {
+      ready = false;
+      break;
+    }
+    if (plane == GfxRenderer::GRAYSCALE_LSB)
+      renderer.copyGrayscaleLsbBuffers();
+    else
+      renderer.copyGrayscaleMsbBuffers();
+  }
+  if (ready)
+    renderer.displayGrayBuffer();
+  else
+    LOG_ERR("IMG", "Incomplete grayscale image; keeping the current display");
+  renderer.setRenderMode(GfxRenderer::BW);
+  return true;
+}
+
 bool renderImageFile(GfxRenderer& renderer, const std::string& path, const ToneLut& tone) {
   if (FsHelpers::hasPngExtension(path)) {
-    // PNG: clear + centered decode + clean refresh; the converter has no tone
-    // hook, so the supplied LUT does not apply here.
+    // PNG: clear + centered decode + the sleep/slideshow clean refresh (the
+    // single-pass HALF_REFRESH sleep contract, not the interactive viewer's
+    // FAST_REFRESH). The converter has no tone hook, so the supplied LUT does
+    // not apply here.
     renderer.clearScreen();
     if (!renderPngToFramebuffer(renderer, path)) return false;
-    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
     return true;
   }
 
@@ -68,9 +136,9 @@ bool renderImageFile(GfxRenderer& renderer, const std::string& path, const ToneL
 
   // Always attach the tone: quantizer selection is active even when the LUT
   // itself is at identity (enabled=false). The gray-capable gate matches the
-  // viewer's decode (SSD1677 panels render absolute gray).
+  // sleep-image decode (SSD1677 panels, sleep grayscale mode).
   Bitmap bitmap(file, true,
-                renderer.grayscaleCapabilities(HalDisplay::GrayscaleMode::Absolute).supported() &&
+                renderer.grayscaleCapabilities(sleepGrayscaleMode(renderer)).supported() &&
                     display.getController() == HalDisplay::Controller::SSD1677,
                 &tone);
 
@@ -81,51 +149,10 @@ bool renderImageFile(GfxRenderer& renderer, const std::string& path, const ToneL
   int x, y;
   fitOnScreen(bitmap.getWidth(), bitmap.getHeight(), pageWidth, pageHeight, &x, &y);
 
-  renderer.clearScreen();
-  if (!renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, 0, 0)) return false;
-
-  if (!bitmap.hasGreyscale()) {
-    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
-    return true;
-  }
-
-  // Grayscale pipeline (viewer image-only path): base transfer, then the two
-  // planes, then the gray buffer, then the BW framebuffer rebuild for
-  // subsequent differential updates.
-  const bool absolute = renderer.grayscaleCapabilities(HalDisplay::GrayscaleMode::Absolute).supported();
-  if (absolute && !renderer.displayGrayscaleBase(HalDisplay::GrayscaleMode::Absolute)) return false;
-  if (!absolute) renderer.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
-  bool planesReady = true;
-  for (const auto mode : {GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB}) {
-    if (bitmap.rewindToData() != BmpReaderError::Ok) {
-      LOG_ERR("IMG", "Failed to rewind bitmap for grayscale rendering");
-      planesReady = false;
-      break;
-    }
-    renderer.clearScreen(absolute ? 0xFF : 0x00);
-    renderer.setRenderMode(mode);
-    if (!renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, 0, 0)) {
-      planesReady = false;
-      break;
-    }
-    if (mode == GfxRenderer::GRAYSCALE_LSB) {
-      renderer.copyGrayscaleLsbBuffers();
-    } else {
-      renderer.copyGrayscaleMsbBuffers();
-    }
-  }
-  if (planesReady) renderer.displayGrayBuffer();
-
-  // Rebuild the BW framebuffer so the next paint starts from the shown image.
-  renderer.setRenderMode(GfxRenderer::BW);
-  renderer.clearScreen();
-  if (bitmap.rewindToData() != BmpReaderError::Ok || !renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, 0, 0)) {
-    LOG_ERR("IMG", "Failed to rewind bitmap to restore the BW framebuffer");
-    planesReady = false;
-  }
-  renderer.cleanupGrayscaleWithFrameBuffer();
-  if (!planesReady) renderer.displayBuffer(HalDisplay::HALF_REFRESH);
-  return true;
+  // Slideshow presentation: the sleep-image policy (draw + panel transfer,
+  // no chrome, no BW framebuffer rebuild).
+  return drawSleepBitmap(renderer, bitmap, bitmap.hasGreyscale(), x, y,
+                         /*cropX=*/0.0f, /*cropY=*/0.0f, /*preserveBackground=*/false, /*invertAfterDraw=*/false);
 }
 
 std::vector<std::string> listImageFiles(const std::string& dirPath) {

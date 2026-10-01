@@ -1335,8 +1335,10 @@ void BmpViewerActivity::renderBmp(const bool showPopup) {
 }
 
 bool BmpViewerActivity::renderImageOnlyFrame() {
-  // Slideshow frames render through the shared image-only seam: the current
-  // file, the session's active tone, no chrome, no popup, no error text.
+  // Slideshow frames render through the shared slideshow seam with the
+  // SLEEP-IMAGE presentation policy (imageonly::renderImageFile): the current
+  // file, the session's active tone, no chrome, no popup, no error text, no
+  // BW framebuffer rebuild.
   return imageonly::renderImageFile(renderer, filePath, activeTone);
 }
 

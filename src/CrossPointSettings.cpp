@@ -15,6 +15,7 @@
 #include "SettingsList.h"
 #include "fontIds.h"
 #include "util/ParagraphIndentMigration.h"
+#include "util/SlideshowCapability.h"
 
 namespace {
 
@@ -220,6 +221,15 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
     const uint8_t legacyValue =
         clamp(doc["sleepTimeout"] | (uint8_t)SLEEP_10_MIN, SLEEP_TIMEOUT_COUNT, (uint8_t)SLEEP_10_MIN);
     sleepTimeoutMinutes = sleepTimeoutEnumToMinutes(legacyValue);
+    needsResave = true;
+  }
+
+  // A settings file written on a sleep-slideshow-capable board may carry
+  // sleepScreen = SLIDESHOW; on a board without the capability the generic
+  // enum clamp above folded it back to the default — resave so the file
+  // stops carrying the unadvertised value.
+  if (!slideshow::sleepSlideshowSupported() && doc["sleepScreen"].is<uint8_t>() &&
+      doc["sleepScreen"].as<uint8_t>() >= static_cast<uint8_t>(SLIDESHOW)) {
     needsResave = true;
   }
   // Front button remap — managed by RemapFrontButtons sub-activity, not in SettingsList.
