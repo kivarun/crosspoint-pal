@@ -15,6 +15,7 @@
 #include <HalTiltSensor.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <SPI.h>
 #include <TrustedTime.h>
 #include <VectorFontSupport.h>
@@ -35,12 +36,14 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
+#include "activities/util/BmpViewerActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
 #include "util/PluginEvents.h"
 #include "util/ScreenshotUtil.h"
+#include "util/SlideshowState.h"
 #include "util/Timezones.h"
 
 #if CROSSPOINT_VECTOR_FONTS
@@ -333,6 +336,12 @@ static void deliverSleepPluginEvents() {
   }
 }
 
+// Shared final hardware shutdown for EVERY deep-sleep entry: the one owner of
+// the WiFi/tilt/display/storage tear-down and the HAL sleep handover. No power
+// lock inside — each caller holds its own HalPowerManager::Lock. timerWakeUs is
+// PR1's optional timer wake (0 = power button only).
+void enterHardwareDeepSleep(uint64_t timerWakeUs = 0);
+
 // Enter deep sleep mode
 void enterDeepSleep(bool fromTimeout = false) {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
@@ -366,8 +375,15 @@ void enterDeepSleep(bool fromTimeout = false) {
     Storage.remove(SLEEP_FRAME_FILE);
   }
 
-  // Tear down WiFi so the modem power domain isn't held alive across deep sleep.
-  // Wake from deep sleep is effectively a chip reset, so no state needs to survive.
+  // The shared tail tears down WiFi (modem power domain must not survive deep
+  // sleep), parks the peripherals and hands over to the HAL sleep sequence.
+  enterHardwareDeepSleep();
+}
+
+// Slideshow lifecycle proof: hard-coded interval for the first proof.
+constexpr uint64_t SLIDESHOW_INTERVAL_US = 60ULL * 1000 * 1000;
+
+void enterHardwareDeepSleep(uint64_t timerWakeUs) {
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
@@ -378,7 +394,7 @@ void enterDeepSleep(bool fromTimeout = false) {
   Storage.prepareForDeepSleep();
   LOG_DBG("MAIN", "Entering deep sleep");
 
-  powerManager.startDeepSleep(gpio);
+  powerManager.startDeepSleep(gpio, timerWakeUs);
 }
 
 void setupDisplayAndFonts(bool seamless = false) {
@@ -574,6 +590,29 @@ void setup() {
 
   LOG_DBG("MAIN", "Starting CrossPoint version " CROSSPOINT_VERSION);
 
+  // Slideshow lifecycle: only a genuine timer wake with valid retained state
+  // resumes it; every other boot cancels any armed slideshow (fail closed).
+  const bool slideshowTimerWake = wakeupReason == HalGPIO::WakeupReason::Timer && slideshow::hasValidRetainedState();
+  if (wakeupReason != HalGPIO::WakeupReason::Timer) {
+    slideshow::clearRetainedState();
+  }
+
+  // Managed slideshow resume: construct the viewer BEFORE display init so an
+  // allocation failure can fall back to an ordinary Timer boot and the
+  // seamless display decision can account for a successful construction. The
+  // constructor only stores refs/path and prepares tone state; it neither
+  // renders nor needs ActivityManager::begin().
+  std::unique_ptr<BmpViewerActivity> slideshowResumeActivity;
+  if (slideshowTimerWake) {
+    slideshowResumeActivity =
+        makeUniqueNoThrow<BmpViewerActivity>(renderer, mappedInputManager, slideshow::getRetainedPath(),
+                                             /*slideshowResume=*/true);
+    if (!slideshowResumeActivity) {
+      LOG_ERR("MAIN", "OOM: slideshow resume viewer");
+      slideshow::clearRetainedState();
+    }
+  }
+
   // Resolve the single boot-presentation decision. Skipping the splash also
   // skips the panel-clearing pass and the X3 initial-full-sync arming (see
   // HalDisplay::begin), so the first paint is FAST_REFRESH (~500ms) over the
@@ -586,7 +625,16 @@ void setup() {
   bool allowFastInitialReaderRefresh = false;
   bool needsWakeRefresh = false;
 
-  setupDisplayAndFonts(resume != BootResume::Splash);
+  setupDisplayAndFonts(resume != BootResume::Splash || slideshowResumeActivity != nullptr);
+
+  if (slideshowResumeActivity) {
+    // Managed slideshow resume: no splash, no Home routing. The viewer's
+    // onEnter() picks the next frame, re-arms the retained state and renders
+    // it through the canonical path; the main loop performs the sleep.
+    activityManager.replaceActivity(std::move(slideshowResumeActivity));
+    allowSleepAt = millis() + 2000;
+    return;
+  }
 
   switch (resume) {
     case BootResume::Silent:
@@ -739,6 +787,30 @@ void loop() {
       activityManager.preventAutoSleep()) {
     lastActivityTime = millis();         // Reset inactivity timer
     powerManager.setPowerSaving(false);  // Restore normal CPU frequency on user activity
+  }
+
+  // Slideshow lifecycle: the single consumer of the RAM-only sleep request.
+  // Start performs the one-time persistence cleanup (the APP_STATE a normal
+  // sleep-from-viewer would produce); Continue performs none — no SD writes
+  // between frames. Both sleep through the shared tail with the proof-interval
+  // timer armed alongside the power button.
+  const auto slideshowRequest = slideshow::takeSleepRequest();
+  if (slideshowRequest != slideshow::SleepRequest::None) {
+    if (slideshowRequest == slideshow::SleepRequest::Start) {
+      // A later power-button exit must route Home (never a stale book) and
+      // wake splashless with the last frame visible.
+      APP_STATE.lastSleepFromReader = false;
+      APP_STATE.showBootScreen = false;
+      APP_STATE.saveToFile();
+      if (Storage.exists(SLEEP_FRAME_FILE)) {
+        // A stale Quick Resume frame must not restore over the slideshow
+        // frame on a later power-button exit.
+        Storage.remove(SLEEP_FRAME_FILE);
+      }
+    }
+    HalPowerManager::Lock powerLock;
+    enterHardwareDeepSleep(SLIDESHOW_INTERVAL_US);
+    return;
   }
 
   // Let wake continue as soon as its hold has been verified. The release can

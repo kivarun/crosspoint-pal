@@ -33,7 +33,12 @@ enum class ViewerAction : uint8_t { Settings = 0, Info, SleepCover, Delete };
 
 class BmpViewerActivity final : public Activity {
  public:
-  BmpViewerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string filePath);
+  // slideshowResume: managed slideshow-continuation mode (Timer wake): onEnter
+  // advances to the next image with wrap, re-arms the retained slideshow
+  // state, renders it through the canonical path and requests the frame sleep.
+  // Normal viewer behavior is unchanged when false.
+  BmpViewerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string filePath,
+                    bool slideshowResume = false);
 
   void onEnter() override;
   void onExit() override;
@@ -94,11 +99,20 @@ class BmpViewerActivity final : public Activity {
   void menuAction(ViewerAction action);
   void openInfoPage();
   void performDelete();
+  // Slideshow continuation: wrap-advance to the next image relative to
+  // filePath, re-arm the retained state with the new path, render it through
+  // the canonical path and request the frame sleep. Routes Home (and clears
+  // the slideshow state) when there is nothing left to show or re-arming
+  // fails.
+  void advanceSlideshowFrame();
 
   std::string filePath;
   std::vector<std::string> siblingImages;
   int currentImageIndex = -1;
   bool isPng = false;
+  // Slideshow-continuation mode (managed Timer-wake resume); never set on a
+  // normally opened viewer.
+  bool slideshowResume = false;
 
   // ONE modal cadence, resolved from the DeviceContext (modalRowHeight
   // policy): every modal page's visual row height AND touch minimum AND the
