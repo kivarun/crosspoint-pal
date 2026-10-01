@@ -10,12 +10,18 @@
 
 namespace {
 
+using slideshow::Mode;
 using slideshow::SLIDESHOW_MAGIC;
 using slideshow::SlideshowState;
 
-SlideshowState armed(const std::string& path) {
+// The proof firmware's pre-v2 state: path-only layout, magic 0x534C4944, no
+// mode byte. Its states must never validate under the v2 schema.
+constexpr uint32_t PROOF_FIRMWARE_MAGIC = 0x534C4944;
+
+SlideshowState armed(const std::string& path, const Mode mode = Mode::Viewer) {
   SlideshowState state{};
   state.magic = SLIDESHOW_MAGIC;
+  state.mode = static_cast<uint8_t>(mode);
   path.copy(state.path, sizeof(state.path) - 1);
   state.path[std::min(path.size(), sizeof(state.path) - 1)] = '\0';
   return state;
@@ -23,9 +29,14 @@ SlideshowState armed(const std::string& path) {
 
 }  // namespace
 
-TEST(SlideshowStateValid, AcceptsArmedState) {
-  EXPECT_TRUE(slideshow::stateValid(armed("/Images/photo.bmp")));
-  EXPECT_TRUE(slideshow::stateValid(armed("/")));
+TEST(SlideshowStateValid, AcceptsArmedViewerState) {
+  EXPECT_TRUE(slideshow::stateValid(armed("/Images/photo.bmp", Mode::Viewer)));
+  EXPECT_TRUE(slideshow::stateValid(armed("/", Mode::Viewer)));
+}
+
+TEST(SlideshowStateValid, AcceptsArmedSleepState) {
+  EXPECT_TRUE(slideshow::stateValid(armed("/.sleep/frame.bmp", Mode::Sleep)));
+  EXPECT_TRUE(slideshow::stateValid(armed("/", Mode::Sleep)));
 }
 
 // RTC_NOINIT is garbage on a cold boot: a wrong magic fails closed.
@@ -34,6 +45,22 @@ TEST(SlideshowStateValid, RejectsWrongMagic) {
   state.magic = SLIDESHOW_MAGIC + 1;
   EXPECT_FALSE(slideshow::stateValid(state));
   state.magic = 0;
+  EXPECT_FALSE(slideshow::stateValid(state));
+}
+
+// Schema bump: a state written by the proof firmware (old magic, no mode
+// byte) can never validate under v2.
+TEST(SlideshowStateValid, RejectsProofFirmwareMagic) {
+  auto state = armed("/Images/photo.bmp");
+  state.magic = PROOF_FIRMWARE_MAGIC;
+  EXPECT_FALSE(slideshow::stateValid(state));
+}
+
+TEST(SlideshowStateValid, RejectsUnknownMode) {
+  auto state = armed("/Images/photo.bmp");
+  state.mode = 2;  // first value past Mode::Sleep
+  EXPECT_FALSE(slideshow::stateValid(state));
+  state.mode = 255;
   EXPECT_FALSE(slideshow::stateValid(state));
 }
 
@@ -77,7 +104,7 @@ TEST(SlideshowArmInput, CapacityAndShapePredicate) {
   EXPECT_FALSE(slideshow::armInputValid("Images/photo.bmp"));
 
   std::string maxPath("/");
-  maxPath.resize(sizeof(SlideshowState::path) - 1, 'a');  // 507 chars + NUL
+  maxPath.resize(sizeof(SlideshowState::path) - 1, 'a');  // 506 chars + NUL
   EXPECT_TRUE(slideshow::armInputValid(maxPath));
   maxPath.push_back('a');  // would not fit with its NUL
   EXPECT_FALSE(slideshow::armInputValid(maxPath));

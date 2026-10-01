@@ -72,6 +72,7 @@ add_subdirectory(slideshow_state)
 add_subdirectory(tone_lut)
 add_subdirectory(image_settings_input)
 add_subdirectory(modal_geometry)
+add_subdirectory(slideshow_interval)
 
 add_subdirectory(inflate_stream)
 add_subdirectory(fs_helpers)

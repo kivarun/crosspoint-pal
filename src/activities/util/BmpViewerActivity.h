@@ -19,24 +19,26 @@
 // draftProfile until Apply.
 //
 // Modal model: ONE modal surface over the image. viewerPage selects which PAGE
-// that surface shows (options / settings / info / delete confirm); page
-// transitions replace the page contents inside the same panel rect — a child
-// popup is never drawn on top of the parent menu. activeTone holds the ACTIVE
-// session-global tone settings (consumed by the decoder); draftProfile holds
-// staged values while the settings page is open (committed only by Apply).
+// that surface shows (options / settings / slideshow / info / delete confirm);
+// page transitions replace the page contents inside the same panel rect — a
+// child popup is never drawn on top of the parent menu. activeTone holds the
+// ACTIVE session-global tone settings (consumed by the decoder); draftProfile
+// holds staged values while the settings page is open (committed only by
+// Apply).
 enum class ToneParam : uint8_t { Brightness = 0, Gamma = 1, Contrast = 2, Quantizer = 3, Count = 4 };
 
-enum class ViewerPage : uint8_t { Viewer, Options, ImageSettings, ImageInfo, DeleteConfirm };
+enum class ViewerPage : uint8_t { Viewer, Options, ImageSettings, ImageInfo, DeleteConfirm, Slideshow };
 
 // Actions of the Options page rows (order built at page build).
-enum class ViewerAction : uint8_t { Settings = 0, Info, SleepCover, Delete };
+enum class ViewerAction : uint8_t { Settings = 0, Info, SleepCover, Delete, Slideshow };
 
 class BmpViewerActivity final : public Activity {
  public:
-  // slideshowResume: managed slideshow-continuation mode (Timer wake): onEnter
-  // advances to the next image with wrap, re-arms the retained slideshow
-  // state, renders it through the canonical path and requests the frame sleep.
-  // Normal viewer behavior is unchanged when false.
+  // slideshowResume: managed Viewer-mode slideshow continuation (Timer wake;
+  // only constructed for a Viewer-mode retained state): onEnter advances to
+  // the next image with wrap, re-arms the retained state, renders it through
+  // the canonical path and requests the frame sleep. Normal viewer behavior
+  // is unchanged when false.
   BmpViewerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string filePath,
                     bool slideshowResume = false);
 
@@ -85,6 +87,14 @@ class BmpViewerActivity final : public Activity {
   // the list cadence, settingRow for the action rows, stepperRow for the four
   // editable ToneParam rows); every component registers its own interactions.
   void buildSettingsPage(freeink::ui::Frame<MODAL_INTERACTION_CAPACITY>& frame, const freeink::ui::Rect& body);
+  // Slideshow page: the same architecture (title header + settingRow Start +
+  // a stepperRow for the shared persisted interval); no draft staging, the
+  // interval persists per step and the image is never re-rendered.
+  void buildSlideshowPage(freeink::ui::Frame<MODAL_INTERACTION_CAPACITY>& frame, const freeink::ui::Rect& body);
+  // Pixel extents of the Slideshow page's label/value columns measured from
+  // the localized strings — feeds the modal width sizing on touch targets.
+  void measureSlideshowExtents(const freeink::ui::DrawTarget& target, int16_t& maxLabelWidth,
+                               int16_t& maxValueWidth) const;
   // Pixel extents of the settings page's label/value columns measured from
   // the localized strings (widest row label, widest possible value) — the
   // single measurement owner for the fixed stepper columns and the modal
@@ -107,6 +117,15 @@ class BmpViewerActivity final : public Activity {
   void menuAction(ViewerAction action);
   void openInfoPage();
   void performDelete();
+  // Slideshow page actions: the interval step persists the shared cadence
+  // (modal-only repaint, the image is never re-rendered); the start arms the
+  // CURRENT image with slideshow::Mode::Viewer, repaints it image-only and
+  // requests the Viewer Start sleep.
+  void stepSlideshowInterval(int delta);
+  void startViewerSlideshow();
+  // Fail-closed exit from a broken viewer slideshow: cancel the retained
+  // state and route Home (clean refresh replaces the last frame).
+  void endViewerSlideshowToHome();
   // Slideshow continuation: wrap-advance to the next image relative to
   // filePath, re-arm the retained state with the new path, render it through
   // the canonical path and request the frame sleep. Routes Home (and clears

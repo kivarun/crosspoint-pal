@@ -2,10 +2,10 @@
 
 #include <Bitmap.h>
 #include <Epub/converters/PngToFramebufferConverter.h>
-#include <Logging.h>
 #include <FsHelpers.h>
 #include <HalDisplay.h>
 #include <HalStorage.h>
+#include <Logging.h>
 
 #include <algorithm>
 #include <cmath>
@@ -175,6 +175,18 @@ std::string nextImageAfter(const std::string& currentPath) {
   if (!path.empty() && path.back() != '/') path += '/';
   path += images[*next];
   return path;
+}
+
+std::string firstSleepSlideshowPath() {
+  for (const char* dir : {slideshow::SLEEP_SLIDESHOW_DIR, slideshow::SLEEP_SLIDESHOW_DIR_LEGACY}) {
+    const auto images = listImageFiles(dir);
+    if (images.empty()) continue;
+    std::string path = dir;
+    path += '/';
+    path += images.front();
+    return path;
+  }
+  return {};
 }
 
 }  // namespace imageonly

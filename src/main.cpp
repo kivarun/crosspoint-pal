@@ -35,6 +35,7 @@
 #include "WifiCredentialStore.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/boot_sleep/SleepActivity.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "activities/util/BmpViewerActivity.h"
 #include "components/UITheme.h"
@@ -43,6 +44,7 @@
 #include "util/ButtonNavigator.h"
 #include "util/PluginEvents.h"
 #include "util/ScreenshotUtil.h"
+#include "util/SlideshowCapability.h"
 #include "util/SlideshowState.h"
 #include "util/Timezones.h"
 
@@ -375,13 +377,17 @@ void enterDeepSleep(bool fromTimeout = false) {
     Storage.remove(SLEEP_FRAME_FILE);
   }
 
-  // The shared tail tears down WiFi (modem power domain must not survive deep
-  // sleep), parks the peripherals and hands over to the HAL sleep sequence.
-  enterHardwareDeepSleep();
+  // Sleep Screen = Slideshow: the sleep activity prepared (and armed) the
+  // slideshow frame during its render phase when the source was usable; a
+  // valid Sleep-mode state now arms the persisted interval timer. Anything
+  // else — a broken/empty slideshow source or another screen mode — sleeps
+  // the ordinary way with no timer.
+  const bool slideshowSleep = slideshow::sleepSlideshowSupported() &&
+                              SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::SLIDESHOW &&
+                              slideshow::hasValidRetainedState() &&
+                              slideshow::getRetainedMode() == slideshow::Mode::Sleep;
+  enterHardwareDeepSleep(slideshowSleep ? slideshow::intervalMicros(SETTINGS.slideshowInterval) : 0);
 }
-
-// Slideshow lifecycle proof: hard-coded interval for the first proof.
-constexpr uint64_t SLIDESHOW_INTERVAL_US = 60ULL * 1000 * 1000;
 
 void enterHardwareDeepSleep(uint64_t timerWakeUs) {
   if (WiFi.getMode() != WIFI_MODE_NULL) {
@@ -597,18 +603,26 @@ void setup() {
     slideshow::clearRetainedState();
   }
 
-  // Managed slideshow resume: construct the viewer BEFORE display init so an
+  // Managed slideshow resume: construct the activity BEFORE display init so an
   // allocation failure can fall back to an ordinary Timer boot and the
   // seamless display decision can account for a successful construction. The
-  // constructor only stores refs/path and prepares tone state; it neither
-  // renders nor needs ActivityManager::begin().
-  std::unique_ptr<BmpViewerActivity> slideshowResumeActivity;
+  // retained mode picks the continuation: Viewer re-opens the image viewer
+  // (Power exits Home, proven); Sleep continues the sleep-screen slideshow
+  // inside SleepActivity (Power wake stays the ordinary wake contract). The
+  // constructors only store refs/paths; neither renders nor needs
+  // ActivityManager::begin().
+  std::unique_ptr<Activity> slideshowResumeActivity;
   if (slideshowTimerWake) {
-    slideshowResumeActivity =
-        makeUniqueNoThrow<BmpViewerActivity>(renderer, mappedInputManager, slideshow::getRetainedPath(),
-                                             /*slideshowResume=*/true);
+    if (slideshow::getRetainedMode() == slideshow::Mode::Viewer) {
+      slideshowResumeActivity =
+          makeUniqueNoThrow<BmpViewerActivity>(renderer, mappedInputManager, slideshow::getRetainedPath(),
+                                               /*slideshowResume=*/true);
+    } else {
+      slideshowResumeActivity = makeUniqueNoThrow<SleepActivity>(renderer, mappedInputManager, /*fromTimeout=*/false,
+                                                                 /*slideshowContinue=*/true);
+    }
     if (!slideshowResumeActivity) {
-      LOG_ERR("MAIN", "OOM: slideshow resume viewer");
+      LOG_ERR("MAIN", "OOM: slideshow resume activity");
       slideshow::clearRetainedState();
     }
   }
@@ -628,7 +642,7 @@ void setup() {
   setupDisplayAndFonts(resume != BootResume::Splash || slideshowResumeActivity != nullptr);
 
   if (slideshowResumeActivity) {
-    // Managed slideshow resume: no splash, no Home routing. The viewer's
+    // Managed slideshow resume: no splash, no Home routing. The activity's
     // onEnter() picks the next frame, re-arms the retained state and renders
     // it through the canonical path; the main loop performs the sleep.
     activityManager.replaceActivity(std::move(slideshowResumeActivity));
@@ -792,8 +806,8 @@ void loop() {
   // Slideshow lifecycle: the single consumer of the RAM-only sleep request.
   // Start performs the one-time persistence cleanup (the APP_STATE a normal
   // sleep-from-viewer would produce); Continue performs none — no SD writes
-  // between frames. Both sleep through the shared tail with the proof-interval
-  // timer armed alongside the power button.
+  // between frames. Both sleep through the shared tail with the persisted
+  // slideshow interval armed alongside the power button.
   const auto slideshowRequest = slideshow::takeSleepRequest();
   if (slideshowRequest != slideshow::SleepRequest::None) {
     if (slideshowRequest == slideshow::SleepRequest::Start) {
@@ -809,7 +823,7 @@ void loop() {
       }
     }
     HalPowerManager::Lock powerLock;
-    enterHardwareDeepSleep(SLIDESHOW_INTERVAL_US);
+    enterHardwareDeepSleep(slideshow::intervalMicros(SETTINGS.slideshowInterval));
     return;
   }
 

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "GfxRenderer.h"
+#include "util/SlideshowPolicy.h"
 
 // Shared image-only rendering seam for the slideshow lifecycles (Image Viewer
 // slideshow and global sleep slideshow): ONE BMP/PNG file rendered on the
@@ -14,12 +15,6 @@
 // chrome path in BmpViewerActivity; both decode through the same Bitmap /
 // PngToFramebufferConverter primitives — this module adds no second decoder.
 namespace imageonly {
-
-// Fixed sleep-slideshow source contract (production increment 1): the
-// canonical directory is scanned first, the pre-rename legacy directory is the
-// fallback. No configurable directory yet.
-inline constexpr const char* SLEEP_SLIDESHOW_DIR = "/.sleep";
-inline constexpr const char* SLEEP_SLIDESHOW_DIR_LEGACY = "/sleep";
 
 // Center an image on the page (shared by every BMP render path).
 void fitOnScreen(int imageW, int imageH, int pageW, int pageH, int* x, int* y);
@@ -44,5 +39,10 @@ std::vector<std::string> listImageFiles(const std::string& dirPath);
 // end, restart from the first when the current file is missing from the scan.
 // "" when the directory holds no candidate images.
 std::string nextImageAfter(const std::string& currentPath);
+
+// First frame of the sleep-slideshow source under the fixed storage contract:
+// /.sleep scanned first, /sleep as the legacy fallback. "" when neither
+// directory offers a candidate image (the caller fails closed: no timer).
+std::string firstSleepSlideshowPath();
 
 }  // namespace imageonly

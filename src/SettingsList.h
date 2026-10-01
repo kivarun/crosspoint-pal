@@ -19,6 +19,7 @@
 #include "activities/settings/SettingsActivity.h"
 #include "components/UITheme.h"
 #include "util/DictionaryRegistry.h"
+#include "util/SlideshowCapability.h"
 
 // Build the font family setting dynamically. When registry is non-null, SD card fonts
 // are appended after the built-in fonts. Otherwise only built-in fonts are listed.
@@ -219,6 +220,12 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     sleepScreenValues[CrossPointSettings::BLANK] = StrId::STR_NONE_OPT;
     sleepScreenValues[CrossPointSettings::QUICK_RESUME] = StrId::STR_QUICK_RESUME;
     sleepScreenValues[CrossPointSettings::TRANSPARENT_CUSTOM] = StrId::STR_TRANSPARENT;
+    // Slideshow is advertised only on boards proven to keep battery power
+    // through deep sleep (timer wake); a settings file carrying the value from
+    // another board clamps back to the default on load.
+    if (slideshow::sleepSlideshowSupported()) {
+      sleepScreenValues[CrossPointSettings::SLIDESHOW] = StrId::STR_SLIDESHOW;
+    }
 
     std::vector<StrId> statusBarClockValues(CrossPointSettings::STATUS_BAR_CLOCK_MODE_COUNT);
     statusBarClockValues[CrossPointSettings::STATUS_BAR_CLOCK_HIDE] = StrId::STR_HIDE;
@@ -229,6 +236,14 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         // --- Display ---
         SettingInfo::Enum(StrId::STR_SLEEP_SCREEN, &CrossPointSettings::sleepScreen, std::move(sleepScreenValues),
                           "sleepScreen", StrId::STR_CAT_DISPLAY),
+        // Slideshow interval — the shared persisted cadence for the Image
+        // Viewer slideshow and Sleep Screen = Slideshow (slideshow::
+        // intervalMicros() is the only conversion). Always visible: the same
+        // interval drives the viewer's own slideshow.
+        SettingInfo::Enum(StrId::STR_SLIDESHOW_INTERVAL, &CrossPointSettings::slideshowInterval,
+                          {StrId::STR_SLIDESHOW_INTERVAL_1_MIN, StrId::STR_SLIDESHOW_INTERVAL_5_MIN,
+                           StrId::STR_SLIDESHOW_INTERVAL_10_MIN, StrId::STR_SLIDESHOW_INTERVAL_30_MIN},
+                          "slideshowInterval", StrId::STR_CAT_DISPLAY),
         SettingInfo::Enum(StrId::STR_SLEEP_COVER_MODE, &CrossPointSettings::sleepScreenCoverMode,
                           {StrId::STR_FIT, StrId::STR_CROP}, "sleepScreenCoverMode", StrId::STR_CAT_DISPLAY),
         SettingInfo::Enum(StrId::STR_SLEEP_COVER_FILTER, &CrossPointSettings::sleepScreenCoverFilter,

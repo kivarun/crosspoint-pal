@@ -29,8 +29,15 @@
 #include "fontIds.h"
 #include "images/Logo120.h"
 #include "images/MoonIcon.h"
+#include "util/ImageOnlyRenderer.h"
+#include "util/SlideshowCapability.h"
+#include "util/SlideshowState.h"
 
 namespace {
+
+// Sleep decode tone state (ToneLut is 264B, too big for the render task stack
+// budget): one shared buffer for the custom screens and both slideshow paths.
+ToneLut sleepTone;
 
 HalDisplay::GrayscaleMode sleepGrayscaleMode(const GfxRenderer& renderer) {
   return renderer.grayscaleCapabilities(HalDisplay::GrayscaleMode::Direct).supported()
@@ -504,6 +511,11 @@ void releaseSdFontCachesForDecode(const GfxRenderer& renderer) {
 void SleepActivity::onEnter() {
   Activity::onEnter();
 
+  // Managed timer-wake continuation of the sleep slideshow: display init was
+  // seamless and the panel still holds the last frame — no popup, no mode
+  // dispatch; advance and sleep again.
+  if (slideshowContinue) return continueSlideshow();
+
   const bool renderQuickResume =
       SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
       (fromTimeout &&
@@ -523,6 +535,16 @@ void SleepActivity::onEnter() {
   // per-render polarity resolution), so clear any inversion left over from a
   // night-mode reader render.
   display.setInverted(false);
+
+  if (SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::SLIDESHOW &&
+      slideshow::sleepSlideshowSupported()) {
+    // Full-bleed image-only frames: no entering-sleep popup, portrait panel
+    // orientation (the decode re-uses the same portrait render the other
+    // custom screens produce after their popup block).
+    renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+    releaseSdFontCachesForDecode(renderer);
+    return renderSlideshowSleepScreen();
+  }
 
   if (SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::TRANSPARENT_CUSTOM) {
     // Transparent mode retains the current framebuffer. Materialize any
@@ -570,9 +592,8 @@ void SleepActivity::onEnter() {
 void SleepActivity::renderCustomSleepScreen() const {
   // The persisted sleep render profile drives every custom BMP decode below
   // through the SAME ToneLut/Bitmap pipeline the viewer uses (default profile
-  // = no override = unchanged rendering). Static: ToneLut is 264B, too big for
-  // the render task stack budget; one shared buffer for both decode sites.
-  static ToneLut sleepTone;
+  // = no override = unchanged rendering). sleepTone is the file-scope shared
+  // buffer (see the anonymous namespace).
 
   // Look for sleep.bmp on the root of the sd card to determine if we should
   // render a custom sleep screen instead of the default.
@@ -889,4 +910,54 @@ void SleepActivity::renderLastScreenSleepScreen() const {
 void SleepActivity::renderBlankSleepScreen() const {
   renderer.clearScreen();
   renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+}
+
+void SleepActivity::renderSlideshowSleepScreen() const {
+  // Sleep Screen = Slideshow start: prepare the first frame during the normal
+  // sleep render phase. Fixed production storage contract: canonical /.sleep,
+  // legacy /sleep fallback — deterministic sorted image semantics (the same
+  // scan the viewer slideshow uses), NOT the /sleep.bmp single-image contract.
+  const std::string first = imageonly::firstSleepSlideshowPath();
+  if (first.empty()) {
+    // No usable slideshow source: ordinary default sleep screen and NO timer —
+    // an empty/broken source must never wake-loop.
+    LOG_DBG("SLP", "No slideshow source; ordinary sleep");
+    slideshow::clearRetainedState();
+    return renderDefaultSleepScreen();
+  }
+
+  sleepTone = toneLutFromProfile(SETTINGS.sleepRenderProfile);
+  buildToneLut(sleepTone);
+  if (!imageonly::renderImageFile(renderer, first, sleepTone) || !slideshow::arm(first, slideshow::Mode::Sleep)) {
+    // Undecodable frame or rejected arm: fail closed, no timer.
+    LOG_ERR("SLP", "Slideshow frame failed; ordinary sleep");
+    slideshow::clearRetainedState();
+    return renderDefaultSleepScreen();
+  }
+}
+
+void SleepActivity::continueSlideshow() {
+  // Managed timer-wake continuation: advance within the retained frame's
+  // directory, re-arm Sleep mode, render image-only with the sleep render
+  // profile and hand the frame sleep to the main loop. Nothing here touches
+  // the APP_STATE/settings stores — per-frame sleeps perform no SD writes.
+  const std::string next = imageonly::nextImageAfter(slideshow::getRetainedPath());
+  if (next.empty()) return endSlideshowToOrdinary();
+
+  sleepTone = toneLutFromProfile(SETTINGS.sleepRenderProfile);
+  buildToneLut(sleepTone);
+  if (!imageonly::renderImageFile(renderer, next, sleepTone) || !slideshow::arm(next, slideshow::Mode::Sleep)) {
+    return endSlideshowToOrdinary();
+  }
+  slideshow::requestSleep(slideshow::SleepRequest::Continue);
+}
+
+void SleepActivity::endSlideshowToOrdinary() {
+  // Fail closed: the sleep slideshow cannot continue — clear the retained
+  // state so no later timer can restart it, then route to the ordinary wake
+  // state. The panel still holds the last frame; a clean Home paint replaces
+  // it.
+  LOG_ERR("SLP", "Slideshow ended (broken source)");
+  slideshow::clearRetainedState();
+  activityManager.goHome(HomeMenuItem::NONE, /*cleanInitialRefresh=*/true);
 }

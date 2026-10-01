@@ -14,7 +14,7 @@ RTC_NOINIT_ATTR SlideshowState retainedState;
 // RAM/BSS only: the one-frame sleep handoff to the main loop.
 SleepRequest pendingSleepRequest = SleepRequest::None;
 
-bool arm(const std::string& path) {
+bool arm(const std::string& path, const Mode mode) {
   // Invalidate FIRST: a rejected arm must never leave a previous valid
   // retained state (contract: false => no valid state remains).
   clearRetainedState();
@@ -23,6 +23,7 @@ bool arm(const std::string& path) {
     return false;
   }
   // Magic written last: the state is only valid once fully written.
+  retainedState.mode = static_cast<uint8_t>(mode);
   memcpy(retainedState.path, path.c_str(), path.size() + 1);  // includes the NUL
   retainedState.magic = SLIDESHOW_MAGIC;
   return true;
@@ -31,6 +32,12 @@ bool arm(const std::string& path) {
 void clearRetainedState() { retainedState.magic = 0; }
 
 bool hasValidRetainedState() { return stateValid(retainedState); }
+
+Mode getRetainedMode() {
+  // Callers gate on hasValidRetainedState() first; an invalid state reads as
+  // Viewer (never dispatched against).
+  return hasValidRetainedState() ? static_cast<Mode>(retainedState.mode) : Mode::Viewer;
+}
 
 std::string getRetainedPath() { return hasValidRetainedState() ? std::string(retainedState.path) : std::string(); }
 

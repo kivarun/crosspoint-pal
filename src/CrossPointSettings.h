@@ -8,6 +8,7 @@
 #include <cstdint>
 
 #include "util/HomeButtonInput.h"
+#include "util/SlideshowPolicy.h"
 
 class CrossPointSettings : public PersistableStore<CrossPointSettings> {
  private:
@@ -26,8 +27,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     BLANK = 5,
     QUICK_RESUME = 6,
     TRANSPARENT_CUSTOM = 7,
+    // Append-only: added after every historical value so existing numeric
+    // values never move (older settings files keep their exact meaning).
+    SLIDESHOW = slideshow::SLEEP_SCREEN_SLIDESHOW_VALUE,
     SLEEP_SCREEN_MODE_COUNT
   };
+  static_assert(SLIDESHOW == 8, "sleep-screen values are append-only; SLIDESHOW must stay at 8");
   enum SLEEP_SCREEN_COVER_MODE { FIT = 0, CROP = 1, SLEEP_SCREEN_COVER_MODE_COUNT };
   enum SLEEP_SCREEN_COVER_FILTER {
     NO_FILTER = 0,
@@ -221,6 +226,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
 
   // Sleep screen settings
   uint8_t sleepScreen = DARK;
+  // Slideshow frame cadence — an index into the append-only slideshow cadence
+  // (slideshow::intervalMicros() is the only conversion), shared by the Image
+  // Viewer slideshow and Sleep Screen = Slideshow.
+  uint8_t slideshowInterval = slideshow::INTERVAL_DEFAULT_INDEX;
   // Night mode: inverted output polarity, applied to every activity per
   // render by ActivityManager. The sleep screen opts out itself.
   uint8_t screenInverted = 0;
@@ -233,6 +242,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // keep rendering unchanged; independent of the sleep screen mode and of the
   // sleep cover file choice.
   ToneProfile sleepRenderProfile;
+
   // Viewer render profile (image viewer): persisted tone settings for the
   // normal BMP viewer session start. Fully independent of sleepRenderProfile;
   // the default keeps rendering unchanged (B100 G1.00 C100, quantizer = no

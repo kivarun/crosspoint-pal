@@ -1,7 +1,6 @@
 #include "BmpViewerActivity.h"
 
 #include <Bitmap.h>
-#include <BoardConfig.h>
 #include <Epub/converters/PngToFramebufferConverter.h>
 #include <FsHelpers.h>
 #include <HalDisplay.h>
@@ -21,6 +20,7 @@
 #include "fontIds.h"
 #include "util/ImageOnlyRenderer.h"
 #include "util/ImageSettingsInput.h"
+#include "util/SlideshowPolicy.h"
 #include "util/SlideshowState.h"
 
 namespace fui = freeink::ui;
@@ -102,19 +102,26 @@ void BmpViewerActivity::computeModalRect() {
   modalRowH = static_cast<int16_t>(imageSettingsInput::modalRowHeight(device.hasTouch, device.minTouchSize));
   const int border = metrics.popupFrameThickness;
 
-  // Width: the standard OptionPopup convention; on touch targets the Image
-  // Settings page's fixed four-column layout may need more — derive the
-  // minimum from MEASURED content (labels/values in the row fonts + fixed
-  // controls at the touch minimum), take the max with the standard width and
-  // clamp by the theme margins. Button-only targets keep the compact width.
+  // Width: the standard OptionPopup convention; on touch targets the two
+  // stepper pages (Image Settings, Slideshow) may need more — derive each
+  // page's minimum from MEASURED content (labels/values in the row fonts +
+  // fixed controls at the touch minimum), take the max with the standard
+  // width and clamp by the theme margins. Button-only targets keep the
+  // compact width.
   int width = std::min<int>(screenW * 3 / 4, screenW - metrics.optionPopupDialogSideMargin * 2);
   if (device.hasTouch) {
     int16_t maxLabelWidth = 0;
     int16_t maxValueWidth = 0;
+    int requiredBodyWidth = 0;
     measureStepperExtents(target, maxLabelWidth, maxValueWidth);
-    const int requiredBodyWidth = imageSettingsInput::stepperRequiredBodyWidth(
+    requiredBodyWidth = imageSettingsInput::stepperRequiredBodyWidth(
         MODAL_SIDE_PAD, maxLabelWidth, maxValueWidth, target.lineHeight(fui::GfxRendererTarget::FONT_BODY),
         device.minTouchSize);
+    measureSlideshowExtents(target, maxLabelWidth, maxValueWidth);
+    requiredBodyWidth = std::max<int>(requiredBodyWidth,
+                                      imageSettingsInput::stepperRequiredBodyWidth(
+                                          MODAL_SIDE_PAD, maxLabelWidth, maxValueWidth,
+                                          target.lineHeight(fui::GfxRendererTarget::FONT_BODY), device.minTouchSize));
     width = std::min<int>(std::max<int>(width, requiredBodyWidth + border * 2 + 8),
                           screenW - metrics.optionPopupDialogSideMargin * 2);
   }
@@ -161,6 +168,25 @@ void BmpViewerActivity::measureStepperExtents(const fui::DrawTarget& target, int
   }
 }
 
+void BmpViewerActivity::measureSlideshowExtents(const fui::DrawTarget& target, int16_t& maxLabelWidth,
+                                                int16_t& maxValueWidth) const {
+  // The Slideshow page's label/value measurement owner: the widest row label
+  // ("Start slideshow") and the widest interval label, in the same fonts the
+  // rows render with.
+  fui::TextStyle style{};
+  style.font = fui::GfxRendererTarget::FONT_BODY;
+
+  maxLabelWidth = 0;
+  for (const char* label : {tr(STR_START_SLIDESHOW), tr(STR_INTERVAL)}) {
+    maxLabelWidth = std::max<int16_t>(maxLabelWidth, target.measureText(style.font, label, style).width);
+  }
+  maxValueWidth = 0;
+  for (const char* value : {tr(STR_SLIDESHOW_INTERVAL_1_MIN), tr(STR_SLIDESHOW_INTERVAL_5_MIN),
+                            tr(STR_SLIDESHOW_INTERVAL_10_MIN), tr(STR_SLIDESHOW_INTERVAL_30_MIN)}) {
+    maxValueWidth = std::max<int16_t>(maxValueWidth, target.measureText(style.font, value, style).width);
+  }
+}
+
 void BmpViewerActivity::renderModal() {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int border = metrics.popupFrameThickness;
@@ -191,6 +217,8 @@ void BmpViewerActivity::renderModal() {
     // Stepper rows are SDK components, not list items — the settings page
     // lays out directly with the same cadence list() renders the other pages.
     buildSettingsPage(frame, body);
+  } else if (viewerPage == ViewerPage::Slideshow) {
+    buildSlideshowPage(frame, body);
   } else {
     const int rows = buildPageItems();
 
@@ -217,7 +245,9 @@ void BmpViewerActivity::renderModal() {
   // Back/Select/Up/Down labels; the 2-axis settings page shows Back | Apply
   // on every row whose Confirm applies the draft to the viewer (editable rows
   // and the Apply row), Back | Reset on the draft-reset row and Back | Save on
-  // the dedicated sleep row — never a hint that Left/Right list rows.
+  // the dedicated sleep row — never a hint that Left/Right list rows. The
+  // Slideshow page shows Back | Start on the start row and Back | - | + on
+  // the interval row (Confirm on it steps forward, like Right).
   if (viewerPage == ViewerPage::ImageSettings) {
     const char* confirmLabel;
     if (modalRow == 0) {
@@ -228,6 +258,10 @@ void BmpViewerActivity::renderModal() {
       confirmLabel = tr(STR_APPLY);  // editable value rows + the Apply row
     }
     const auto hint = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, "-", "+");
+    GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4);
+  } else if (viewerPage == ViewerPage::Slideshow) {
+    const bool startRow = modalRow == 0;
+    const auto hint = mappedInput.mapLabels(tr(STR_BACK), startRow ? tr(STR_START) : "+", startRow ? "" : "-", "+");
     GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4);
   } else {
     const auto hint = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
@@ -276,6 +310,8 @@ int BmpViewerActivity::buildPageItems() {
         add(tr(STR_IMAGE_SETTINGS), nullptr);
         menuActions[menuActionCount++] = ViewerAction::Settings;
       }
+      add(tr(STR_SLIDESHOW), nullptr);
+      menuActions[menuActionCount++] = ViewerAction::Slideshow;
       add(tr(STR_INFO), nullptr);
       menuActions[menuActionCount++] = ViewerAction::Info;
       if (canSetSleepCover()) {
@@ -442,19 +478,104 @@ void BmpViewerActivity::buildSettingsPage(fui::Frame<MODAL_INTERACTION_CAPACITY>
   fui::settingRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, sleep);
 }
 
+void BmpViewerActivity::buildSlideshowPage(fui::Frame<MODAL_INTERACTION_CAPACITY>& frame, const fui::Rect& body) {
+  // Title header exactly as fui::list renders it (shared cadence with the
+  // settings page).
+  int16_t cursorY = body.y;
+  const fui::TextStyle headerStyle{};  // font 0 = FONT_SMALL, as list() renders headers
+  const int16_t headerLh = frame.target().lineHeight(headerStyle.font);
+  frame.target().text(fui::Rect{static_cast<int16_t>(body.x + MODAL_SIDE_PAD), cursorY,
+                                static_cast<int16_t>(body.width - MODAL_SIDE_PAD * 2), headerLh},
+                      tr(STR_SLIDESHOW), headerStyle);
+  frame.target().fill(
+      fui::Rect{static_cast<int16_t>(body.x + MODAL_SIDE_PAD), static_cast<int16_t>(cursorY + headerLh + 2),
+                static_cast<int16_t>(body.width - MODAL_SIDE_PAD * 2), 1},
+      fui::Paint::solid(fui::Color::Black));
+  cursorY = static_cast<int16_t>(cursorY + modalHeaderHeight(frame.target()));
+
+  // Row contract identical to the Image Settings page (full-row hit, focus
+  // follows modalRow, minTouchSize = the row height).
+  fui::TextStyle valueStyle{};
+  valueStyle.font = fui::GfxRendererTarget::FONT_BODY;
+  const auto rowProps = [&](const char* label, const int actionValue) {
+    fui::SettingRowProps row{};
+    row.label = label;
+    row.labelText.font = fui::GfxRendererTarget::FONT_BODY;
+    row.valueText = valueStyle;
+    row.action = ACTION_ROW;
+    row.valueId = static_cast<int16_t>(actionValue);
+    row.inputMask = fui::InputTouch;
+    row.minTouchSize = modalRowH;
+    if (modalRow == actionValue) row.state = fui::StateFocused;
+    return row;
+  };
+
+  // Row 0: Start slideshow — arms the CURRENT image (Viewer mode) and hands
+  // the frame sleep to the main loop.
+  fui::settingRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, rowProps(tr(STR_START_SLIDESHOW), 0));
+  cursorY = static_cast<int16_t>(cursorY + modalRowH);
+
+  // Row 1: Interval — the shared persisted cadence; stepping persists
+  // immediately and repaints the modal only (the image never re-renders).
+  const char* intervalLabels[slideshow::INTERVAL_COUNT] = {
+      tr(STR_SLIDESHOW_INTERVAL_1_MIN), tr(STR_SLIDESHOW_INTERVAL_5_MIN), tr(STR_SLIDESHOW_INTERVAL_10_MIN),
+      tr(STR_SLIDESHOW_INTERVAL_30_MIN)};
+  const uint8_t intervalIndex = slideshow::intervalIndexClamped(SETTINGS.slideshowInterval);
+  const char* intervalWidest = intervalLabels[0];
+  for (const char* candidate : intervalLabels) {
+    if (frame.target().measureText(fui::GfxRendererTarget::FONT_BODY, candidate, valueStyle).width >
+        frame.target().measureText(fui::GfxRendererTarget::FONT_BODY, intervalWidest, valueStyle).width) {
+      intervalWidest = candidate;
+    }
+  }
+
+  fui::SettingRowProps interval = rowProps(tr(STR_INTERVAL), slideshow::INTERVAL_PAGE_ROW);
+  if (!frame.device().hasTouch) {
+    // Button-only: compact value rows like the Image Settings page; the
+    // hardware Left/Right keys step the interval (button hints say so).
+    interval.value = intervalLabels[intervalIndex];
+    fui::settingRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, interval);
+    return;
+  }
+
+  // Touch: the fixed stepper columns (label | - | value | +), sized from the
+  // page's measured extents — the same architecture as Image Settings.
+  int16_t maxLabelWidth = 0;
+  int16_t maxValueWidth = 0;
+  measureSlideshowExtents(frame.target(), maxLabelWidth, maxValueWidth);
+  const auto cols = imageSettingsInput::stepperColumns(body.width, MODAL_SIDE_PAD, maxLabelWidth, maxValueWidth,
+                                                       frame.target().lineHeight(fui::GfxRendererTarget::FONT_BODY),
+                                                       frame.device().minTouchSize);
+  fui::StepperRowProps stepper{};
+  stepper.row = interval;
+  stepper.value = intervalLabels[intervalIndex];
+  stepper.widestValue = intervalWidest;
+  stepper.buttonWidth = cols.buttonWidth;
+  stepper.valueWidth = cols.valueWidth;
+  stepper.gap = cols.gap;
+  stepper.decrement = ACTION_DECREMENT;
+  stepper.decrementValue = static_cast<int16_t>(slideshow::INTERVAL_PAGE_ROW);
+  stepper.increment = ACTION_INCREMENT;
+  stepper.incrementValue = static_cast<int16_t>(slideshow::INTERVAL_PAGE_ROW);
+  fui::stepperRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, stepper);
+}
+
 int BmpViewerActivity::pageSelectableCount() const {
   // Selectable rows of the current page (title headers are not selectable).
   switch (viewerPage) {
     case ViewerPage::Options: {
-      // Must mirror buildPageItems: Image settings only for tone-capable
-      // formats (BMP), then Info / Delete, plus Set sleep cover when allowed.
-      int rows = 2;  // Info / Delete
+      // Must mirror buildPageItems: Slideshow is always offered, then Image
+      // settings only for tone-capable formats (BMP), then Info / Delete,
+      // plus Set sleep cover when allowed.
+      int rows = 3;  // Slideshow / Info / Delete
       if (imageSettingsInput::imageSettingsAvailable(!isPng)) rows++;
       if (canSetSleepCover()) rows++;
       return rows;
     }
     case ViewerPage::ImageSettings:
       return static_cast<int>(ToneParam::Count) + 3;  // Reset + 4 value rows + Apply + Use for sleep rendering
+    case ViewerPage::Slideshow:
+      return slideshow::SLIDESHOW_PAGE_ROWS;  // Start / Interval
     case ViewerPage::ImageInfo:
       return static_cast<int>(infoRows.size());
     case ViewerPage::DeleteConfirm:
@@ -487,6 +608,9 @@ void BmpViewerActivity::menuAction(ViewerAction action) {
       // and the image is not re-rendered while stepping.
       draftProfile = toneProfileFromTone(activeTone);
       openModalPage(ViewerPage::ImageSettings);
+      break;
+    case ViewerAction::Slideshow:
+      openModalPage(ViewerPage::Slideshow);
       break;
     case ViewerAction::Info:
       openInfoPage();
@@ -645,12 +769,27 @@ void BmpViewerActivity::handleModalInput() {
             }
             return;
           case imageSettingsInput::StepperTouch::StepDown:
+            if (viewerPage == ViewerPage::Slideshow) {
+              // The slideshow stepper's control value is the Interval row.
+              if (event.value == slideshow::INTERVAL_PAGE_ROW) {
+                modalRow = slideshow::INTERVAL_PAGE_ROW;
+                stepSlideshowInterval(-1);
+              }
+              return;
+            }
             if (event.value >= 0 && event.value < static_cast<int>(ToneParam::Count)) {
               modalRow = imageSettingsInput::editableRowForParam(event.value, static_cast<int>(ToneParam::Count));
               adjustDraft(-1);  // staged draft only; no image render until Apply
             }
             return;
           case imageSettingsInput::StepperTouch::StepUp:
+            if (viewerPage == ViewerPage::Slideshow) {
+              if (event.value == slideshow::INTERVAL_PAGE_ROW) {
+                modalRow = slideshow::INTERVAL_PAGE_ROW;
+                stepSlideshowInterval(1);
+              }
+              return;
+            }
             if (event.value >= 0 && event.value < static_cast<int>(ToneParam::Count)) {
               modalRow = imageSettingsInput::editableRowForParam(event.value, static_cast<int>(ToneParam::Count));
               adjustDraft(1);
@@ -677,13 +816,13 @@ void BmpViewerActivity::handleModalInput() {
     return;  // any touch pass while the modal is open is consumed by the modal
   }
 
-  // Per-page input policy: Image Settings is a 2-AXIS page (Up/Down choose the
-  // row, Left/Right modify the value) and therefore uses the explicit logical
-  // buttons — NOT the merged NavNext/NavPrevious list navigation, whose
-  // Down||Right / Up||Left merge would make one front Left/Right event match
-  // both branches. The 1D pages (options / info / delete confirm) keep the
-  // standard merged list navigation.
-  if (viewerPage == ViewerPage::ImageSettings) {
+  // Per-page input policy: Image Settings and Slideshow are 2-AXIS pages
+  // (Up/Down choose the row, Left/Right modify the value) and therefore use
+  // the explicit logical buttons — NOT the merged NavNext/NavPrevious list
+  // navigation, whose Down||Right / Up||Left merge would make one front
+  // Left/Right event match both branches. The 1D pages (options / info /
+  // delete confirm) keep the standard merged list navigation.
+  if (viewerPage == ViewerPage::ImageSettings || viewerPage == ViewerPage::Slideshow) {
     handleSettingsAxesInput();
     return;
   }
@@ -712,12 +851,12 @@ void BmpViewerActivity::handleModalInput() {
 }
 
 void BmpViewerActivity::handleSettingsAxesInput() {
-  // Image Settings: explicit axes. Side Up/Down = vertical row selection;
-  // front Left/Right = horizontal value stepping; Confirm/Back on release.
-  // ALL events route through the ONE semantic mapping (imageSettingsInput::
-  // actionFor) — dispatch is mutually exclusive (one event -> one branch ->
-  // return), so a single event can never produce both a selection move and a
-  // value change or a doubled activation.
+  // The 2-axis pages (Image Settings, Slideshow): explicit axes. Side Up/Down
+  // = vertical row selection; front Left/Right = horizontal value stepping;
+  // Confirm/Back on release. ALL events route through the ONE semantic
+  // mapping (imageSettingsInput::actionFor) — dispatch is mutually exclusive
+  // (one event -> one branch -> return), so a single event can never produce
+  // both a selection move and a value change or a doubled activation.
   const auto dispatch = [&](const MappedInputManager::Button logical, const imageSettingsInput::Button axis) {
     return imageSettingsInput::actionFor(axis, mappedInput.wasPressed(logical), mappedInput.wasReleased(logical));
   };
@@ -796,6 +935,19 @@ void BmpViewerActivity::activateRow() {
       break;
     }
 
+    case ViewerPage::Slideshow:
+      switch (slideshow::pageRowAction(modalRow)) {
+        case slideshow::PageRowAction::Start:
+          startViewerSlideshow();
+          break;
+        case slideshow::PageRowAction::IntervalStepForward:
+          stepSlideshowInterval(1);  // Confirm parity with the Right key
+          break;
+        default:
+          break;
+      }
+      break;
+
     case ViewerPage::ImageInfo:
       // Confirm returns to the root options page (same surface, no image render).
       openModalPage(ViewerPage::Options);
@@ -836,6 +988,10 @@ void BmpViewerActivity::modalBack() {
       // root options page — modal-only repaint, no image re-render.
       openModalPage(ViewerPage::Options);
       break;
+    case ViewerPage::Slideshow:
+      // The interval persists per step; Back just returns to the root page.
+      openModalPage(ViewerPage::Options);
+      break;
     case ViewerPage::ImageInfo:
     case ViewerPage::DeleteConfirm:
       openModalPage(ViewerPage::Options);
@@ -846,10 +1002,16 @@ void BmpViewerActivity::modalBack() {
 }
 
 void BmpViewerActivity::adjustDraft(int delta) {
-  // Settings page: Left/Right adjust the STAGED draft only — no buildToneLut(),
-  // no image render until Apply. The quantizer row steps directionally.
+  // The value axis of the 2-axis pages: the Slideshow page steps the shared
+  // persisted interval (only its Interval row is editable), the Image
+  // Settings page steps the STAGED draft (no buildToneLut(), no image render
+  // until Apply). The quantizer row steps directionally.
   // Explicit row->param mapping (imageSettingsInput policy): the Reset / Apply
   // / sleep action rows step nothing.
+  if (viewerPage == ViewerPage::Slideshow) {
+    if (modalRow == slideshow::INTERVAL_PAGE_ROW) stepSlideshowInterval(delta);
+    return;
+  }
   if (viewerPage != ViewerPage::ImageSettings) return;
   const int param = imageSettingsInput::editableParamForRow(modalRow, static_cast<int>(ToneParam::Count));
   switch (param) {
@@ -981,10 +1143,7 @@ void BmpViewerActivity::onEnter() {
     // Managed timer-wake resume: the retained frame's directory holds the
     // continuation; nothing usable means the slideshow ends, fail closed.
     if (siblingImages.empty()) {
-      slideshow::clearRetainedState();
-      // Display was initialized seamless and still holds the last slideshow
-      // frame — clean refresh so Home's first paint replaces it.
-      activityManager.goHome(HomeMenuItem::NONE, /*cleanInitialRefresh=*/true);
+      endViewerSlideshowToHome();
       return;
     }
     advanceSlideshowFrame();
@@ -1002,10 +1161,7 @@ void BmpViewerActivity::advanceSlideshowFrame() {
   // list. Nothing usable means the slideshow ends, fail closed.
   const std::string next = imageonly::nextImageAfter(filePath);
   if (next.empty()) {
-    slideshow::clearRetainedState();
-    // Display was initialized seamless and still holds the last slideshow
-    // frame — clean refresh so Home's first paint replaces it.
-    activityManager.goHome(HomeMenuItem::NONE, /*cleanInitialRefresh=*/true);
+    endViewerSlideshowToHome();
     return;
   }
   filePath = next;
@@ -1013,15 +1169,63 @@ void BmpViewerActivity::advanceSlideshowFrame() {
 
   // Re-arm the retained state with the frame being rendered BEFORE sleeping
   // again, so the next timer wake continues from here.
-  if (!slideshow::arm(filePath)) {
+  if (!slideshow::arm(filePath, slideshow::Mode::Viewer)) {
     LOG_ERR("BMP", "Slideshow re-arm failed");
-    slideshow::clearRetainedState();
-    activityManager.goHome(HomeMenuItem::NONE, /*cleanInitialRefresh=*/true);
+    endViewerSlideshowToHome();
     return;
   }
 
-  renderImageOnlyFrame();
+  // An undecodable frame must not timer-loop on a blank panel: fail closed.
+  if (!renderImageOnlyFrame()) {
+    LOG_ERR("BMP", "Slideshow frame failed to render");
+    endViewerSlideshowToHome();
+    return;
+  }
   slideshow::requestSleep(slideshow::SleepRequest::Continue);
+}
+
+void BmpViewerActivity::endViewerSlideshowToHome() {
+  // Fail closed: the slideshow cannot continue — cancel it and route Home.
+  // Display was initialized seamless and still holds the last slideshow
+  // frame — clean refresh so Home's first paint replaces it.
+  slideshow::clearRetainedState();
+  activityManager.goHome(HomeMenuItem::NONE, /*cleanInitialRefresh=*/true);
+}
+
+void BmpViewerActivity::stepSlideshowInterval(const int delta) {
+  // Slideshow page Interval row: one step persists the shared cadence
+  // immediately (the same per-selection persistence the Settings UI uses) and
+  // repaints the modal only — the image is never re-rendered.
+  const uint8_t stepped = slideshow::intervalIndexStepped(SETTINGS.slideshowInterval, delta);
+  SETTINGS.slideshowInterval = stepped;
+  SETTINGS.saveToFile();
+  repaintModal();
+}
+
+void BmpViewerActivity::startViewerSlideshow() {
+  // Slideshow page Start row: arm the CURRENT image with Viewer mode, repaint
+  // it image-only and hand the frame sleep to the main loop (which performs
+  // the one-time Start persistence).
+  if (!slideshow::arm(filePath, slideshow::Mode::Viewer)) {
+    LOG_ERR("BMP", "Slideshow arm rejected");
+    GUI.drawPopup(renderer, tr(STR_FAILED_LOWER));
+    delay(1000);
+    repaintModal();
+    return;
+  }
+  // An undecodable first frame must not timer-loop on a blank panel: cancel
+  // and restore the normal viewer.
+  if (!renderImageOnlyFrame()) {
+    LOG_ERR("BMP", "Slideshow frame failed to render");
+    slideshow::clearRetainedState();
+    viewerPage = ViewerPage::Viewer;
+    GUI.drawPopup(renderer, tr(STR_FAILED_LOWER));
+    delay(1000);
+    renderCurrentImage(true);
+    return;
+  }
+  viewerPage = ViewerPage::Viewer;
+  slideshow::requestSleep(slideshow::SleepRequest::Start);
 }
 
 void BmpViewerActivity::renderBmp(const bool showPopup) {
@@ -1225,35 +1429,6 @@ void BmpViewerActivity::loop() {
   //   Down (side) / Right (front) -> next image
   //   Confirm (GPIO8) -> Options modal
   //   Back -> exit to the file browser
-#if FREEINK_DEVICE_X4CLASSIC
-  // TEMPORARY development trigger for the timed-slideshow lifecycle proof:
-  // hold Confirm + Back for ~2 s on an image to start the slideshow from the
-  // displayed frame. Release-edge actions stay dormant while held, so the
-  // combo neither opens Options nor exits. Replaced by the slideshow settings
-  // UI; not exposed on other boards yet.
-  {
-    static unsigned long slideshowHoldStart = 0;
-    if (mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
-        mappedInput.isPressed(MappedInputManager::Button::Back)) {
-      if (slideshowHoldStart == 0) {
-        slideshowHoldStart = millis();
-      } else if (millis() - slideshowHoldStart >= 2000) {
-        slideshowHoldStart = 0;
-        // Frame A is already on the panel; repaint it ONCE image-only so the
-        // slideshow's first frame carries no viewer chrome, then let the main
-        // loop perform the sleep (and the one-time Start persistence).
-        if (slideshow::arm(filePath)) {
-          renderImageOnlyFrame();
-          slideshow::requestSleep(slideshow::SleepRequest::Start);
-          return;
-        }
-        LOG_ERR("BMP", "Slideshow arm rejected");
-      }
-    } else {
-      slideshowHoldStart = 0;
-    }
-  }
-#endif
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     activityManager.goToFileBrowser(filePath);
     return;
