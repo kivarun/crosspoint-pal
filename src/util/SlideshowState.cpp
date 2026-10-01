@@ -1,8 +1,9 @@
 #include "SlideshowState.h"
 
 #include <Logging.h>
-#include <cstring>
 #include <esp_attr.h>
+
+#include <cstring>
 
 namespace slideshow {
 
@@ -14,13 +15,14 @@ RTC_NOINIT_ATTR SlideshowState retainedState;
 SleepRequest pendingSleepRequest = SleepRequest::None;
 
 bool arm(const std::string& path) {
+  // Invalidate FIRST: a rejected arm must never leave a previous valid
+  // retained state (contract: false => no valid state remains).
+  clearRetainedState();
   if (!armInputValid(path)) {
     LOG_ERR("SLD", "Slideshow arm rejected (empty/relative/too long)");
     return false;
   }
-  // The state is invalid while the copy is in flight; write the magic last so
-  // a torn write can never leave a valid-looking path.
-  clearRetainedState();
+  // Magic written last: the state is only valid once fully written.
   memcpy(retainedState.path, path.c_str(), path.size() + 1);  // includes the NUL
   retainedState.magic = SLIDESHOW_MAGIC;
   return true;
