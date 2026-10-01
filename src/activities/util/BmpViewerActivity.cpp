@@ -1,6 +1,7 @@
 #include "BmpViewerActivity.h"
 
 #include <Bitmap.h>
+#include <BoardConfig.h>
 #include <Epub/converters/PngToFramebufferConverter.h>
 #include <FsHelpers.h>
 #include <HalDisplay.h>
@@ -19,6 +20,7 @@
 #include "components/UiAppHelpers.h"
 #include "fontIds.h"
 #include "util/ImageSettingsInput.h"
+#include "util/SlideshowState.h"
 
 namespace fui = freeink::ui;
 
@@ -57,9 +59,11 @@ std::string baseNameOf(const std::string& path) {
 }
 }  // namespace
 
-BmpViewerActivity::BmpViewerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string path)
+BmpViewerActivity::BmpViewerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string path,
+                                     const bool slideshowResume)
     : Activity("BmpViewer", renderer, mappedInput),
       filePath(std::move(path)),
+      slideshowResume(slideshowResume),
       activeTone(toneLutFromProfile(SETTINGS.viewerRenderProfile)) {
   // Session start: the ACTIVE tone state comes from the persisted viewer
   // profile, exactly once per session. Image navigation re-runs onEnter() but
@@ -958,9 +962,48 @@ void BmpViewerActivity::onEnter() {
     loadSiblingImages();
   }
 
+  if (slideshowResume) {
+    // Managed timer-wake resume: the retained frame's directory holds the
+    // continuation; nothing usable means the slideshow ends, fail closed.
+    if (siblingImages.empty()) {
+      slideshow::clearRetainedState();
+      // Display was initialized seamless and still holds the last slideshow
+      // frame — clean refresh so Home's first paint replaces it.
+      activityManager.goHome(HomeMenuItem::NONE, /*cleanInitialRefresh=*/true);
+      return;
+    }
+    advanceSlideshowFrame();
+    return;
+  }
+
   isPng = FsHelpers::hasPngExtension(filePath);
 
   renderCurrentImage(true);
+}
+
+void BmpViewerActivity::advanceSlideshowFrame() {
+  // Wrap-advance: the next image after the retained one; a retained image
+  // missing from the scan advances from the start of the list.
+  const std::string fileName = baseNameOf(filePath);
+  const auto image = std::find(siblingImages.begin(), siblingImages.end(), fileName);
+  currentImageIndex =
+      image != siblingImages.end() ? static_cast<int>((image - siblingImages.begin() + 1) % siblingImages.size()) : 0;
+  std::string dirPath = FsHelpers::extractFolderPath(filePath);
+  if (!dirPath.empty() && dirPath.back() != '/') dirPath += "/";
+  filePath = dirPath + siblingImages[currentImageIndex];
+  isPng = FsHelpers::hasPngExtension(filePath);
+
+  // Re-arm the retained state with the frame being rendered BEFORE sleeping
+  // again, so the next timer wake continues from here.
+  if (!slideshow::arm(filePath)) {
+    LOG_ERR("BMP", "Slideshow re-arm failed");
+    slideshow::clearRetainedState();
+    activityManager.goHome(HomeMenuItem::NONE, /*cleanInitialRefresh=*/true);
+    return;
+  }
+
+  renderCurrentImage(true);
+  slideshow::requestSleep(slideshow::SleepRequest::Continue);
 }
 
 void BmpViewerActivity::renderBmp(bool showPopup) {
@@ -1158,6 +1201,33 @@ void BmpViewerActivity::loop() {
   //   Down (side) / Right (front) -> next image
   //   Confirm (GPIO8) -> Options modal
   //   Back -> exit to the file browser
+#if FREEINK_DEVICE_X4CLASSIC
+  // TEMPORARY development trigger for the timed-slideshow lifecycle proof:
+  // hold Confirm + Back for ~2 s on an image to start the slideshow from the
+  // displayed frame. Release-edge actions stay dormant while held, so the
+  // combo neither opens Options nor exits. Replaced by the slideshow settings
+  // UI; not exposed on other boards yet.
+  {
+    static unsigned long slideshowHoldStart = 0;
+    if (mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
+        mappedInput.isPressed(MappedInputManager::Button::Back)) {
+      if (slideshowHoldStart == 0) {
+        slideshowHoldStart = millis();
+      } else if (millis() - slideshowHoldStart >= 2000) {
+        slideshowHoldStart = 0;
+        // Frame A is already on the panel; no repaint. The main loop performs
+        // the sleep (and the one-time Start persistence).
+        if (slideshow::arm(filePath)) {
+          slideshow::requestSleep(slideshow::SleepRequest::Start);
+          return;
+        }
+        LOG_ERR("BMP", "Slideshow arm rejected");
+      }
+    } else {
+      slideshowHoldStart = 0;
+    }
+  }
+#endif
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     activityManager.goToFileBrowser(filePath);
     return;

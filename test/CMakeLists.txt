@@ -67,6 +67,7 @@ add_subdirectory(chapter_position)
 add_subdirectory(home_button)
 add_subdirectory(button_press_navigation)
 add_subdirectory(wakeup_classify)
+add_subdirectory(slideshow_state)
 
 add_subdirectory(tone_lut)
 add_subdirectory(image_settings_input)
