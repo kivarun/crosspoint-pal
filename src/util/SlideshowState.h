@@ -45,10 +45,10 @@ inline bool armInputValid(const std::string& path) {
 }
 
 // RTC retained-state accessors (globals live in SlideshowState.cpp).
-// arm(): validate, clear the magic FIRST, copy the path with guaranteed NUL
-// termination, write the magic LAST — the state is only valid once fully
-// written. Returns false (and leaves no valid state) for empty/relative/
-// over-long paths.
+// arm(): invalidate the retained state FIRST, then validate; on any false
+// return no valid retained state remains. A successful arm copies the path
+// with guaranteed NUL termination and writes the magic LAST — the state is
+// only valid once fully written. Empty/relative/over-long paths fail.
 bool arm(const std::string& path);
 void clearRetainedState();
 bool hasValidRetainedState();
