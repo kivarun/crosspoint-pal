@@ -11,6 +11,8 @@
 #include <cmath>
 #include <cstring>
 
+#include <esp_random.h>
+
 namespace imageonly {
 
 namespace {
@@ -193,7 +195,7 @@ std::vector<std::string> listImageFiles(const std::string& dirPath) {
   return images;
 }
 
-std::string nextImageAfter(const std::string& currentPath) {
+std::string nextImageAfter(const std::string& currentPath, const slideshow::Order order) {
   const std::string dirPath = FsHelpers::extractFolderPath(currentPath);
   const auto images = listImageFiles(dirPath);
   if (images.empty()) return {};
@@ -201,24 +203,33 @@ std::string nextImageAfter(const std::string& currentPath) {
   const size_t lastSlash = currentPath.find_last_of('/');
   const std::string fileName = (lastSlash != std::string::npos) ? currentPath.substr(lastSlash + 1) : currentPath;
   const auto image = std::find(images.begin(), images.end(), fileName);
-  // A current file missing from the scan restarts from the first image.
+  // A current file missing from the scan hands the order policy an invalid
+  // index (its documented restart semantics apply).
   const int currentIndex = image != images.end() ? static_cast<int>(image - images.begin()) : -1;
-  const auto next = FsHelpers::imageIndexAfterAdvance(currentIndex, static_cast<int>(images.size()));
-  if (!next.has_value() || *next < 0) return {};
+  // The device RNG (esp_random.h) feeds the Random order; the other orders
+  // never look at the value.
+  const uint32_t randomValue = order == slideshow::Order::Random ? esp_random() : 0;
+  const int nextIndex =
+      slideshow::indexAfterAdvance(currentIndex, static_cast<int>(images.size()), order, randomValue);
+  if (nextIndex < 0 || nextIndex >= static_cast<int>(images.size())) return {};
 
   std::string path = dirPath;
   if (!path.empty() && path.back() != '/') path += '/';
-  path += images[*next];
+  path += images[nextIndex];
   return path;
 }
 
-std::string firstSleepSlideshowPath() {
+std::string firstSleepSlideshowPath(const slideshow::Order order) {
   for (const char* dir : {slideshow::SLEEP_SLIDESHOW_DIR, slideshow::SLEEP_SLIDESHOW_DIR_LEGACY}) {
     const auto images = listImageFiles(dir);
     if (images.empty()) continue;
+    const uint32_t randomValue = order == slideshow::Order::Random ? esp_random() : 0;
+    const int index = slideshow::initialIndex(static_cast<int>(images.size()), order, randomValue);
+    if (index < 0 || index >= static_cast<int>(images.size())) continue;
+
     std::string path = dir;
     path += '/';
-    path += images.front();
+    path += images[index];
     return path;
   }
   return {};

@@ -171,18 +171,20 @@ void BmpViewerActivity::measureStepperExtents(const fui::DrawTarget& target, int
 void BmpViewerActivity::measureSlideshowExtents(const fui::DrawTarget& target, int16_t& maxLabelWidth,
                                                 int16_t& maxValueWidth) const {
   // The Slideshow page's label/value measurement owner: the widest row label
-  // ("Start slideshow") and the widest interval label, in the same fonts the
-  // rows render with.
+  // ("Start slideshow") and the widest interval/order value, in the same fonts
+  // the rows render with.
   fui::TextStyle style{};
   style.font = fui::GfxRendererTarget::FONT_BODY;
 
   maxLabelWidth = 0;
-  for (const char* label : {tr(STR_START_SLIDESHOW), tr(STR_INTERVAL)}) {
+  for (const char* label : {tr(STR_START_SLIDESHOW), tr(STR_INTERVAL), tr(STR_SLIDESHOW_ORDER)}) {
     maxLabelWidth = std::max<int16_t>(maxLabelWidth, target.measureText(style.font, label, style).width);
   }
   maxValueWidth = 0;
   for (const char* value : {tr(STR_SLIDESHOW_INTERVAL_1_MIN), tr(STR_SLIDESHOW_INTERVAL_5_MIN),
-                            tr(STR_SLIDESHOW_INTERVAL_10_MIN), tr(STR_SLIDESHOW_INTERVAL_30_MIN)}) {
+                            tr(STR_SLIDESHOW_INTERVAL_10_MIN), tr(STR_SLIDESHOW_INTERVAL_30_MIN),
+                            tr(STR_SLIDESHOW_ORDER_FORWARD), tr(STR_SLIDESHOW_ORDER_REVERSE),
+                            tr(STR_SLIDESHOW_ORDER_RANDOM)}) {
     maxValueWidth = std::max<int16_t>(maxValueWidth, target.measureText(style.font, value, style).width);
   }
 }
@@ -246,8 +248,12 @@ void BmpViewerActivity::renderModal() {
   // on every row whose Confirm applies the draft to the viewer (editable rows
   // and the Apply row), Back | Reset on the draft-reset row and Back | Save on
   // the dedicated sleep row — never a hint that Left/Right list rows. The
-  // Slideshow page shows Back | Start on the start row and Back | - | + on
-  // the interval row (Confirm on it steps forward, like Right).
+  // Slideshow page shows Back | Start on the start row (Left/Right act on
+  // nothing there) and Back | + | - | + on the value rows; its empty slots
+  // ERASE, because the page switches hint sets between rows and skipped slots
+  // would keep stale frames on the strip (the opt-in flag exists exactly for
+  // this modal-repaint case — the viewer's other pages keep the skip
+  // semantics where empty slots intentionally leave content visible).
   if (viewerPage == ViewerPage::ImageSettings) {
     const char* confirmLabel;
     if (modalRow == 0) {
@@ -260,9 +266,11 @@ void BmpViewerActivity::renderModal() {
     const auto hint = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, "-", "+");
     GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4);
   } else if (viewerPage == ViewerPage::Slideshow) {
-    const bool startRow = modalRow == 0;
-    const auto hint = mappedInput.mapLabels(tr(STR_BACK), startRow ? tr(STR_START) : "+", startRow ? "" : "-", "+");
-    GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4);
+    const auto slots = slideshow::pageHintSlots(modalRow);
+    const auto hint =
+        mappedInput.mapLabels(tr(STR_BACK), slots.confirmStart ? tr(STR_START) : "+", slots.stepperSlots ? "-" : "",
+                              slots.stepperSlots ? "+" : "");
+    GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4, /*eraseUnused=*/true);
   } else {
     const auto hint = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
     GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4);
@@ -529,23 +537,44 @@ void BmpViewerActivity::buildSlideshowPage(fui::Frame<MODAL_INTERACTION_CAPACITY
     }
   }
 
+  // Row 2: Order — the shared persisted frame order (Forward / Reverse /
+  // Random), the same value-stepping semantics as the Interval row.
+  const char* orderLabels[slideshow::ORDER_COUNT] = {tr(STR_SLIDESHOW_ORDER_FORWARD), tr(STR_SLIDESHOW_ORDER_REVERSE),
+                                                     tr(STR_SLIDESHOW_ORDER_RANDOM)};
+  const uint8_t orderIndex = slideshow::orderIndexClamped(SETTINGS.slideshowOrder);
+  const char* orderWidest = orderLabels[0];
+  for (const char* candidate : orderLabels) {
+    if (frame.target().measureText(fui::GfxRendererTarget::FONT_BODY, candidate, valueStyle).width >
+        frame.target().measureText(fui::GfxRendererTarget::FONT_BODY, orderWidest, valueStyle).width) {
+      orderWidest = candidate;
+    }
+  }
+
   fui::SettingRowProps interval = rowProps(tr(STR_INTERVAL), slideshow::INTERVAL_PAGE_ROW);
+  fui::SettingRowProps order = rowProps(tr(STR_SLIDESHOW_ORDER), slideshow::ORDER_PAGE_ROW);
   if (!frame.device().hasTouch) {
     // Button-only: compact value rows like the Image Settings page; the
-    // hardware Left/Right keys step the interval (button hints say so).
+    // hardware Left/Right keys step the selected row's value (button hints
+    // say so).
     interval.value = intervalLabels[intervalIndex];
     fui::settingRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, interval);
+    cursorY = static_cast<int16_t>(cursorY + modalRowH);
+    order.value = orderLabels[orderIndex];
+    fui::settingRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, order);
     return;
   }
 
   // Touch: the fixed stepper columns (label | - | value | +), sized from the
-  // page's measured extents — the same architecture as Image Settings.
+  // page's measured extents — the same architecture as Image Settings; both
+  // value rows share ONE column set so the controls hold identical X
+  // positions on every row.
   int16_t maxLabelWidth = 0;
   int16_t maxValueWidth = 0;
   measureSlideshowExtents(frame.target(), maxLabelWidth, maxValueWidth);
   const auto cols = imageSettingsInput::stepperColumns(body.width, MODAL_SIDE_PAD, maxLabelWidth, maxValueWidth,
                                                        frame.target().lineHeight(fui::GfxRendererTarget::FONT_BODY),
                                                        frame.device().minTouchSize);
+
   fui::StepperRowProps stepper{};
   stepper.row = interval;
   stepper.value = intervalLabels[intervalIndex];
@@ -557,6 +586,14 @@ void BmpViewerActivity::buildSlideshowPage(fui::Frame<MODAL_INTERACTION_CAPACITY
   stepper.decrementValue = static_cast<int16_t>(slideshow::INTERVAL_PAGE_ROW);
   stepper.increment = ACTION_INCREMENT;
   stepper.incrementValue = static_cast<int16_t>(slideshow::INTERVAL_PAGE_ROW);
+  fui::stepperRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, stepper);
+  cursorY = static_cast<int16_t>(cursorY + modalRowH);
+
+  stepper.row = order;
+  stepper.value = orderLabels[orderIndex];
+  stepper.widestValue = orderWidest;
+  stepper.decrementValue = static_cast<int16_t>(slideshow::ORDER_PAGE_ROW);
+  stepper.incrementValue = static_cast<int16_t>(slideshow::ORDER_PAGE_ROW);
   fui::stepperRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, stepper);
 }
 
@@ -575,7 +612,7 @@ int BmpViewerActivity::pageSelectableCount() const {
     case ViewerPage::ImageSettings:
       return static_cast<int>(ToneParam::Count) + 3;  // Reset + 4 value rows + Apply + Use for sleep rendering
     case ViewerPage::Slideshow:
-      return slideshow::SLIDESHOW_PAGE_ROWS;  // Start / Interval
+      return slideshow::SLIDESHOW_PAGE_ROWS;  // Start / Interval / Order
     case ViewerPage::ImageInfo:
       return static_cast<int>(infoRows.size());
     case ViewerPage::DeleteConfirm:
@@ -770,10 +807,13 @@ void BmpViewerActivity::handleModalInput() {
             return;
           case imageSettingsInput::StepperTouch::StepDown:
             if (viewerPage == ViewerPage::Slideshow) {
-              // The slideshow stepper's control value is the Interval row.
+              // The slideshow steppers' control values are the value rows.
               if (event.value == slideshow::INTERVAL_PAGE_ROW) {
                 modalRow = slideshow::INTERVAL_PAGE_ROW;
                 stepSlideshowInterval(-1);
+              } else if (event.value == slideshow::ORDER_PAGE_ROW) {
+                modalRow = slideshow::ORDER_PAGE_ROW;
+                stepSlideshowOrder(-1);
               }
               return;
             }
@@ -787,6 +827,9 @@ void BmpViewerActivity::handleModalInput() {
               if (event.value == slideshow::INTERVAL_PAGE_ROW) {
                 modalRow = slideshow::INTERVAL_PAGE_ROW;
                 stepSlideshowInterval(1);
+              } else if (event.value == slideshow::ORDER_PAGE_ROW) {
+                modalRow = slideshow::ORDER_PAGE_ROW;
+                stepSlideshowOrder(1);
               }
               return;
             }
@@ -943,6 +986,9 @@ void BmpViewerActivity::activateRow() {
         case slideshow::PageRowAction::IntervalStepForward:
           stepSlideshowInterval(1);  // Confirm parity with the Right key
           break;
+        case slideshow::PageRowAction::OrderStepForward:
+          stepSlideshowOrder(1);  // Confirm parity with the Right key
+          break;
         default:
           break;
       }
@@ -1009,7 +1055,10 @@ void BmpViewerActivity::adjustDraft(int delta) {
   // Explicit row->param mapping (imageSettingsInput policy): the Reset / Apply
   // / sleep action rows step nothing.
   if (viewerPage == ViewerPage::Slideshow) {
-    if (modalRow == slideshow::INTERVAL_PAGE_ROW) stepSlideshowInterval(delta);
+    if (modalRow == slideshow::INTERVAL_PAGE_ROW)
+      stepSlideshowInterval(delta);
+    else if (modalRow == slideshow::ORDER_PAGE_ROW)
+      stepSlideshowOrder(delta);
     return;
   }
   if (viewerPage != ViewerPage::ImageSettings) return;
@@ -1156,10 +1205,11 @@ void BmpViewerActivity::onEnter() {
 }
 
 void BmpViewerActivity::advanceSlideshowFrame() {
-  // Wrap-advance: the next image after the retained one inside its directory;
-  // a retained image missing from the scan advances from the start of the
-  // list. Nothing usable means the slideshow ends, fail closed.
-  const std::string next = imageonly::nextImageAfter(filePath);
+  // Advance under the persisted ORDER policy (Forward/Reverse/Random; the
+  // device RNG feeds Random). A retained image missing from the scan hands
+  // the policy its restart semantics. Nothing usable means the slideshow
+  // ends, fail closed.
+  const std::string next = imageonly::nextImageAfter(filePath, slideshow::orderClamped(SETTINGS.slideshowOrder));
   if (next.empty()) {
     endViewerSlideshowToHome();
     return;
@@ -1198,6 +1248,15 @@ void BmpViewerActivity::stepSlideshowInterval(const int delta) {
   // repaints the modal only — the image is never re-rendered.
   const uint8_t stepped = slideshow::intervalIndexStepped(SETTINGS.slideshowInterval, delta);
   SETTINGS.slideshowInterval = stepped;
+  SETTINGS.saveToFile();
+  repaintModal();
+}
+
+void BmpViewerActivity::stepSlideshowOrder(const int delta) {
+  // Slideshow page Order row: one step persists the shared frame order
+  // immediately and repaints the modal only — the image is never re-rendered.
+  const uint8_t stepped = slideshow::orderIndexStepped(SETTINGS.slideshowOrder, delta);
+  SETTINGS.slideshowOrder = stepped;
   SETTINGS.saveToFile();
   repaintModal();
 }

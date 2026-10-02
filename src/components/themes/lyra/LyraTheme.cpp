@@ -108,7 +108,7 @@ void LyraTheme::drawSubHeader(const GfxRenderer& renderer, Rect rect, const char
 }
 
 void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
-                                const char* btn4) const {
+                                const char* btn4, const bool eraseUnused) const {
   if (gpio.hasTouch()) {
     return;
   }
@@ -141,6 +141,15 @@ void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
                                false, true);
       drawHintLabel(renderer, SMALL_FONT_ID, labels[i], x, buttonWidth, pageHeight - buttonY, buttonHeight,
                     textYOffset);
+    } else if (eraseUnused && !grayscale) {
+      // Opt-in modal repaint: a slot that lost its label ERASES the previous
+      // full button (box and label would otherwise stay on the panel behind
+      // the small stub), then re-renders the small stub fresh.
+      renderer.fillRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, false);
+      renderer.fillRoundedRect(x, pageHeight - smallButtonHeight, buttonWidth, smallButtonHeight, cornerRadius,
+                               Color::White);
+      renderer.drawRoundedRect(x, pageHeight - smallButtonHeight, buttonWidth, smallButtonHeight, 1, cornerRadius,
+                               true, true, false, false, true);
     } else {
       // Draw the filled background and border for a SMALL-sized button
       renderer.fillRoundedRect(x, pageHeight - smallButtonHeight, buttonWidth, smallButtonHeight, cornerRadius,

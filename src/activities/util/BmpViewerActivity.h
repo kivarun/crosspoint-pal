@@ -118,11 +118,12 @@ class BmpViewerActivity final : public Activity {
   void menuAction(ViewerAction action);
   void openInfoPage();
   void performDelete();
-  // Slideshow page actions: the interval step persists the shared cadence
-  // (modal-only repaint, the image is never re-rendered); the start arms the
-  // CURRENT image with slideshow::Mode::Viewer, repaints it image-only and
-  // requests the Viewer Start sleep.
+  // Slideshow page actions: the interval/order steps persist the shared
+  // setting (modal-only repaint, the image is never re-rendered); the start
+  // arms the CURRENT image with slideshow::Mode::Viewer, repaints it
+  // image-only and requests the Viewer Start sleep.
   void stepSlideshowInterval(int delta);
+  void stepSlideshowOrder(int delta);
   void startViewerSlideshow();
   // Fail-closed exit from a broken viewer slideshow: cancel the retained
   // state and route Home (clean refresh replaces the last frame).

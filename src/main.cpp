@@ -355,10 +355,12 @@ void enterDeepSleep(bool fromTimeout = false) {
 
   deliverSleepPluginEvents();
 
+  // ONE timeout-quick-resume precedence policy (slideshow::timeoutQuickResume,
+  // host-tested): Sleep Screen = Slideshow keeps priority over the
+  // after-timeout upgrade, so no stale Quick Resume frame is saved for a
+  // sleep that will render a slideshow frame instead.
   const bool isQuickResumeSleep =
-      SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
-      (fromTimeout &&
-       SETTINGS.quickResumeSleepScreen == CrossPointSettings::QUICK_RESUME_SLEEP_SCREEN::QUICK_RESUME_AFTER_TIMEOUT);
+      slideshow::timeoutQuickResume(SETTINGS.sleepScreen, fromTimeout, SETTINGS.quickResumeSleepScreen);
   // Every sleep mode leaves a complete retained frame on the e-ink panel. Keep
   // it visible until the first useful reader or home paint replaces it.
   APP_STATE.showBootScreen = false;
@@ -823,7 +825,12 @@ void loop() {
       }
     }
     HalPowerManager::Lock powerLock;
-    enterHardwareDeepSleep(slideshow::intervalMicros(SETTINGS.slideshowInterval));
+    // StaticSleep = the slideshow stopped itself (battery cutoff): the sleep
+    // screen was already re-rendered the ordinary static way — no next
+    // timer wake, power button only.
+    enterHardwareDeepSleep(slideshowRequest == slideshow::SleepRequest::Continue
+                               ? slideshow::intervalMicros(SETTINGS.slideshowInterval)
+                               : 0);
     return;
   }
 

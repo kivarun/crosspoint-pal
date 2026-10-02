@@ -248,6 +248,15 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                           {StrId::STR_SLIDESHOW_INTERVAL_1_MIN, StrId::STR_SLIDESHOW_INTERVAL_5_MIN,
                            StrId::STR_SLIDESHOW_INTERVAL_10_MIN, StrId::STR_SLIDESHOW_INTERVAL_30_MIN},
                           "slideshowInterval", StrId::STR_CAT_DISPLAY),
+        // Slideshow order — the shared persisted frame order for the Image
+        // Viewer slideshow and Sleep Screen = Slideshow
+        // (slideshow::orderClamped() is the only conversion). Append-safe:
+        // the generic enum clamp folds a corrupt/out-of-range byte back to
+        // the Forward default.
+        SettingInfo::Enum(StrId::STR_SLIDESHOW_ORDER, &CrossPointSettings::slideshowOrder,
+                          {StrId::STR_SLIDESHOW_ORDER_FORWARD, StrId::STR_SLIDESHOW_ORDER_REVERSE,
+                           StrId::STR_SLIDESHOW_ORDER_RANDOM},
+                          "slideshowOrder", StrId::STR_CAT_DISPLAY),
         SettingInfo::Enum(StrId::STR_SLEEP_COVER_MODE, &CrossPointSettings::sleepScreenCoverMode,
                           {StrId::STR_FIT, StrId::STR_CROP}, "sleepScreenCoverMode", StrId::STR_CAT_DISPLAY),
         SettingInfo::Enum(StrId::STR_SLEEP_COVER_FILTER, &CrossPointSettings::sleepScreenCoverFilter,

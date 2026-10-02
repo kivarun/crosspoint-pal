@@ -64,14 +64,20 @@ bool renderImageFile(GfxRenderer& renderer, const std::string& path, const ToneL
 // the directory cannot be opened.
 std::vector<std::string> listImageFiles(const std::string& dirPath);
 
-// The next slideshow frame after currentPath inside ITS directory: wrap at the
-// end, restart from the first when the current file is missing from the scan.
-// "" when the directory holds no candidate images.
-std::string nextImageAfter(const std::string& currentPath);
+// The next slideshow frame after currentPath inside ITS directory, under the
+// persisted ORDER policy (slideshow::indexAfterAdvance): Forward walks the
+// sorted list with wrap-around, Reverse walks it backward, Random picks an
+// independent random frame (never the current one when others exist). The
+// device RNG feeds Random; Forward/Reverse are value-free. "" when the
+// directory holds no candidate image.
+std::string nextImageAfter(const std::string& currentPath, const slideshow::Order order);
 
-// First frame of the sleep-slideshow source under the fixed storage contract:
-// /.sleep scanned first, /sleep as the legacy fallback. "" when neither
-// directory offers a candidate image (the caller fails closed: no timer).
-std::string firstSleepSlideshowPath();
+// The first frame of the sleep-slideshow source under the fixed storage
+// contract, under the persisted ORDER policy (slideshow::initialIndex):
+// Forward opens the first sorted entry, Reverse the last, Random an
+// arbitrary one. /.sleep scanned first, /sleep as the legacy fallback. ""
+// when neither directory offers a candidate image (the caller fails closed:
+// no timer).
+std::string firstSleepSlideshowPath(const slideshow::Order order);
 
 }  // namespace imageonly

@@ -102,7 +102,7 @@ class RoundedRaffTheme : public BaseTheme {
                       const std::function<UIIcon(int index)>& rowIcon) const override;
   void drawTextField(const GfxRenderer& renderer, Rect rect, int textWidth, bool cursorMode = false,
                      int contentStartX = 0, int contentWidth = 0) const override;
-  void drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
-                       const char* btn4) const override;
+  void drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3, const char* btn4,
+                       bool eraseUnused = false) const override;
   bool homeMenuShowsContinueReading() const { return true; }
 };

@@ -33,6 +33,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     SLEEP_SCREEN_MODE_COUNT
   };
   static_assert(SLIDESHOW == 8, "sleep-screen values are append-only; SLIDESHOW must stay at 8");
+  static_assert(QUICK_RESUME == slideshow::SLEEP_SCREEN_QUICK_RESUME_VALUE,
+                "sleep-screen values are append-only; QUICK_RESUME must stay at 6");
   enum SLEEP_SCREEN_COVER_MODE { FIT = 0, CROP = 1, SLEEP_SCREEN_COVER_MODE_COUNT };
   enum SLEEP_SCREEN_COVER_FILTER {
     NO_FILTER = 0,
@@ -223,6 +225,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     QUICK_RESUME_AFTER_TIMEOUT = 1,
     QUICK_RESUME_SLEEP_SCREEN_COUNT
   };
+  static_assert(QUICK_RESUME_AFTER_TIMEOUT == slideshow::QUICK_RESUME_AFTER_TIMEOUT_VALUE,
+                "quick-resume values are append-only; AFTER_TIMEOUT must stay at 1");
 
   // Sleep screen settings
   uint8_t sleepScreen = DARK;
@@ -230,6 +234,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // (slideshow::intervalMicros() is the only conversion), shared by the Image
   // Viewer slideshow and Sleep Screen = Slideshow.
   uint8_t slideshowInterval = slideshow::INTERVAL_DEFAULT_INDEX;
+  // Slideshow frame order — an index into the append-only order table
+  // (slideshow::orderClamped() is the only conversion), shared by the Image
+  // Viewer slideshow and Sleep Screen = Slideshow. Default Forward.
+  uint8_t slideshowOrder = slideshow::ORDER_DEFAULT_INDEX;
   // Night mode: inverted output polarity, applied to every activity per
   // render by ActivityManager. The sleep screen opts out itself.
   uint8_t screenInverted = 0;

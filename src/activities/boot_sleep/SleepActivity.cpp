@@ -8,6 +8,7 @@
 #include <GfxRenderer.h>
 #include <HalDisplay.h>
 #include <HalGPIO.h>
+#include <HalPowerManager.h>
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Memory.h>
@@ -514,10 +515,12 @@ void SleepActivity::onEnter() {
   // dispatch; advance and sleep again.
   if (slideshowContinue) return continueSlideshow();
 
+  // Timeout quick-resume precedence (pure slideshow policy): the explicit
+  // Quick Resume screen wins, the after-timeout option upgrades the timeout
+  // to Quick Resume for every other screen — Sleep Screen = Slideshow keeps
+  // priority, so a timeout starts the slideshow instead of the moon frame.
   const bool renderQuickResume =
-      SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
-      (fromTimeout &&
-       SETTINGS.quickResumeSleepScreen == CrossPointSettings::QUICK_RESUME_SLEEP_SCREEN::QUICK_RESUME_AFTER_TIMEOUT);
+      slideshow::timeoutQuickResume(SETTINGS.sleepScreen, fromTimeout, SETTINGS.quickResumeSleepScreen);
 
   if (renderQuickResume) {
     // Quick Resume keeps the current frame as-is, so the driver's inversion
@@ -536,12 +539,21 @@ void SleepActivity::onEnter() {
 
   if (SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::SLIDESHOW &&
       slideshow::sleepSlideshowSupported()) {
-    // Full-bleed image-only frames: no entering-sleep popup, portrait panel
-    // orientation (the decode re-uses the same portrait render the other
-    // custom screens produce after their popup block).
-    renderer.setOrientation(GfxRenderer::Orientation::Portrait);
-    releaseSdFontCachesForDecode(renderer);
-    return renderSlideshowSleepScreen();
+    if (!slideshow::allowedByBattery(powerManager.getBatteryPercentage(), gpio.isUsbConnected())) {
+      // Low battery on battery power: the sleep slideshow must not wake-loop
+      // the device. No retained state survives (a later sleep cannot re-arm
+      // the timer from a stale one) and the ordinary static sleep fallback
+      // below renders — no timer, since nothing is armed.
+      LOG_DBG("SLP", "Slideshow blocked by battery cutoff");
+      slideshow::clearRetainedState();
+    } else {
+      // Full-bleed image-only frames: no entering-sleep popup, portrait panel
+      // orientation (the decode re-uses the same portrait render the other
+      // custom screens produce after their popup block).
+      renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+      releaseSdFontCachesForDecode(renderer);
+      return renderSlideshowSleepScreen();
+    }
   }
 
   if (SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::TRANSPARENT_CUSTOM) {
@@ -878,7 +890,9 @@ void SleepActivity::renderSlideshowSleepScreen() const {
   // sleep render phase. Fixed production storage contract: canonical /.sleep,
   // legacy /sleep fallback — deterministic sorted image semantics (the same
   // scan the viewer slideshow uses), NOT the /sleep.bmp single-image contract.
-  const std::string first = imageonly::firstSleepSlideshowPath();
+  // The persisted ORDER policy picks the initial frame: first (Forward), last
+  // (Reverse) or random (Random).
+  const std::string first = imageonly::firstSleepSlideshowPath(slideshow::orderClamped(SETTINGS.slideshowOrder));
   if (first.empty()) {
     // No usable slideshow source: ordinary default sleep screen and NO timer —
     // an empty/broken source must never wake-loop.
@@ -902,7 +916,14 @@ void SleepActivity::continueSlideshow() {
   // directory, re-arm Sleep mode, render image-only with the sleep render
   // profile and hand the frame sleep to the main loop. Nothing here touches
   // the APP_STATE/settings stores — per-frame sleeps perform no SD writes.
-  const std::string next = imageonly::nextImageAfter(slideshow::getRetainedPath());
+
+  // Battery cutoff first: the slideshow must not wake-loop a low battery.
+  if (!slideshow::allowedByBattery(powerManager.getBatteryPercentage(), gpio.isUsbConnected())) {
+    return endSlideshowToStaticSleep();
+  }
+
+  const std::string next =
+      imageonly::nextImageAfter(slideshow::getRetainedPath(), slideshow::orderClamped(SETTINGS.slideshowOrder));
   if (next.empty()) return endSlideshowToOrdinary();
 
   sleepTone = toneLutFromProfile(SETTINGS.sleepRenderProfile);
@@ -921,4 +942,18 @@ void SleepActivity::endSlideshowToOrdinary() {
   LOG_ERR("SLP", "Slideshow ended (broken source)");
   slideshow::clearRetainedState();
   activityManager.goHome(HomeMenuItem::NONE, /*cleanInitialRefresh=*/true);
+}
+
+void SleepActivity::endSlideshowToStaticSleep() {
+  // Battery cutoff mid-slideshow: the device was timer-woken, so it stays in
+  // the sleep lifecycle — clear the retained state (no next timer), repaint
+  // the ordinary static sleep screen once and hand the main loop a
+  // power-button-only sleep. No wake-loop, no Home UI in the middle of the
+  // night.
+  LOG_DBG("SLP", "Slideshow stopped by battery cutoff");
+  slideshow::clearRetainedState();
+  display.setInverted(false);
+  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+  renderDefaultSleepScreen();
+  slideshow::requestSleep(slideshow::SleepRequest::StaticSleep);
 }

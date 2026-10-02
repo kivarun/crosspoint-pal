@@ -209,7 +209,7 @@ void BaseTheme::drawHintLabel(const GfxRenderer& renderer, const int fontId, con
 }
 
 void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
-                                const char* btn4) const {
+                                const char* btn4, const bool eraseUnused) const {
   if (gpio.hasTouch()) {
     return;
   }
@@ -231,16 +231,20 @@ void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
   const bool grayscale = renderer.getRenderMode() != GfxRenderer::BW && !renderer.grayPlanesAreAbsolute();
 
   for (int i = 0; i < 4; i++) {
-    // Only draw if the label is non-empty
-    if (labels[i] != nullptr && labels[i][0] != '\0') {
-      const int x = buttonPositions[i];
-      // Zero gray-plane bits leave the monochrome hint from the base pass intact.
-      renderer.fillRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, grayscale);
-      if (grayscale) continue;
-      renderer.drawRect(x, pageHeight - buttonY, buttonWidth, buttonHeight);
-      drawHintLabel(renderer, UI_10_FONT_ID, labels[i], x, buttonWidth, pageHeight - buttonY, buttonHeight,
-                    textYOffset);
+    const bool hasLabel = labels[i] != nullptr && labels[i][0] != '\0';
+    const int x = buttonPositions[i];
+    if (!hasLabel) {
+      // Opt-in modal repaint: an empty slot ERASES its stale frame (the skip
+      // default leaves previous content visible — other callers rely on it).
+      // Gray mode keeps the skip: its hint pixels belong to the base pass.
+      if (eraseUnused && !grayscale) renderer.fillRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, false);
+      continue;
     }
+    // Zero gray-plane bits leave the monochrome hint from the base pass intact.
+    renderer.fillRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, grayscale);
+    if (grayscale) continue;
+    renderer.drawRect(x, pageHeight - buttonY, buttonWidth, buttonHeight);
+    drawHintLabel(renderer, UI_10_FONT_ID, labels[i], x, buttonWidth, pageHeight - buttonY, buttonHeight, textYOffset);
   }
 
   renderer.setOrientation(orig_orientation);

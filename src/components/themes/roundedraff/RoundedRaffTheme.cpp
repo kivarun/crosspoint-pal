@@ -199,7 +199,9 @@ void RoundedRaffTheme::drawTextField(const GfxRenderer& renderer, Rect rect, con
 }
 
 void RoundedRaffTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
-                                       const char* btn4) const {
+                                       const char* btn4, const bool /*eraseUnused*/) const {
+  // eraseUnused is a no-op here: the group boxes below are repainted white on
+  // EVERY draw, so no slot can keep stale content in the first place.
   if (gpio.hasTouch()) {
     return;
   }

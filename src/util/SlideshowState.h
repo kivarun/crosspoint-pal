@@ -18,8 +18,9 @@ namespace slideshow {
 
 enum class SleepRequest : uint8_t {
   None,
-  Start,     // slideshow start: main loop performs the one-time persistence cleanup
-  Continue,  // timer-resume frame: no per-frame SD writes
+  Start,        // slideshow start: main loop performs the one-time persistence cleanup
+  Continue,     // timer-resume frame: no per-frame SD writes
+  StaticSleep,  // slideshow stopped (battery cutoff): sleep again power-button-only, no next timer
 };
 
 // 512 B total — a deliberate cap sized from the RTC SLOW linker budget (~2.6
