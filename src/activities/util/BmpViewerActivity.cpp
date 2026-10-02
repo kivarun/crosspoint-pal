@@ -248,12 +248,13 @@ void BmpViewerActivity::renderModal() {
   // on every row whose Confirm applies the draft to the viewer (editable rows
   // and the Apply row), Back | Reset on the draft-reset row and Back | Save on
   // the dedicated sleep row — never a hint that Left/Right list rows. The
-  // Slideshow page shows Back | Start on the start row (Left/Right act on
-  // nothing there) and Back | + | - | + on the value rows; its empty slots
-  // ERASE, because the page switches hint sets between rows and skipped slots
-  // would keep stale frames on the strip (the opt-in flag exists exactly for
-  // this modal-repaint case — the viewer's other pages keep the skip
-  // semantics where empty slots intentionally leave content visible).
+  // Slideshow page shows Back | Start on EVERY row (Confirm starts from any
+  // row; it is never a value edit) and Back | Start | - | + on the editable
+  // value rows; its empty slots ERASE, because the page switches hint sets
+  // between rows and skipped slots would keep stale frames on the strip (the
+  // opt-in flag exists exactly for this modal-repaint case — the viewer's
+  // other pages keep the skip semantics where empty slots intentionally leave
+  // content visible).
   if (viewerPage == ViewerPage::ImageSettings) {
     const char* confirmLabel;
     if (modalRow == 0) {
@@ -801,6 +802,24 @@ void BmpViewerActivity::handleModalInput() {
         switch (imageSettingsInput::settingsTouchActionFor(event.action)) {
           case imageSettingsInput::StepperTouch::ActivateRow:
             if (event.value >= 0 && event.value < pageSelectableCount()) {
+              if (viewerPage == ViewerPage::Slideshow) {
+                // Touch row-tap policy (host-tested): the Start row starts
+                // the slideshow; value-row taps are SELECT-ONLY (focus
+                // move) — value changes come only from the explicit -/+
+                // steppers, a tap is never a hidden extra increment.
+                switch (slideshow::pageRowTapAction(event.value)) {
+                  case slideshow::PageRowAction::Start:
+                    modalRow = event.value;
+                    startViewerSlideshow();
+                    return;
+                  case slideshow::PageRowAction::SelectOnly:
+                    modalRow = event.value;
+                    repaintModal();
+                    return;
+                  default:
+                    return;
+                }
+              }
               modalRow = event.value;
               activateRow();
             }
@@ -979,19 +998,11 @@ void BmpViewerActivity::activateRow() {
     }
 
     case ViewerPage::Slideshow:
-      switch (slideshow::pageRowAction(modalRow)) {
-        case slideshow::PageRowAction::Start:
-          startViewerSlideshow();
-          break;
-        case slideshow::PageRowAction::IntervalStepForward:
-          stepSlideshowInterval(1);  // Confirm parity with the Right key
-          break;
-        case slideshow::PageRowAction::OrderStepForward:
-          stepSlideshowOrder(1);  // Confirm parity with the Right key
-          break;
-        default:
-          break;
-      }
+      // ONE activation contract (host-tested policy): Confirm on ANY
+      // slideshow-menu row starts the slideshow from the open image.
+      // Confirm is never a value edit — the Left/Right keys and the touch
+      // steppers own Interval/Order changes.
+      if (slideshow::pageRowAction(modalRow) == slideshow::PageRowAction::Start) startViewerSlideshow();
       break;
 
     case ViewerPage::ImageInfo:

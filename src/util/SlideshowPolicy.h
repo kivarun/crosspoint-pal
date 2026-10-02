@@ -185,34 +185,43 @@ inline constexpr size_t advertisedSleepScreenValueCount(const bool sleepSlidesho
 
 // Image Viewer Slideshow page rows (pure policy): row 0 = Start slideshow;
 // row 1 = Interval (the shared persisted cadence); row 2 = Order (the shared
-// persisted frame order) — Left/Right and the touch stepper step the value
-// rows in both directions, Confirm/row-tap steps forward. Anything else
-// activates nothing.
-enum class PageRowAction : uint8_t { None = 0, Start, IntervalStepForward, OrderStepForward };
-inline PageRowAction pageRowAction(const int row) {
-  if (row == 0) return PageRowAction::Start;
-  if (row == 1) return PageRowAction::IntervalStepForward;
-  if (row == 2) return PageRowAction::OrderStepForward;
-  return PageRowAction::None;
-}
+// persisted frame order). ONE activation contract: Confirm on ANY
+// slideshow-menu row STARTS the slideshow (the open image is the first
+// frame); Confirm is never a value-edit operation — the editable value rows
+// are changed by the explicit axes only (Left/Right and the touch -/+
+// steppers). Touch taps on a value row are select-only (focus move), and
+// taps on the Start row start. Anything else activates nothing.
 inline constexpr int SLIDESHOW_PAGE_ROWS = 3;
 // The page's editable value rows.
 inline constexpr int INTERVAL_PAGE_ROW = 1;
 inline constexpr int ORDER_PAGE_ROW = 2;
 
-// Slideshow-page button-hint slots (pure, host-tested): the Start row offers
-// ONLY its real actions — Back | Start; Left/Right act on nothing there, so
-// no -/+ slots. The editable value rows also show the stepper keys
-// (Back | + | - | + in mapped-label terms). The whole page draws with
+enum class PageRowAction : uint8_t { None = 0, Start, SelectOnly };
+// Button Confirm dispatch.
+inline constexpr PageRowAction pageRowAction(const int row) {
+  if (row >= 0 && row < SLIDESHOW_PAGE_ROWS) return PageRowAction::Start;
+  return PageRowAction::None;
+}
+// Touch row-tap dispatch: the Start row starts, value rows are select-only.
+inline PageRowAction pageRowTapAction(const int row) {
+  if (row == 0) return PageRowAction::Start;
+  if (row == INTERVAL_PAGE_ROW || row == ORDER_PAGE_ROW) return PageRowAction::SelectOnly;
+  return PageRowAction::None;
+}
+
+// Slideshow-page button-hint slots (pure, host-tested): EVERY row's Confirm
+// slot shows Start (Confirm starts from any row); the editable value rows
+// also show the stepper keys (Back | Start | - | + in mapped-label terms),
+// the Start row shows only Back | Start. The whole page draws with
 // eraseUnused so a row or page switch physically removes stale hint frames
 // (drawButtonHints skips empty slots by design — other callers rely on that;
 // the opt-in erase is modal-repaint-only).
 struct PageHintSlots {
-  bool confirmStart;   // Confirm slot shows Start instead of "+"
+  bool confirmStart;   // Confirm slot shows Start
   bool stepperSlots;   // Left/Right slots carry "-"/"+"
 };
 inline constexpr PageHintSlots pageHintSlots(const int row) {
-  return {row == 0, row == INTERVAL_PAGE_ROW || row == ORDER_PAGE_ROW};
+  return {pageRowAction(row) == PageRowAction::Start, row == INTERVAL_PAGE_ROW || row == ORDER_PAGE_ROW};
 }
 
 }  // namespace slideshow

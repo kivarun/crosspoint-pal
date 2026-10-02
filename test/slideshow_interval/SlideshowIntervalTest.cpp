@@ -198,28 +198,35 @@ TEST(SlideshowOrderInitial, PerOrderSemantics) {
   EXPECT_EQ(slideshow::initialIndex(0, slideshow::Order::Random, 9), -1);
 }
 
-// Slideshow page rows (pure policy): Start / Interval / Order — their
-// actions, the editable rows and the button-hint slot sets.
+// Slideshow page rows (pure policy): Start / Interval / Order with ONE
+// activation contract — Confirm (button) starts from ANY row; touch taps
+// start on the Start row and are select-only on value rows.
 TEST(SlideshowPageRows, ActionsSelectableCountAndHints) {
   EXPECT_EQ(slideshow::SLIDESHOW_PAGE_ROWS, 3);
   EXPECT_EQ(slideshow::pageRowAction(0), slideshow::PageRowAction::Start);
-  EXPECT_EQ(slideshow::pageRowAction(1), slideshow::PageRowAction::IntervalStepForward);
-  EXPECT_EQ(slideshow::pageRowAction(2), slideshow::PageRowAction::OrderStepForward);
+  EXPECT_EQ(slideshow::pageRowAction(1), slideshow::PageRowAction::Start);
+  EXPECT_EQ(slideshow::pageRowAction(2), slideshow::PageRowAction::Start);
   EXPECT_EQ(slideshow::pageRowAction(3), slideshow::PageRowAction::None);
   EXPECT_EQ(slideshow::pageRowAction(-1), slideshow::PageRowAction::None);
+  EXPECT_EQ(slideshow::pageRowTapAction(0), slideshow::PageRowAction::Start);
+  EXPECT_EQ(slideshow::pageRowTapAction(1), slideshow::PageRowAction::SelectOnly);
+  EXPECT_EQ(slideshow::pageRowTapAction(2), slideshow::PageRowAction::SelectOnly);
+  EXPECT_EQ(slideshow::pageRowTapAction(3), slideshow::PageRowAction::None);
   EXPECT_EQ(slideshow::INTERVAL_PAGE_ROW, 1);
   EXPECT_EQ(slideshow::ORDER_PAGE_ROW, 2);
 
-  // Hint slots: the Start row offers ONLY its real actions (no +/-); the
-  // editable rows also show the stepper keys. Every row erases unused slots.
+  // Hint slots: EVERY row's Confirm slot shows Start; the editable rows also
+  // show the stepper keys. Every row erases unused slots (checked at the
+  // caller: eraseUnused is always true for this page).
+  for (const int row : {0, 1, 2}) {
+    const auto slots = slideshow::pageHintSlots(row);
+    EXPECT_TRUE(slots.confirmStart) << "row=" << row;
+  }
   const auto start = slideshow::pageHintSlots(0);
-  EXPECT_TRUE(start.confirmStart);
   EXPECT_FALSE(start.stepperSlots);
   const auto interval = slideshow::pageHintSlots(1);
-  EXPECT_FALSE(interval.confirmStart);
   EXPECT_TRUE(interval.stepperSlots);
   const auto order = slideshow::pageHintSlots(2);
-  EXPECT_FALSE(order.confirmStart);
   EXPECT_TRUE(order.stepperSlots);
 }
 
