@@ -230,4 +230,132 @@ TEST(SlideshowPageRows, ActionsSelectableCountAndHints) {
   EXPECT_TRUE(order.stepperSlots);
 }
 
+// ---- Randomized exhaustive cycle (LCG + cycle walking, adapted from
+// CrossPoint upstream PR #3841 by @gkaindl). All RNG values are fixed, so
+// these tests carry no statistical dependence. ----
+
+// Helper: runs one full cycle from currentIndex with the given odd increment
+// and records how often each index appears — the pre-shown current frame is
+// the cycle's first element.
+std::vector<int> runCycle(const int count, const uint16_t increment, const int currentIndex) {
+  std::vector<int> seen(count, 0);
+  seen[currentIndex] = 1;
+  slideshow::RandomCycleState state{};
+  state.increment = increment;
+  state.remaining = count - 1;
+  state.total = count;
+  int current = currentIndex;
+  for (int picks = 0; picks < count - 1; ++picks) {
+    const auto step = slideshow::randomCycleNext(current, count, state, 0);
+    EXPECT_GE(step.index, 0);
+    EXPECT_LT(step.index, count);
+    if (step.index < 0 || step.index >= count) return seen;
+    seen[step.index]++;
+    state = step.state;
+    current = step.index;
+  }
+  return seen;
+}
+
+// Each index appears exactly once per cycle, for power-of-two and
+// non-power-of-two counts, small and large, and for different odd
+// increments. N=1 repeats unavoidably.
+TEST(RandomCycle, ExhaustsEveryIndexExactlyOnce) {
+  const auto single = slideshow::randomCycleNext(0, 1, slideshow::RandomCycleState{}, 7);
+  EXPECT_EQ(single.index, 0);
+
+  for (const int count : {2, 3, 5, 8, 1000}) {
+    for (const uint16_t increment : {1u, 3u, 5u, 7u, 65535u}) {
+      if (increment >= slideshow::randomCycleModulus(count)) continue;
+      const auto seen = runCycle(count, increment, 0);
+      for (int idx = 0; idx < count; ++idx) {
+        ASSERT_EQ(seen[idx], 1) << "count=" << count << " increment=" << increment << " idx=" << idx;
+      }
+    }
+  }
+}
+
+// No immediate repeat within a cycle, and none across the cycle boundary
+// either (first pick of the new cycle differs from the last frame).
+TEST(RandomCycle, NoImmediateRepeatWithinOrAcrossCycles) {
+  for (const int count : {2, 3, 5, 8}) {
+    slideshow::RandomCycleState state{};
+    state.increment = 5;
+    state.remaining = count - 1;
+    state.total = count;
+    int current = 0;
+    for (int picks = 0; picks < count - 1; ++picks) {
+      const auto step = slideshow::randomCycleNext(current, count, state, 0);
+      ASSERT_NE(step.index, current) << "count=" << count << " pick=" << picks;
+      state = step.state;
+      current = step.index;
+    }
+    const auto step = slideshow::randomCycleNext(current, count, state, 42);
+    EXPECT_NE(step.index, current) << "count=" << count;
+  }
+}
+
+// Corrupt retained metadata, directory changes and a missing current index
+// all fail safe to a fresh cycle; empty directories fail closed.
+TEST(RandomCycle, ResetSemantics) {
+  slideshow::RandomCycleState ok{};
+  ok.increment = 5;
+  ok.remaining = 1;
+  ok.total = 3;
+
+  slideshow::RandomCycleState corrupt{};
+  corrupt.increment = 4;  // even
+  corrupt.remaining = 2;
+  corrupt.total = 3;
+  const auto even = slideshow::randomCycleNext(0, 3, corrupt, 7);
+  EXPECT_GE(even.index, 0);
+  EXPECT_LT(even.index, 3);
+  EXPECT_TRUE(slideshow::randomCycleValid(even.state, 3));
+
+  corrupt.increment = 5;
+  corrupt.total = 9;  // directory changed
+  const auto changed = slideshow::randomCycleNext(0, 3, corrupt, 7);
+  EXPECT_GE(changed.index, 0);
+  EXPECT_TRUE(slideshow::randomCycleValid(changed.state, 3));
+
+  corrupt.total = 3;
+  corrupt.remaining = 99;  // out of range
+  const auto stale = slideshow::randomCycleNext(0, 3, corrupt, 7);
+  EXPECT_TRUE(slideshow::randomCycleValid(stale.state, 3));
+
+  // Missing current index: safe deterministic reset from the first entry.
+  const auto missing = slideshow::randomCycleNext(-1, 3, ok, 7);
+  EXPECT_GE(missing.index, 0);
+  EXPECT_LT(missing.index, 3);
+  EXPECT_TRUE(slideshow::randomCycleValid(missing.state, 3));
+
+  // Empty directory: fail closed.
+  EXPECT_EQ(slideshow::randomCycleNext(0, 0, ok, 7).index, -1);
+  EXPECT_EQ(slideshow::randomCycleNext(0, -3, ok, 7).index, -1);
+}
+
+// LCG shapes: power-of-two modulus and the odd increment derivation.
+TEST(RandomCycle, HullDobellShapes) {
+  EXPECT_EQ(slideshow::randomCycleModulus(1), 1);
+  EXPECT_EQ(slideshow::randomCycleModulus(2), 2);
+  EXPECT_EQ(slideshow::randomCycleModulus(3), 4);
+  EXPECT_EQ(slideshow::randomCycleModulus(5), 8);
+  EXPECT_EQ(slideshow::randomCycleModulus(8), 8);
+  EXPECT_EQ(slideshow::randomCycleModulus(9), 16);
+  EXPECT_EQ(slideshow::randomCycleIncrement(0, 3), 1);
+  EXPECT_EQ(slideshow::randomCycleIncrement(1, 3), 3);
+  EXPECT_EQ(slideshow::randomCycleIncrement(2, 3), 1);  // wraps inside the modulus
+  EXPECT_EQ(slideshow::randomCycleIncrement(4294967295u, 5), 7);
+}
+
+// Forward/Reverse regression: their wrap-advance semantics are untouched.
+TEST(RandomCycle, ForwardReverseUnchanged) {
+  EXPECT_EQ(slideshow::indexAfterAdvance(0, 3, slideshow::Order::Forward, 0), 1);
+  EXPECT_EQ(slideshow::indexAfterAdvance(2, 3, slideshow::Order::Forward, 0), 0);
+  EXPECT_EQ(slideshow::indexAfterAdvance(0, 3, slideshow::Order::Reverse, 0), 2);
+  EXPECT_EQ(slideshow::indexAfterAdvance(2, 3, slideshow::Order::Reverse, 0), 1);
+  EXPECT_EQ(slideshow::indexAfterAdvance(-1, 3, slideshow::Order::Forward, 7), 0);
+  EXPECT_EQ(slideshow::indexAfterAdvance(-1, 3, slideshow::Order::Reverse, 7), 2);
+}
+
 }  // namespace

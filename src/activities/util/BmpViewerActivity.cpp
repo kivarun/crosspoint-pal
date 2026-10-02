@@ -1216,11 +1216,14 @@ void BmpViewerActivity::onEnter() {
 }
 
 void BmpViewerActivity::advanceSlideshowFrame() {
-  // Advance under the persisted ORDER policy (Forward/Reverse/Random; the
-  // device RNG feeds Random). A retained image missing from the scan hands
-  // the policy its restart semantics. Nothing usable means the slideshow
-  // ends, fail closed.
-  const std::string next = imageonly::nextImageAfter(filePath, slideshow::orderClamped(SETTINGS.slideshowOrder));
+  // Advance under the persisted ORDER policy (Forward/Reverse/Random). A
+  // retained image missing from the scan hands the policy its restart
+  // semantics; Random advances its randomized exhaustive cycle (RTC-only).
+  // Nothing usable means the slideshow ends, fail closed.
+  const slideshow::Order order = slideshow::orderClamped(SETTINGS.slideshowOrder);
+  slideshow::RandomCycleState cycleOut;
+  const std::string next = imageonly::nextImageAfter(filePath, order, slideshow::getRetainedCycle(), esp_random(),
+                                                     cycleOut);
   if (next.empty()) {
     endViewerSlideshowToHome();
     return;
@@ -1242,6 +1245,8 @@ void BmpViewerActivity::advanceSlideshowFrame() {
     endViewerSlideshowToHome();
     return;
   }
+  // RTC-only cycle metadata update (no SD write); the re-arm above preserves it.
+  slideshow::setRetainedCycle(cycleOut);
   slideshow::requestSleep(slideshow::SleepRequest::Continue);
 }
 
@@ -1275,7 +1280,9 @@ void BmpViewerActivity::stepSlideshowOrder(const int delta) {
 void BmpViewerActivity::startViewerSlideshow() {
   // Slideshow page Start row: arm the CURRENT image with Viewer mode, repaint
   // it image-only and hand the frame sleep to the main loop (which performs
-  // the one-time Start persistence).
+  // the one-time Start persistence). The open image is the first frame of a
+  // fresh randomized cycle — reset the retained cycle metadata so the first
+  // timer continuation starts a new cycle from here (RTC-only, no SD write).
   if (!slideshow::arm(filePath, slideshow::Mode::Viewer)) {
     LOG_ERR("BMP", "Slideshow arm rejected");
     GUI.drawPopup(renderer, tr(STR_FAILED_LOWER));
@@ -1283,6 +1290,7 @@ void BmpViewerActivity::startViewerSlideshow() {
     repaintModal();
     return;
   }
+  slideshow::setRetainedCycle(slideshow::RandomCycleState{});
   // An undecodable first frame must not timer-loop on a blank panel: cancel
   // and restore the normal viewer.
   if (!renderImageOnlyFrame()) {

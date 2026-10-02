@@ -64,13 +64,18 @@ bool renderImageFile(GfxRenderer& renderer, const std::string& path, const ToneL
 // the directory cannot be opened.
 std::vector<std::string> listImageFiles(const std::string& dirPath);
 
-// The next slideshow frame after currentPath inside ITS directory, under the
-// persisted ORDER policy (slideshow::indexAfterAdvance): Forward walks the
-// sorted list with wrap-around, Reverse walks it backward, Random picks an
-// independent random frame (never the current one when others exist). The
-// device RNG feeds Random; Forward/Reverse are value-free. "" when the
-// directory holds no candidate image.
-std::string nextImageAfter(const std::string& currentPath, const slideshow::Order order);
+// The next slideshow frame after currentPath inside ITS directory. Forward
+// and Reverse walk the sorted list (slideshow::indexAfterAdvance); Random
+// advances its randomized exhaustive cycle (slideshow::randomCycleNext,
+// adapted from CrossPoint upstream PR #3841 by @gkaindl): every available
+// image is shown exactly once before the first repeat, and the walk position
+// is the current image's index. cycle is the retained metadata IN/OUT —
+// returned updated (pass-through for Forward/Reverse); the caller persists
+// it, this module owns no persistence. randomValue feeds a new cycle's
+// increment. path is "" when the directory holds no candidate image.
+std::string nextImageAfter(const std::string& currentPath, const slideshow::Order order,
+                           const slideshow::RandomCycleState& cycle, const uint32_t randomValue,
+                           slideshow::RandomCycleState& cycleOut);
 
 // The first frame of the sleep-slideshow source under the fixed storage
 // contract, under the persisted ORDER policy (slideshow::initialIndex):

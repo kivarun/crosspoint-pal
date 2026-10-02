@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -33,17 +34,26 @@ inline constexpr bool sleepRequestArmsTimer(const SleepRequest request) {
 
 // 512 B total — a deliberate cap sized from the RTC SLOW linker budget (~2.6
 // KB free of 8 KB on both supported targets); longer paths fail closed at
-// arm(). Schema v2: the mode byte sits between the magic and the path
-// (shrunken to 507), and the magic was bumped so a retained state written by
-// the proof firmware (0x534C4944 'SLID', path-only layout) can never validate.
+// arm(). Schema v3: the randomized-cycle metadata (six bytes) sits between
+// the magic and the mode byte, and the path buffer shrank to 501 — the
+// magic was bumped so a retained state written under the v2 layout
+// (0x534C4945 'SLIE', no cycle bytes) can never validate. Schema v2: the
+// mode byte sits between the magic and the path (shrunken to 507), and the
+// magic was bumped so a retained state written by the proof firmware
+// (0x534C4944 'SLID', path-only layout) can never validate.
 struct SlideshowState {
-  uint32_t magic;
-  uint8_t mode;  // Mode, validated by stateValid
-  char path[507];
+  uint32_t magic;                 // SLIDESHOW_MAGIC, written LAST
+  slideshow::RandomCycleState cycle;  // randomized exhaustive cycle metadata
+  uint8_t mode;                   // Mode, validated by stateValid
+  char path[501];
 };
 static_assert(sizeof(SlideshowState) == 512, "retained slideshow state must stay within its RTC budget");
+static_assert(offsetof(SlideshowState, magic) == 0, "retained layout: magic first");
+static_assert(offsetof(SlideshowState, cycle) == 4, "retained layout: no padding before the cycle bytes");
+static_assert(offsetof(SlideshowState, mode) == 10, "retained layout: mode after the cycle bytes");
+static_assert(offsetof(SlideshowState, path) == 11, "retained layout: path last");
 
-inline constexpr uint32_t SLIDESHOW_MAGIC = 0x534C4945;  // 'SLID' schema v2 (mode byte added)
+inline constexpr uint32_t SLIDESHOW_MAGIC = 0x534C4946;  // 'SLID' schema v3 (cycle metadata added)
 
 // Pure validation policy (host-testable): exact magic, a known mode, a NUL
 // inside path[], non-empty path rooted at '/'.
@@ -77,6 +87,10 @@ Mode getRetainedMode();
 // Copy of the retained path; reading does not consume or clear the state.
 // Empty string when no valid state is armed.
 std::string getRetainedPath();
+// Retained randomized-cycle metadata (RTC): re-arming a path preserves it,
+// Start resets it; reading/writing never touches SD.
+RandomCycleState getRetainedCycle();
+void setRetainedCycle(const RandomCycleState& cycle);
 
 // RAM-only (BSS) one-frame sleep handoff to the main loop; not RTC retained.
 void requestSleep(SleepRequest kind);

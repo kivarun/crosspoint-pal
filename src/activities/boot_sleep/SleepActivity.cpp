@@ -909,6 +909,10 @@ void SleepActivity::renderSlideshowSleepScreen() const {
     slideshow::clearRetainedState();
     return renderDefaultSleepScreen();
   }
+  // The random initial frame is the first frame of a fresh randomized cycle:
+  // reset the retained cycle metadata (RTC-only, no SD write) so the first
+  // timer continuation starts a new cycle from here.
+  slideshow::setRetainedCycle(slideshow::RandomCycleState{});
 }
 
 void SleepActivity::continueSlideshow() {
@@ -922,8 +926,10 @@ void SleepActivity::continueSlideshow() {
     return endSlideshowToStaticSleep();
   }
 
-  const std::string next =
-      imageonly::nextImageAfter(slideshow::getRetainedPath(), slideshow::orderClamped(SETTINGS.slideshowOrder));
+  const slideshow::Order order = slideshow::orderClamped(SETTINGS.slideshowOrder);
+  slideshow::RandomCycleState cycleOut;
+  const std::string next = imageonly::nextImageAfter(slideshow::getRetainedPath(), order,
+                                                     slideshow::getRetainedCycle(), esp_random(), cycleOut);
   if (next.empty()) return endSlideshowToOrdinary();
 
   sleepTone = toneLutFromProfile(SETTINGS.sleepRenderProfile);
@@ -931,6 +937,8 @@ void SleepActivity::continueSlideshow() {
   if (!imageonly::renderImageFile(renderer, next, sleepTone) || !slideshow::arm(next, slideshow::Mode::Sleep)) {
     return endSlideshowToOrdinary();
   }
+  // RTC-only cycle metadata update (no SD write); re-arming above preserves it.
+  slideshow::setRetainedCycle(cycleOut);
   slideshow::requestSleep(slideshow::SleepRequest::Continue);
 }
 

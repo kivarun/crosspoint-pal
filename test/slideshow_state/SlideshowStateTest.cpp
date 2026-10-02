@@ -118,3 +118,23 @@ TEST(SleepRequestTimerPolicy, FullContract) {
   EXPECT_FALSE(slideshow::sleepRequestArmsTimer(slideshow::SleepRequest::StaticSleep));
   EXPECT_FALSE(slideshow::sleepRequestArmsTimer(slideshow::SleepRequest::None));
 }
+
+// Schema v3 layout: the struct keeps its exact 512 B RTC budget and its
+// member offsets leave no padding surprises (magic 4 + cycle 6 + mode 1 +
+// path 501 = 512).
+TEST(SlideshowStateLayout, BudgetAndOffsetsPinned) {
+  EXPECT_EQ(sizeof(SlideshowState), 512u);
+  EXPECT_EQ(offsetof(SlideshowState, magic), 0u);
+  EXPECT_EQ(offsetof(SlideshowState, cycle), 4u);
+  EXPECT_EQ(offsetof(SlideshowState, mode), 10u);
+  EXPECT_EQ(offsetof(SlideshowState, path), 11u);
+  EXPECT_EQ(sizeof(SlideshowState::path), 501u);
+}
+
+// A retained state written under the v2 layout (magic 0x534C4945, no cycle
+// bytes) must never validate under v3 — it fails closed and is cleared.
+TEST(SlideshowStateValid, RejectsSchemaV2Magic) {
+  auto state = armed("/.sleep/a.bmp", Mode::Sleep);
+  state.magic = 0x534C4945;
+  EXPECT_FALSE(slideshow::stateValid(state));
+}

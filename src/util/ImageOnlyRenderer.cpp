@@ -195,7 +195,10 @@ std::vector<std::string> listImageFiles(const std::string& dirPath) {
   return images;
 }
 
-std::string nextImageAfter(const std::string& currentPath, const slideshow::Order order) {
+std::string nextImageAfter(const std::string& currentPath, const slideshow::Order order,
+                           const slideshow::RandomCycleState& cycle, const uint32_t randomValue,
+                           slideshow::RandomCycleState& cycleOut) {
+  cycleOut = cycle;
   const std::string dirPath = FsHelpers::extractFolderPath(currentPath);
   const auto images = listImageFiles(dirPath);
   if (images.empty()) return {};
@@ -206,11 +209,23 @@ std::string nextImageAfter(const std::string& currentPath, const slideshow::Orde
   // A current file missing from the scan hands the order policy an invalid
   // index (its documented restart semantics apply).
   const int currentIndex = image != images.end() ? static_cast<int>(image - images.begin()) : -1;
-  // The device RNG (esp_random.h) feeds the Random order; the other orders
-  // never look at the value.
-  const uint32_t randomValue = order == slideshow::Order::Random ? esp_random() : 0;
-  const int nextIndex =
-      slideshow::indexAfterAdvance(currentIndex, static_cast<int>(images.size()), order, randomValue);
+  int nextIndex = -1;
+  switch (order) {
+    case slideshow::Order::Forward:
+    case slideshow::Order::Reverse:
+      nextIndex = slideshow::indexAfterAdvance(currentIndex, static_cast<int>(images.size()), order, randomValue);
+      break;
+    case slideshow::Order::Random: {
+      // The device RNG (esp_random.h) only feeds a new cycle's increment;
+      // mid-cycle the pure policy ignores it.
+      const auto step =
+          slideshow::randomCycleNext(currentIndex, static_cast<int>(images.size()), cycle, esp_random());
+      if (step.index < 0) return {};
+      cycleOut = step.state;
+      nextIndex = step.index;
+      break;
+    }
+  }
   if (nextIndex < 0 || nextIndex >= static_cast<int>(images.size())) return {};
 
   std::string path = dirPath;

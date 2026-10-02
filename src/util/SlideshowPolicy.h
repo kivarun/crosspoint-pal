@@ -119,6 +119,108 @@ inline int initialIndex(const int count, const Order order, const uint32_t rando
   }
 }
 
+// ---- Randomized exhaustive cycle (Random order) ----
+//
+// LCG/cycle-walking approach adapted from CrossPoint upstream PR #3841 by
+// @gkaindl (https://github.com/crosspoint-reader/crosspoint-reader/pull/3841):
+// a full-period LCG over the smallest power-of-two modulus >= count
+// (multiplier 5, odd increment — Hull-Dobell gives full period over 2^k),
+// walked with cycle-walking. Unlike the upstream sleep-image use, the walk
+// position is the CURRENT image index (derived from the retained path), so
+// the cycle follows the LCG order from wherever the user currently is and no
+// permutation array or history list is needed.
+//
+// Every available image is shown exactly once before the first repeat; an
+// exhausted cycle starts a new random one (fresh odd increment), and the
+// walk skips the frame already on screen — no immediate repeat within a
+// cycle or across the boundary (for count > 1).
+
+// Retained (RTC) cycle metadata. The image index itself is NOT stored — it
+// is derived from the retained path and the sorted directory scan.
+struct RandomCycleState {
+  uint16_t increment;  // odd LCG increment of the current cycle
+  uint16_t remaining;  // picks left before the current cycle exhausts
+  uint16_t total;      // image count the current cycle was built for
+};
+
+// Modulus of the LCG: the smallest power of two >= count.
+inline constexpr uint32_t randomCycleModulus(const int count) {
+  uint32_t m = 1;
+  while (m < static_cast<uint32_t>(count)) m <<= 1;
+  return m;
+}
+
+// Odd LCG increment derived from the caller's device-RNG value (Hull-Dobell:
+// multiplier 5 + odd increment = full period over 2^k). Reducing first keeps
+// the doubling overflow-safe.
+inline constexpr uint16_t randomCycleIncrement(const uint32_t randomValue, const int count) {
+  const uint32_t m = randomCycleModulus(count);
+  return static_cast<uint16_t>(((randomValue % m) * 2u + 1u) % m);
+}
+
+// A freshly started cycle: the current frame is its first element.
+inline constexpr RandomCycleState randomCycleReset(const uint32_t randomValue, const int count) {
+  RandomCycleState cycle{};
+  cycle.total = static_cast<uint16_t>(count);
+  cycle.remaining = count > 1 ? static_cast<uint16_t>(count - 1) : 0;
+  cycle.increment = randomCycleIncrement(randomValue, count);
+  return cycle;
+}
+
+// Mid-cycle state validity against the CURRENT directory: matching count, an
+// odd increment inside the modulus, remaining in [1, count-1]. Anything else
+// (corrupt metadata, directory changed) resets the cycle at use time.
+inline constexpr bool randomCycleValid(const RandomCycleState& cycle, const int count) {
+  if (count <= 1) return false;
+  if (cycle.total != static_cast<uint16_t>(count)) return false;
+  if (cycle.remaining == 0 || cycle.remaining >= static_cast<uint16_t>(count)) return false;
+  if (cycle.increment % 2u == 0) return false;
+  return cycle.increment < static_cast<uint16_t>(randomCycleModulus(count));
+}
+
+struct RandomCycleStep {
+  int index;              // next image index (-1: no usable frame)
+  RandomCycleState state; // updated retained metadata
+};
+
+// Pure next-frame policy of the Random order. randomValue feeds a NEW
+// cycle's increment when the current one is exhausted or invalid; mid-cycle
+// it is ignored. currentIndex out of range (retained path missing from the
+// scan) resets the cycle and walks deterministically from the first entry.
+inline RandomCycleStep randomCycleNext(const int currentIndex, const int count,
+                                       const RandomCycleState& cycle, const uint32_t randomValue) {
+  RandomCycleStep step{};
+  step.index = -1;
+  if (count <= 0) return step;  // no frames: the caller fails closed
+
+  if (count == 1) {
+    // The only image, unavoidably repeated; the cycle is trivially exhausted.
+    step.index = 0;
+    step.state = randomCycleReset(randomValue, count);
+    return step;
+  }
+
+  // Exhausted or invalid (corrupt metadata / directory changed): a new cycle
+  // starts at the current frame, with a fresh odd increment from the RNG.
+  step.state = (cycle.remaining == 0 || !randomCycleValid(cycle, count))
+                   ? randomCycleReset(randomValue, count)
+                   : cycle;
+  --step.state.remaining;
+
+  // Cycle-walk the LCG from the current position: skip out-of-range states
+  // and the frame already on screen. Terminates within the modulus: for
+  // count > 1 at least one valid frame other than the current one is on the
+  // full-period cycle.
+  const bool haveCurrent = currentIndex >= 0 && currentIndex < count;
+  uint32_t state = haveCurrent ? static_cast<uint32_t>(currentIndex) : 0u;
+  const uint32_t m = randomCycleModulus(count);
+  do {
+    state = (5u * state + step.state.increment) % m;
+  } while (state >= static_cast<uint32_t>(count) || state == static_cast<uint32_t>(currentIndex));
+  step.index = static_cast<int>(state);
+  return step;
+}
+
 // Persisted slideshow interval: an INDEX into this fixed cadence (append-safe
 // — new values are appended, existing indices never move). Shared by the
 // Image Viewer slideshow and Sleep Screen = Slideshow.

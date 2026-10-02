@@ -41,6 +41,10 @@ Mode getRetainedMode() {
 
 std::string getRetainedPath() { return hasValidRetainedState() ? std::string(retainedState.path) : std::string(); }
 
+RandomCycleState getRetainedCycle() { return retainedState.cycle; }
+
+void setRetainedCycle(const RandomCycleState& cycle) { retainedState.cycle = cycle; }
+
 void requestSleep(const SleepRequest kind) { pendingSleepRequest = kind; }
 
 SleepRequest takeSleepRequest() {
