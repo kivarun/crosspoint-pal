@@ -23,6 +23,14 @@ enum class SleepRequest : uint8_t {
   StaticSleep,  // slideshow stopped (battery cutoff): sleep again power-button-only, no next timer
 };
 
+// Timer policy of the one-frame sleep transition (pure, host-tested): the
+// slideshow RUNS on Start and Continue — both arm the persisted interval
+// timer; StaticSleep (battery-cutoff exit) sleeps power-button-only, and None
+// (which never reaches the sleep handoff) arms nothing.
+inline constexpr bool sleepRequestArmsTimer(const SleepRequest request) {
+  return request == SleepRequest::Start || request == SleepRequest::Continue;
+}
+
 // 512 B total — a deliberate cap sized from the RTC SLOW linker budget (~2.6
 // KB free of 8 KB on both supported targets); longer paths fail closed at
 // arm(). Schema v2: the mode byte sits between the magic and the path

@@ -825,10 +825,11 @@ void loop() {
       }
     }
     HalPowerManager::Lock powerLock;
-    // StaticSleep = the slideshow stopped itself (battery cutoff): the sleep
-    // screen was already re-rendered the ordinary static way — no next
-    // timer wake, power button only.
-    enterHardwareDeepSleep(slideshowRequest == slideshow::SleepRequest::Continue
+    // Timer policy of the handoff (slideshow::sleepRequestArmsTimer,
+    // host-tested): Start/Continue RUN the slideshow and arm the persisted
+    // interval; StaticSleep (battery cutoff) re-rendered the ordinary static
+    // sleep screen — power-button only, no next timer wake.
+    enterHardwareDeepSleep(slideshow::sleepRequestArmsTimer(slideshowRequest)
                                ? slideshow::intervalMicros(SETTINGS.slideshowInterval)
                                : 0);
     return;

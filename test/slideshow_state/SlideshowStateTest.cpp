@@ -109,3 +109,12 @@ TEST(SlideshowArmInput, CapacityAndShapePredicate) {
   maxPath.push_back('a');  // would not fit with its NUL
   EXPECT_FALSE(slideshow::armInputValid(maxPath));
 }
+
+// Timer policy of the one-frame sleep handoff (slideshow::sleepRequestArmsTimer):
+// the slideshow RUNS on Start and Continue; StaticSleep and None arm nothing.
+TEST(SleepRequestTimerPolicy, FullContract) {
+  EXPECT_TRUE(slideshow::sleepRequestArmsTimer(slideshow::SleepRequest::Start));
+  EXPECT_TRUE(slideshow::sleepRequestArmsTimer(slideshow::SleepRequest::Continue));
+  EXPECT_FALSE(slideshow::sleepRequestArmsTimer(slideshow::SleepRequest::StaticSleep));
+  EXPECT_FALSE(slideshow::sleepRequestArmsTimer(slideshow::SleepRequest::None));
+}
