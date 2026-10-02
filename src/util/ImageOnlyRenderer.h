@@ -25,8 +25,9 @@ namespace imageonly {
 // Center an image on the page (shared by every BMP render path).
 void fitOnScreen(int imageW, int imageH, int pageW, int pageH, int* x, int* y);
 
-// Grayscale transfer mode the sleep-image presentation policy uses: Direct
-// when the panel supports it, Absolute otherwise.
+// Grayscale transfer mode STATIC sleep-image rendering uses: Direct when the
+// panel supports it, Absolute otherwise. Callers of drawSleepBitmap() own the
+// mode; slideshow frames always pass Absolute instead of this.
 HalDisplay::GrayscaleMode sleepGrayscaleMode(const GfxRenderer& renderer);
 
 // Decode a PNG into the framebuffer at its centered fit — no clear, no
@@ -37,17 +38,19 @@ bool renderPngToFramebuffer(GfxRenderer& renderer, const std::string& path);
 // SleepActivity::renderBitmapSleepScreen(): one drawBitmap pass into the
 // cleared framebuffer, then the panel transfer the sleep pipeline uses —
 // grayscale sources get the gray base + LSB/MSB plane transfers + the gray
-// buffer (absolute vs non-absolute panel behavior preserved; the plane loop
-// honors preserveBackground so overlay mode keeps its background bits), BW
-// sources get the single-pass HALF_REFRESH transfer. hasGreyscale is the
+// buffer (the gray base mode is the CALLER's policy: Direct, Absolute or the
+// HALF-refresh fallback for panels without native gray support; the plane
+// loop honors preserveBackground so overlay mode keeps its background bits),
+// BW sources get the single-pass HALF_REFRESH transfer. hasGreyscale is the
 // CALLER's source classification (the cover filter may deliberately downgrade
 // a gray bitmap to BW). invertAfterDraw reproduces the cover screens'
 // inverted-filter step between the draw and the base transfer. Deliberately
 // NO BW framebuffer rebuild and no chrome afterward. Returns false when the
 // bitmap could not be drawn (the HALF_REFRESH fallback transfer ran, as the
 // sleep policy does).
-bool drawSleepBitmap(GfxRenderer& renderer, const Bitmap& bitmap, const bool hasGreyscale, const int x, const int y,
-                     const float cropX, const float cropY, const bool preserveBackground, const bool invertAfterDraw);
+bool drawSleepBitmap(GfxRenderer& renderer, const Bitmap& bitmap, const bool hasGreyscale,
+                     const HalDisplay::GrayscaleMode grayscaleMode, const int x, const int y, const float cropX,
+                     const float cropY, const bool preserveBackground, const bool invertAfterDraw);
 
 // Render ONE BMP/PNG file as a slideshow frame with the supplied tone LUT:
 // centered/fit, the sleep-image presentation policy above, no button hints,

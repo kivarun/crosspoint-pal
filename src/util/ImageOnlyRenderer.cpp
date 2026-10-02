@@ -59,8 +59,9 @@ HalDisplay::GrayscaleMode sleepGrayscaleMode(const GfxRenderer& renderer) {
              : HalDisplay::GrayscaleMode::Absolute;
 }
 
-bool drawSleepBitmap(GfxRenderer& renderer, const Bitmap& bitmap, const bool hasGreyscale, const int x, const int y,
-                     const float cropX, const float cropY, const bool preserveBackground, const bool invertAfterDraw) {
+bool drawSleepBitmap(GfxRenderer& renderer, const Bitmap& bitmap, const bool hasGreyscale,
+                     const HalDisplay::GrayscaleMode grayscaleMode, const int x, const int y, const float cropX,
+                     const float cropY, const bool preserveBackground, const bool invertAfterDraw) {
   // Verbatim sleep-image presentation contract of
   // SleepActivity::renderBitmapSleepScreen() (minus the cover placement): one
   // drawBitmap pass, then the gray base + plane transfers + gray buffer for
@@ -68,6 +69,10 @@ bool drawSleepBitmap(GfxRenderer& renderer, const Bitmap& bitmap, const bool has
   // sources. No BW framebuffer rebuild — the next content arrives with the
   // next wake/frame paint. hasGreyscale is the CALLER's source classification
   // (the cover filter may deliberately downgrade a gray bitmap to BW).
+  // grayscaleMode is the CALLER's gray policy: static sleep screens keep the
+  // Direct-capable sleepGrayscaleMode(), slideshow frames pass Absolute so
+  // every timer wake gets the scrubbing base transition over the physically
+  // retained e-ink frame.
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
 
@@ -80,9 +85,9 @@ bool drawSleepBitmap(GfxRenderer& renderer, const Bitmap& bitmap, const bool has
 
   if (invertAfterDraw) renderer.invertScreen();
 
-  const bool absolute = hasGreyscale && renderer.grayscaleCapabilities(sleepGrayscaleMode(renderer)).supported();
-  if (absolute) {
-    if (!renderer.displayGrayscaleBase(sleepGrayscaleMode(renderer))) return true;
+  const bool nativeGray = hasGreyscale && renderer.grayscaleCapabilities(grayscaleMode).supported();
+  if (nativeGray) {
+    if (!renderer.displayGrayscaleBase(grayscaleMode)) return true;
   } else if (hasGreyscale) {
     // OEM grayscale pipeline base. Must stay HALF: the gray nudge LUT is
     // calibrated against the pixel state the single-pass HALF waveform leaves
@@ -100,7 +105,7 @@ bool drawSleepBitmap(GfxRenderer& renderer, const Bitmap& bitmap, const bool has
       ready = false;
       break;
     }
-    if (!absolute || !preserveBackground) renderer.clearScreen(absolute ? 0xFF : 0x00);
+    if (!nativeGray || !preserveBackground) renderer.clearScreen(nativeGray ? 0xFF : 0x00);
     renderer.setRenderMode(plane);
     if (!renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, cropX, cropY, preserveBackground)) {
       ready = false;
@@ -135,10 +140,11 @@ bool renderImageFile(GfxRenderer& renderer, const std::string& path, const ToneL
   if (!Storage.openFileForRead("IMG", path, file)) return false;
 
   // Always attach the tone: quantizer selection is active even when the LUT
-  // itself is at identity (enabled=false). The gray-capable gate matches the
-  // sleep-image decode (SSD1677 panels, sleep grayscale mode).
+  // itself is at identity (enabled=false). The gray-capable gate follows the
+  // slideshow gray mode below (SSD1677 panels).
+  const auto slideshowGrayMode = HalDisplay::GrayscaleMode::Absolute;
   Bitmap bitmap(file, true,
-                renderer.grayscaleCapabilities(sleepGrayscaleMode(renderer)).supported() &&
+                renderer.grayscaleCapabilities(slideshowGrayMode).supported() &&
                     display.getController() == HalDisplay::Controller::SSD1677,
                 &tone);
 
@@ -150,8 +156,10 @@ bool renderImageFile(GfxRenderer& renderer, const std::string& path, const ToneL
   fitOnScreen(bitmap.getWidth(), bitmap.getHeight(), pageWidth, pageHeight, &x, &y);
 
   // Slideshow presentation: the sleep-image policy (draw + panel transfer,
-  // no chrome, no BW framebuffer rebuild).
-  return drawSleepBitmap(renderer, bitmap, bitmap.hasGreyscale(), x, y,
+  // no chrome, no BW framebuffer rebuild), with the grayscale base always
+  // Absolute — the scrub/base transition clears the physically retained
+  // e-ink frame each timer wake, where Direct would layer onto it.
+  return drawSleepBitmap(renderer, bitmap, bitmap.hasGreyscale(), slideshowGrayMode, x, y,
                          /*cropX=*/0.0f, /*cropY=*/0.0f, /*preserveBackground=*/false, /*invertAfterDraw=*/false);
 }
 

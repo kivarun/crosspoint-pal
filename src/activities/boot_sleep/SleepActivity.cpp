@@ -686,7 +686,11 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap, const bool pre
   const bool invertAfterDraw =
       !preserveBackground &&
       SETTINGS.sleepScreenCoverFilter == CrossPointSettings::SLEEP_SCREEN_COVER_FILTER::INVERTED_BLACK_AND_WHITE;
-  imageonly::drawSleepBitmap(renderer, bitmap, hasGreyscale, x, y, cropX, cropY, preserveBackground, invertAfterDraw);
+  // Static sleep screens keep the established gray policy: Direct when the
+  // panel supports it (sleepGrayscaleMode), never the slideshow's Absolute
+  // scrub.
+  imageonly::drawSleepBitmap(renderer, bitmap, hasGreyscale, imageonly::sleepGrayscaleMode(renderer), x, y, cropX,
+                             cropY, preserveBackground, invertAfterDraw);
 }
 
 bool SleepActivity::renderSleepOverlayFile(HalFile& file, const char* pathForLog) const {
