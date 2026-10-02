@@ -1,135 +1,153 @@
-# CrossPoint Reader
+# CrossPoint Reader — kivarun downstream fork
 
-[![Fund contributors](https://img.shields.io/badge/%F0%9F%91%91_Fund_contributors-royalty.dev-BB953A?style=for-the-badge&labelColor=1a1a1a)](https://app.royalty.dev/crosspoint-reader/crosspoint-reader)
+This repository is a **downstream fork of [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)**
+(`crosspoint-reader/crosspoint-reader`), open-source e-reader firmware for small
+e-ink devices. It is not the official upstream project and not affiliated with
+Xteink or any device manufacturer.
 
-CrossPoint is open-source e-reader firmware - community-built, fully hackable, free forever. It's maintained by a growing community of developers and readers who believe your device should do what you want - not what a manufacturer decided for you.
+The fork follows a different product scope from upstream: reading stays
+first-class, and the firmware also uses the strengths of e-ink (persistent
+image, very low static power draw) for features upstream does not target —
+currently **enhanced image rendering** and a **low-power photo-frame /
+slideshow mode** that runs from deep sleep on a timer. The product direction
+is described in the [fork manifesto](./MANIFESTO.md).
 
-### Now running on:
-- **ESP32C3-based** Xteink X4 and X3.
-- **ESP32S3-based** Xteink X4Pro and X4Classic, Seeed reTerminal Sticky, M5PaperMono
-
-Check [our Devices page](https://crosspointreader.com/devices) for the full list.
+We regularly sync from upstream `develop` and keep upstream's reader core
+intact. Reusable, product-neutral pieces (pure policy modules, host-tested
+rendering primitives) are kept separable from downstream-only features so they
+can be upstreamed later.
 
 ![CrossPoint Reader running on Xteink device](./docs/images/cover.jpg)
 
-> If you're planning to buy an Xteink device, consider purchasing an **X3/X4 Developer Edition** through https://crosspointreader.com. CrossPoint receives a small share of each sale, helping fund development costs.
+## Quick answers
 
-## What can CrossPoint do?
+| Question | Answer |
+| --- | --- |
+| What is this? | Downstream CrossPoint firmware with enhanced image rendering and a low-power slideshow. |
+| How does it differ from upstream? | Same reader core, plus image render controls (brightness / gamma / contrast / quantizer), persisted render profiles, and the slideshow feature set below. See [What's different](#whats-different-from-upstream). |
+| Which device has a hardware-tested binary? | **XTEINK X4 Classic only.** Other targets may compile from source but are NOT hardware-verified here. |
+| Where to download? | [Releases](https://github.com/kivarun/crosspoint-reader/releases) in this repository. |
+| How to install? | [Installation](#install-firmware) below — custom .bin web flasher or `esptool`. |
+| How to go back to upstream? | [Back to official upstream firmware](#back-to-official-upstream-firmware) below. |
 
-- **Reader engine**: EPUB 2/3 rendering with embedded-style option, image handling, hyphenation, kerning, adaptive table layouts, native CJK ruby annotations, chapter navigation, footnotes, bookmarks, dictionary lookups ([StarDict](docs/dictionary.md)), go-to-percent, auto page turn, orientation control, focus reading, KOReader progress sync and more.
+## What's different from upstream
 
-- **Various formats**: native handling for `.epub`, `.xtc/.xtch`, `.txt`, and `.bmp`.
+Two finished feature groups are ahead of upstream `develop`; everything else
+matches the upstream reader core this fork is based on.
 
-- **Touch reading**: follow EPUB links and look up words in the dictionary on touch-enabled devices.
+### Image viewer and image rendering
 
-- **Screenshots.**
+- Improved BMP/image viewer with an options modal (tone controls, image info,
+  delete, sleep-cover assignment).
+- Tone render controls for BMP decoding: brightness, gamma, contrast, and
+  4-level quantizer selection, with exact pass-through identity at defaults.
+- Persisted **viewer render profile** (your tone settings survive restarts)
+  and a separate persisted **sleep render profile** ("Use for sleep
+  rendering").
+- Grayscale-aware BMP presentation on capable panels, driven by explicit
+  grayscale-capability policy instead of one-size-fits-all transfers.
 
-- **Custom fonts**: install your favorite fonts on the SD card.
+### Low-power slideshow
 
-- **Tilt page turn (X3 and Sticky)**.
+- **Image Viewer slideshow**: start a timed slideshow from the currently open
+  image; each next frame is shown from a deep-sleep timer wake.
+- **Sleep Screen = Slideshow**: the sleep screen itself becomes a slideshow
+  from `/.sleep` (legacy `/sleep` fallback).
+- Shared slideshow interval: 1 / 5 / 10 / 30 minutes.
+- Frame **Order**: Forward (A→B→C→A), Reverse (C→B→A→C), Random (never
+  repeats the current frame immediately when other frames exist).
+- **Low-battery cutoff**: at ≤10% charge without external power the sleep
+  slideshow stops wake-looping and falls back to an ordinary static sleep
+  screen.
+- Auto-sleep timeout starts the slideshow too (Sleep Screen = Slideshow takes
+  priority over the after-timeout Quick Resume option).
+- Grayscale-safe presentation on X4 Classic (UC8279): every timer-wake frame
+  scrubs the panel with an absolute refresh base before loading gray planes,
+  so frames replace — not stack on — the retained physical image.
 
-- **USB Drive mode (X4Pro)**: access the SD card as USB mass storage.
+## Supported hardware policy
 
-- **Library workflow**: indexed title/author search, recently-added and alphabetical views, multilingual grouping, folder browser, recent books, and SD-cache management.
+- **XTEINK X4 Classic**: hardware-tested. Release binaries are published for
+  this device only.
+- Other upstream targets (X3, original X4, X4 Pro, Sticky, PaperMono, …) may
+  still **build from source** (`pio run -e <env>`), but nothing here claims
+  they work on real hardware: we have not run our hardware UAT on them. Source
+  that builds is not support.
 
-- **Wireless workflows**:
-  
-  - File transfer web UI
-  - EPUB Optimizer
-  - Web settings UI/API (edit many device settings from browser)
-  - WebSocket fast uploads
-  - WebDAV handler
-  - AP mode (hotspot) and STA mode (join existing Wi-Fi), both with QR helpers
-  - Calibre wireless connect flow
-  - OPDS browser with saved servers (up to 8), search, pagination, and direct download
-  - OTA update checks and installs from GitHub releases
+## ⚠️ USB-locked devices: read before flashing
 
-- **Customization**: night mode, multiple themes (Classic, Lyra, Lyra Extended, RoundedRaff), sleep screen modes including transparent overlays, front/side button remapping, status bar controls, power-button behavior, refresh cadence, and more.
+Some Xteink units ship with USB flashing locked and are unlocked/re-locked
+through Xteink's own unlock tool. The re-lock flow only treats a small set of
+official firmwares as known. This fork is a **separate downstream firmware**:
+if you install it on a USB-locked (or re-locked) device, you may be left with
+**no way to return** — without a verified recovery path you could permanently
+lose the ability to reflash that device.
 
-- **Localization**: 34 UI languages and counting, including CJK font fallback and RTL support.
-
-### Coming soon:
-
-- More themes.
-
-- Web plugins.
-
-- Bluetooth pageturner.
-
-- Much more! stay tuned.
-
----
-
-## USB-locked devices (Xteink Unlocker)
-
-Some Xteink units purchased from third-party stores (e.g. AliExpress) ship with USB flashing locked from the factory.
-If your device is locked, you will need to use the **Xteink Unlocker** tool available at
-https://crosspointreader.com/#unlock-tool before you can flash CrossPoint.
-
-**You do not need this tool if you bought your device directly from xteink.com.** Those units are not locked.
-
-**Not sure if your device is locked?** Power it on, connect the USB-C cable, and try flashing via the web flasher first (see
-[Install firmware](#install-firmware) below). If the browser's serial device picker does not show your device, try a different
-USB port or browser before assuming the device is locked. Only reach for the unlocker if the device still doesn't appear.
-
-> ### ⚠️ WARNING: READ THIS BEFORE USING THE UNLOCKER ⚠️
-> 
-> **The only officially supported firmwares in the unlock tool are CrossPoint and CrossInk.**
-> 
-> Flashing any other firmware on a USB-locked device may **permanently brick the device** or leave it **permanently
-> stuck on that firmware with no recovery path**. Once USB flashing is re-locked, your only way back is via OTA, and if
-> the firmware you flashed doesn't support OTA, **there is no way out**.
+**Do not install this fork on a USB-locked / re-locked XTEINK device unless
+you already have a verified recovery path.** Unlocked devices (e.g. bought
+directly from xteink.com) can always be re-flashed normally.
 
 ## Install firmware
 
-### Web installer (recommended)
+> Only for unlocked devices or devices whose recovery path you have verified
+> yourself. See the [USB-locked warning](#️-usb-locked-devices-read-before-flashing) above.
 
-1. Connect your device to your computer via USB-C and wake/unlock the device
-2. Go to https://crosspointreader.com/#flash-tools, select your device (X3, X4, Xteink X4Pro, Seeed reTerminal Sticky, or M5PaperMono), and choose an official CrossPoint release.
+### Custom .bin web flasher
 
-### Web installer (specific version)
+1. Connect the X4 Classic via USB-C and wake the device.
+2. Download `crosspoint-kivarun-<version>-x4c.bin` from
+   [Releases](https://github.com/kivarun/crosspoint-reader/releases).
+3. Open the CrossPoint web flasher (https://crosspointreader.com/#flash-tools),
+   select **X4 Classic**, and use **Custom .bin** with the downloaded file.
 
-1. Connect your device to your computer via USB-C and wake/unlock the device
-2. Download the firmware file for your device from [Releases](https://github.com/crosspoint-reader/crosspoint-reader/releases), or compile yourself.
-3. Go to https://crosspointreader.com/#flash-tools, select your device, click "Custom .bin" and upload the firmware file.
+The fork's releases are not part of the official release picker — always use
+the **Custom .bin** flow with the file you downloaded here.
 
-### Revert to Official Firmware
+### esptool (application image)
 
-To revert to the official firmware, you can also flash the latest official firmware using https://crosspointreader.com/#flash-tools.
-
-### Command line
-
-1. Install [`esptool`](https://github.com/espressif/esptool):
+The release asset is an **application image** written at offset `0x10000`
+(no bootloader / partition flashing required):
 
 ```bash
 pip install esptool
+esptool --chip esp32s3 --port /dev/ttyACM0 \
+  write-flash 0x10000 crosspoint-kivarun-0.1.0-x4c.bin
 ```
 
-2. Download the firmware file for your device from the [releases page](https://github.com/crosspoint-reader/crosspoint-reader/releases).
-3. Connect your device via USB-C.
-4. Find the device port. On Linux, run `dmesg` after connecting. On macOS:
+### OTA updates
 
-```bash
-log stream --predicate 'subsystem == "com.apple.iokit"' --info
-```
+Installed fork builds check **this repository's** releases only
+(`kivarun/crosspoint-reader`). They never offer official upstream firmware.
 
-5. Flash an X3 or X4:
+### Back to official upstream firmware
 
-```bash
-esptool.py --chip esp32c3 --port /dev/ttyACM0 --baud 921600 write_flash 0x10000 /path/to/firmware.bin
-```
+Flash any official CrossPoint release for the X4 Classic with the same
+custom .bin flow or `esptool` command above, using the upstream binary from
+https://github.com/crosspoint-reader/crosspoint-reader/releases.
 
-   Flash an Xteink X4Pro, Seeed reTerminal Sticky, or M5PaperMono:
+## Fork versioning and updates
 
-```bash
-esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 921600 write_flash 0x10000 /path/to/firmware.bin
-```
+Fork releases are `0.1.0`, `0.1.1`, `0.2.0`, … (bare semver, no `v` prefix —
+the OTA plumbing keys release assets by `tag_name`). Each release notes its
+exact upstream `develop` base.
 
-### Manual
+If you were running an earlier **development** build (self-identifying as
+upstream `1.6.5`-derived versions), the OTA comparator will not offer the
+0.1.0 release as an "upgrade": flash `0.1.0` once manually, after which
+later fork releases update over the air normally.
 
-See [Development quick start](#development-quick-start) below.
+## Branch model
 
----
+- `main` — released/stable fork state (planned; default branch after review).
+- `fork/develop` — downstream integration for the next release.
+- `feature/*` — feature work.
+- `upstream/develop` — the upstream tracking source this fork rebases on.
+
+## Upstream features
+
+The reader core below is inherited from upstream CrossPoint (this fork tracks
+upstream `develop`); upstream remains the better source for reader-core
+improvements.
 
 ## Custom SD-card fonts
 
@@ -172,7 +190,7 @@ Conversion runs the firmware repo's `lib/EpdFont/scripts/fontconvert_sdcard.py` 
 ### Setup
 
 ```bash
-git clone --recursive https://github.com/crosspoint-reader/crosspoint-reader
+git clone --recursive https://github.com/kivarun/crosspoint-reader
 cd crosspoint-reader
 
 # if cloned without --recursive:
@@ -270,28 +288,17 @@ For more details on the internal file structures, see the [file formats document
 
 ## Contributing
 
-Contributions are welcome. If you're new to the codebase, start with the [contributing docs](./docs/contributing/README.md). For things to work on, check the [ideas discussion board](https://github.com/crosspoint-reader/crosspoint-reader/discussions/categories/ideas) — leave a comment before starting so we don't duplicate effort.
-
-Everyone here is a volunteer, so please be respectful and patient. For governance and community expectations, see [GOVERNANCE.md](./GOVERNANCE.md).
-
----
-
-## Community forks
-
-One of the best things about open source is that anyone can take the code in a different direction. If you need something outside CrossPoint's [scope](./SCOPE.md), check out the community forks:
-
-- [CrossInk](https://github.com/uxjulia/CrossInk) — UX focused with minimal reading stats and broader customizations for the reading experience.
-
-- [papyrix-reader](https://github.com/bigbag/papyrix-reader) — Adds FB2 and MD format support. Actively maintained with Arabic script support. Custom themes.
-
-- [inx](https://github.com/obijuankenobiii/inx) — Completely reimagines the user interface with tabbed navigation.
-
-- [Witch(hunt) Reader](https://github.com/jpirnay/witchhunt-reader) — More faithful CSS styling and background work for slightly snappier interaction. Weather information panel. Markdown support.
-
-**Note:** Many of these features will make their way into CrossPoint over time. Each project chooses its own priorities and tradeoffs.
-
-Want to build your own device? Be sure to check out the [de-link](https://github.com/iandchasse/de-link) project or [OnePage Reader](https://github.com/MoveCall/onepage-reader).
+Contributions are welcome. For things to work on, see the [fork manifesto](./MANIFESTO.md) (the product
+boundary) and the [contributing docs](./docs/contributing/README.md) (inherited upstream engineering
+guides). Please open pull requests against this fork.
 
 ---
+
+## Attribution and license
+
+Fork of [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader) — all credit for the
+reader core, the FreeInk SDK ecosystem and the original engineering goes to the upstream CrossPoint
+contributors. This fork tracks upstream `develop` and keeps the MIT
+[LICENSE](./LICENSE); modifications are published under the same terms.
 
 CrossPoint Reader is **not affiliated with Xteink or any device manufacturer**.
