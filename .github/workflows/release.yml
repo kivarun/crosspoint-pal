@@ -3,10 +3,10 @@ name: Compile Release
 # Build and attach firmware only after a release is published. The release tag
 # supplies both the source revision and the version in each asset name.
 #
-# Fork release contract (kivarun downstream): X4 Classic only — the one
-# hardware-verified target. Assets use the fork's distinct naming
-# (crosspoint-kivarun-<version>-x4c.bin), shared with the firmware's OTA
-# release check.
+# CrossPoint Pal release contract (downstream CrossPoint Pal): X4 Classic only — the
+# one hardware-verified target. Assets use the distinct naming
+# (crosspoint-pal-<version>-x4c.bin), shared with the firmware's OTA release
+# check.
 
 on:
   release:
@@ -88,7 +88,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           version="${RELEASE_TAG#v}"
-          asset="crosspoint-kivarun-${version}-${{ matrix.device }}.bin"
+          asset="crosspoint-pal-${version}-${{ matrix.device }}.bin"
           cp ".pio/build/${PIO_ENV}/firmware.bin" "$asset"
           echo "name=$asset" >> "$GITHUB_OUTPUT"
 
@@ -111,7 +111,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: crosspoint-kivarun-*.bin
+          pattern: crosspoint-pal-*.bin
           merge-multiple: true
 
       - name: Attach firmware assets
@@ -122,7 +122,7 @@ jobs:
           version="${RELEASE_TAG#v}"
           # The release contract is exactly ONE fork asset: the X4 Classic
           # binary. Never publish a differently named or extra asset.
-          expected="crosspoint-kivarun-${version}-x4c.bin"
+          expected="crosspoint-pal-${version}-x4c.bin"
           test -f "dist/$expected"
           test "$(find dist -maxdepth 1 -type f -name '*.bin' | wc -l)" -eq 1
           gh release upload "$RELEASE_TAG" "dist/$expected" \

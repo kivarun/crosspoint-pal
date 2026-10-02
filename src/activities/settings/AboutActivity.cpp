@@ -97,10 +97,7 @@ void AboutActivity::onEnter() {
   // profile and applyXteinkDisplayController() may have promoted the display
   // controller to the panel actually found on the bus.
   rowValues_[ITEM_DEVICE] = BoardConfig::ACTIVE.name;
-  // Build identity, not user prose: state that this is the kivarun downstream
-  // fork build, not an official upstream one (deliberately untranslated, like
-  // the row labels above).
-  rowValues_[ITEM_FIRMWARE] = CROSSPOINT_VERSION " kivarun downstream";
+  rowValues_[ITEM_FIRMWARE] = "CrossPoint Pal " CROSSPOINT_VERSION;
   snprintf(buf, sizeof(buf), "%s rev %u", ESP.getChipModel(), static_cast<unsigned>(ESP.getChipRevision()));
   rowValues_[ITEM_CHIP] = buf;
   snprintf(buf, sizeof(buf), "%u MB", static_cast<unsigned>(ESP.getFlashChipSize() / (1024u * 1024u)));

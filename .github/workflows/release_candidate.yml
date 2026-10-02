@@ -1,10 +1,10 @@
 name: Compile Release Candidate
 
-# Fork release-candidate build (kivarun downstream): X4 Classic only, as an
-# identifiable artifact — crosspoint-kivarun-<version>-rc-<shortsha>-x4c.bin.
+# CrossPoint Pal release-candidate build: X4 Classic only, as an
+# identifiable artifact — crosspoint-pal-<version>-rc-<shortsha>-x4c.bin.
 # RCs are build artifacts for hardware UAT, never GitHub Releases, and their
 # names can never be confused with a final release asset
-# (crosspoint-kivarun-<version>-x4c.bin).
+# (crosspoint-pal-<version>-x4c.bin).
 
 on:
   workflow_dispatch:
@@ -73,7 +73,7 @@ jobs:
       - name: Name release asset
         run: |
           version="$(sed -n 's/^version = //p' platformio.ini | head -n1)"
-          name="crosspoint-kivarun-${version}-rc-${SHORT_SHA}-x4c.bin"
+          name="crosspoint-pal-${version}-rc-${SHORT_SHA}-x4c.bin"
           cp ".pio/build/${{ matrix.pio_env }}/firmware.bin" \
             ".pio/build/${{ matrix.pio_env }}/${name}"
           echo "ASSET_NAME=${name}" >> $GITHUB_ENV

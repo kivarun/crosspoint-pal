@@ -1,6 +1,6 @@
-# CrossPoint Reader — kivarun downstream fork
+# CrossPoint Pal
 
-This repository is a **downstream fork of [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)**
+**CrossPoint Pal is a downstream fork of [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)**
 (`crosspoint-reader/crosspoint-reader`), open-source e-reader firmware for small
 e-ink devices. It is not the official upstream project and not affiliated with
 Xteink or any device manufacturer.
@@ -17,16 +17,16 @@ intact. Reusable, product-neutral pieces (pure policy modules, host-tested
 rendering primitives) are kept separable from downstream-only features so they
 can be upstreamed later.
 
-![CrossPoint Reader running on Xteink device](./docs/images/cover.jpg)
+![CrossPoint Pal running on Xteink device](./docs/images/cover.jpg)
 
 ## Quick answers
 
 | Question | Answer |
 | --- | --- |
-| What is this? | Downstream CrossPoint firmware with enhanced image rendering and a low-power slideshow. |
+| What is this? | Downstream CrossPoint firmware (CrossPoint Pal) with enhanced image rendering and a low-power slideshow. |
 | How does it differ from upstream? | Same reader core, plus image render controls (brightness / gamma / contrast / quantizer), persisted render profiles, and the slideshow feature set below. See [What's different](#whats-different-from-upstream). |
 | Which device has a hardware-tested binary? | **XTEINK X4 Classic only.** Other targets may compile from source but are NOT hardware-verified here. |
-| Where to download? | [Releases](https://github.com/kivarun/crosspoint-reader/releases) in this repository. |
+| Where to download? | [Releases](https://github.com/kivarun/crosspoint-pal/releases) in this repository. |
 | How to install? | [Installation](#install-firmware) below — custom .bin web flasher or `esptool`. |
 | How to go back to upstream? | [Back to official upstream firmware](#back-to-official-upstream-firmware) below. |
 
@@ -95,8 +95,8 @@ directly from xteink.com) can always be re-flashed normally.
 ### Custom .bin web flasher
 
 1. Connect the X4 Classic via USB-C and wake the device.
-2. Download `crosspoint-kivarun-<version>-x4c.bin` from
-   [Releases](https://github.com/kivarun/crosspoint-reader/releases).
+2. Download `crosspoint-pal-<version>-x4c.bin` from
+   [Releases](https://github.com/kivarun/crosspoint-pal/releases).
 3. Open the CrossPoint web flasher (https://crosspointreader.com/#flash-tools),
    select **X4 Classic**, and use **Custom .bin** with the downloaded file.
 
@@ -111,13 +111,13 @@ The release asset is an **application image** written at offset `0x10000`
 ```bash
 pip install esptool
 esptool --chip esp32s3 --port /dev/ttyACM0 \
-  write-flash 0x10000 crosspoint-kivarun-0.1.0-x4c.bin
+  write-flash 0x10000 crosspoint-pal-0.1.0-x4c.bin
 ```
 
 ### OTA updates
 
-Installed fork builds check **this repository's** releases only
-(`kivarun/crosspoint-reader`). They never offer official upstream firmware.
+Installed Pal builds check **this repository's** releases only
+(`kivarun/crosspoint-pal`). They never offer official upstream firmware.
 
 ### Back to official upstream firmware
 
@@ -190,7 +190,7 @@ Conversion runs the firmware repo's `lib/EpdFont/scripts/fontconvert_sdcard.py` 
 ### Setup
 
 ```bash
-git clone --recursive https://github.com/kivarun/crosspoint-reader
+git clone --recursive https://github.com/kivarun/crosspoint-pal
 cd crosspoint-reader
 
 # if cloned without --recursive:

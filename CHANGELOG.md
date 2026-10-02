@@ -1,12 +1,12 @@
 # Changelog
 
-Fork releases only; upstream base is noted per release. Versioning is bare
-semver without a `v` prefix (the OTA plumbing keys release assets by
+CrossPoint Pal releases only; upstream base is noted per release. Versioning
+is bare semver without a `v` prefix (the OTA plumbing keys release assets by
 `tag_name`).
 
-## 0.1.0 — Image Viewer & Low-Power Slideshow
+## CrossPoint Pal 0.1.0 — Image Viewer & Low-Power Slideshow
 
-First public fork release. Based on upstream `crosspoint-reader/crosspoint-reader`
+First public release. Based on upstream `crosspoint-reader/crosspoint-reader`
 `develop` @ `149dd5329953b4d160cc6bc938f32e427a3c9dcc`.
 
 Hardware-verified binary: **XTEINK X4 Classic** only.

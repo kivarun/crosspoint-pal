@@ -19,14 +19,14 @@
 #include "FirmwareFlasher.h"
 
 namespace {
-// Release source of THIS fork (kivarun/crosspoint-reader): an installed fork
+// Release source of CrossPoint Pal (kivarun/crosspoint-pal): an installed
 // build must update only from this repository's releases, never from the
 // official upstream project's.
-constexpr char latestReleaseUrl[] = "https://api.github.com/repos/kivarun/crosspoint-reader/releases/latest";
-// Distinct fork asset naming contract (shared with the release workflows): a
-// fork release asset is crosspoint-kivarun-<tag>-<device>.bin, so a fork
-// binary can never be confused with an official upstream one.
-constexpr char forkAssetPrefix[] = "crosspoint-kivarun-";
+constexpr char latestReleaseUrl[] = "https://api.github.com/repos/kivarun/crosspoint-pal/releases/latest";
+// Distinct asset naming contract (shared with the release workflows): a
+// release asset is crosspoint-pal-<tag>-<device>.bin, so this binary can
+// never be confused with an official upstream one.
+constexpr char assetNamePrefix[] = "crosspoint-pal-";
 }  // namespace
 
 OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
@@ -45,7 +45,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   }
   ReleaseJsonParser& releaseParser = *releaseParserPtr;
   releaseParser.setFirmwareAssetName("");
-  // Each board updates from crosspoint-kivarun-<version>-<device>.bin. The
+  // Each board updates from crosspoint-pal-<version>-<device>.bin. The
   // combined C3 image uses x3-x4; other asset suffixes match their firmware
   // board tag.
   const bool isX4 = board_tag::boardNameLen() == 2 && memcmp(board_tag::boardName(), "x4", 2) == 0;
@@ -62,7 +62,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
       releaseParser.feed(reinterpret_cast<const char*>(data + offset), 1);
       offset++;
       if (releaseParser.foundTag()) {
-        snprintf(assetName, sizeof(assetName), "%s%s%s.bin", forkAssetPrefix, releaseParser.getTagName(), assetSuffix);
+        snprintf(assetName, sizeof(assetName), "%s%s%s.bin", assetNamePrefix, releaseParser.getTagName(), assetSuffix);
         releaseParser.setFirmwareAssetName(assetName);
         assetNameSet = true;
       }

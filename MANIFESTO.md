@@ -1,4 +1,4 @@
-# Fork Manifesto
+# CrossPoint Pal Manifesto
 
 This document defines the product direction of this fork. Upstream CrossPoint
 remains the preferred source for reader-core improvements; upstream's
