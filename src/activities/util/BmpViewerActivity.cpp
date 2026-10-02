@@ -1076,7 +1076,9 @@ void BmpViewerActivity::advanceSlideshowFrame() {
     return;
   }
 
-  renderCurrentImage(/*showLoadingPopup=*/false, /*showViewerChrome=*/false);
+  renderCurrentImage(
+      /*showLoadingPopup=*/true,
+      /*showViewerChrome=*/false);
   slideshow::requestSleep(slideshow::SleepRequest::Continue);
 }
 
