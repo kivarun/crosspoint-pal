@@ -2,6 +2,11 @@ name: Compile Release
 
 # Build and attach firmware only after a release is published. The release tag
 # supplies both the source revision and the version in each asset name.
+#
+# Fork release contract (kivarun downstream): X4 Classic only — the one
+# hardware-verified target. Assets use the fork's distinct naming
+# (crosspoint-kivarun-<version>-x4c.bin), shared with the firmware's OTA
+# release check.
 
 on:
   release:
@@ -17,21 +22,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - release_env: gh_release
-            rc_env: gh_release_rc
-            device: x3-x4
-          - release_env: sticky-gh_release
-            rc_env: sticky-gh_release_rc
-            device: sticky
-          - release_env: x4pro-gh_release
-            rc_env: x4pro-gh_release_rc
-            device: x4pro
           - release_env: x4c-gh_release
             rc_env: x4c-gh_release_rc
             device: x4c
-          - release_env: papermono-gh_release
-            rc_env: papermono-gh_release_rc
-            device: papermono
     steps:
       - uses: actions/checkout@v6
         with:
@@ -95,7 +88,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           version="${RELEASE_TAG#v}"
-          asset="crosspoint-${version}-${{ matrix.device }}.bin"
+          asset="crosspoint-kivarun-${version}-${{ matrix.device }}.bin"
           cp ".pio/build/${PIO_ENV}/firmware.bin" "$asset"
           echo "name=$asset" >> "$GITHUB_OUTPUT"
 
@@ -118,7 +111,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: crosspoint-*.bin
+          pattern: crosspoint-kivarun-*.bin
           merge-multiple: true
 
       - name: Attach firmware assets
@@ -127,9 +120,10 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           version="${RELEASE_TAG#v}"
-          for device in x3-x4 sticky x4pro x4c papermono; do
-            test -f "dist/crosspoint-${version}-${device}.bin"
-          done
-          test "$(find dist -maxdepth 1 -type f -name 'crosspoint-*.bin' | wc -l)" -eq 5
-          gh release upload "$RELEASE_TAG" dist/crosspoint-*.bin \
+          # The release contract is exactly ONE fork asset: the X4 Classic
+          # binary. Never publish a differently named or extra asset.
+          expected="crosspoint-kivarun-${version}-x4c.bin"
+          test -f "dist/$expected"
+          test "$(find dist -maxdepth 1 -type f -name '*.bin' | wc -l)" -eq 1
+          gh release upload "$RELEASE_TAG" "dist/$expected" \
             --repo "$GITHUB_REPOSITORY" --clobber
