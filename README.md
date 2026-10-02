@@ -54,8 +54,10 @@ matches the upstream reader core this fork is based on.
 - **Sleep Screen = Slideshow**: the sleep screen itself becomes a slideshow
   from `/.sleep` (legacy `/sleep` fallback).
 - Shared slideshow interval: 1 / 5 / 10 / 30 minutes.
-- Frame **Order**: Forward (A→B→C→A), Reverse (C→B→A→C), Random (never
-  repeats the current frame immediately when other frames exist).
+- Frame **Order**: Forward (A→B→C→A), Reverse (C→B→A→C), Random (every image
+  is shown once in randomized order before a new cycle begins; no immediate
+  repeat across cycles). Adapted from CrossPoint upstream PR #3841 by
+  @gkaindl.
 - **Low-battery cutoff**: at ≤10% charge without external power the sleep
   slideshow stops wake-looping and falls back to an ordinary static sleep
   screen.

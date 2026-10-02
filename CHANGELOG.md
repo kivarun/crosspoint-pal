@@ -30,8 +30,9 @@ Hardware-verified binary: **XTEINK X4 Classic** only.
 - Sleep Screen = Slideshow: the sleep screen becomes a slideshow sourced from
   `/.sleep` (legacy `/sleep` fallback).
 - Shared slideshow interval: 1 / 5 / 10 / 30 minutes.
-- Frame order: Forward, Reverse, Random (Random never repeats the current
-  frame immediately when other frames exist).
+- Frame order: Forward, Reverse, Random (every image is shown once in
+  randomized order before a new cycle begins; no immediate repeat across
+  cycles). Adapted from CrossPoint upstream PR #3841 by @gkaindl.
 - Low-battery cutoff: at ≤10% charge without external power the sleep
   slideshow stops waking the device and falls back to an ordinary static
   sleep screen.
