@@ -275,6 +275,36 @@ TEST(RandomCycle, ExhaustsEveryIndexExactlyOnce) {
   }
 }
 
+// Supported count range 1..UINT16_MAX, at its boundary shapes: 32768 (the
+// last power-of-two modulus equal to the count), 32769 (modulus doubles to
+// 65536), 65535 (the uint16 cap, increment up to 65535) — all still exhaust
+// exactly once. Anything above the cap fails closed (-1) instead of
+// building a cycle the uint16 metadata cannot represent.
+TEST(RandomCycle, SupportedCountBounds) {
+  for (const auto& [count, increment] :
+       {std::pair<int, uint16_t>{32768, 1}, {32769, 3}, {65535, 65535}}) {
+    const auto seen = runCycle(count, increment, 0);
+    for (int idx = 0; idx < count; ++idx) {
+      ASSERT_EQ(seen[idx], 1) << "count=" << count << " increment=" << increment << " idx=" << idx;
+    }
+  }
+  // A derived increment at the cap: modulus 65536, every odd value fits and
+  // stays odd (mod an even power of two preserves oddness).
+  EXPECT_EQ(slideshow::randomCycleIncrement(4294967295u, 65535), 65535);
+  EXPECT_EQ(slideshow::randomCycleIncrement(32768u, 65535), 1);
+
+  // Beyond the cap: fail closed, no cycle is built. The state below is what
+  // a 65536-image directory would leave in the truncated metadata.
+  slideshow::RandomCycleState state{};
+  state.increment = 1;
+  state.remaining = 65535;
+  state.total = 0;
+  for (const int count : {65536, 65537, 100000}) {
+    EXPECT_EQ(slideshow::randomCycleNext(0, count, state, 42).index, -1) << "count=" << count;
+    EXPECT_FALSE(slideshow::randomCycleValid(state, count));
+  }
+}
+
 // No immediate repeat within a cycle, and none across the cycle boundary
 // either (first pick of the new cycle differs from the last frame).
 TEST(RandomCycle, NoImmediateRepeatWithinOrAcrossCycles) {

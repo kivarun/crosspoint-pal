@@ -167,15 +167,17 @@ inline constexpr RandomCycleState randomCycleReset(const uint32_t randomValue, c
   return cycle;
 }
 
-// Mid-cycle state validity against the CURRENT directory: matching count, an
-// odd increment inside the modulus, remaining in [1, count-1]. Anything else
-// (corrupt metadata, directory changed) resets the cycle at use time.
+// Mid-cycle state validity against the CURRENT directory: the supported
+// image count is 1..UINT16_MAX (the retained metadata is uint16), matching
+// count, an odd increment inside the modulus, remaining in [1, count-1].
+// Anything else (corrupt metadata, directory changed) resets the cycle at
+// use time.
 inline constexpr bool randomCycleValid(const RandomCycleState& cycle, const int count) {
-  if (count <= 1) return false;
+  if (count <= 1 || count > static_cast<int>(UINT16_MAX)) return false;
   if (cycle.total != static_cast<uint16_t>(count)) return false;
   if (cycle.remaining == 0 || cycle.remaining >= static_cast<uint16_t>(count)) return false;
   if (cycle.increment % 2u == 0) return false;
-  return cycle.increment < static_cast<uint16_t>(randomCycleModulus(count));
+  return static_cast<uint32_t>(cycle.increment) < randomCycleModulus(count);
 }
 
 struct RandomCycleStep {
@@ -188,12 +190,15 @@ struct RandomCycleStep {
 // exhausted or invalid (corrupt metadata / directory changed) — or when the
 // current index is out of range (the retained path is missing from the
 // scan): a cycle always continues from a real position on the LCG walk, so
-// a missing current never rides a formally valid old cycle.
+// a missing current never rides a formally valid old cycle. The supported
+// image count is 1..UINT16_MAX; anything beyond fails closed (-1) instead
+// of building a cycle the uint16 metadata cannot represent.
 inline RandomCycleStep randomCycleNext(const int currentIndex, const int count,
                                        const RandomCycleState& cycle, const uint32_t randomValue) {
   RandomCycleStep step{};
   step.index = -1;
-  if (count <= 0) return step;  // no frames: the caller fails closed
+  // No frames, or beyond the uint16 metadata range: the caller fails closed.
+  if (count <= 0 || count > static_cast<int>(UINT16_MAX)) return step;
 
   if (count == 1) {
     // The only image, unavoidably repeated; the cycle is trivially exhausted.
