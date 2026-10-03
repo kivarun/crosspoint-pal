@@ -39,8 +39,8 @@ inline constexpr bool sleepRequestArmsTimer(const SleepRequest request) {
 // magic was bumped so a retained state written under the v2 layout
 // (0x534C4945 'SLIE', no cycle bytes) can never validate. Schema v2: the
 // mode byte sits between the magic and the path (shrunken to 507), and the
-// magic was bumped so a retained state written by the proof firmware
-// (0x534C4944 'SLID', path-only layout) can never validate.
+// magic was bumped so a retained state written under the v1 layout
+// (0x534C4944 'SLID', path-only) can never validate.
 struct SlideshowState {
   uint32_t magic;                 // SLIDESHOW_MAGIC, written LAST
   slideshow::RandomCycleState cycle;  // randomized exhaustive cycle metadata

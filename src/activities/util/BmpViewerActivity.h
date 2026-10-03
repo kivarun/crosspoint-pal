@@ -128,9 +128,9 @@ class BmpViewerActivity final : public Activity {
   bool commitDraftProfile(ToneProfile& profile);
   void menuAction(ViewerAction action);
   void openInfoPage();
-  // Image Info detail view: the FULL Name/Path value, wrapped to the modal's
-  // body width (the same measured primitive the delete page uses); no
-  // selectable rows, Confirm inert, Back returns to Image Info.
+  // Image Info detail view: the FULL selected-row value, wrapped to the
+  // modal's body width (the same measured primitive the delete page uses);
+  // no selectable rows, Confirm inert, Back returns to Image Info.
   void openInfoDetail(int row);
   void performDelete();
   // Slideshow page actions: the interval/order steps persist the shared

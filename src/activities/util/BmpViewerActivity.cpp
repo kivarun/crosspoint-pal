@@ -275,7 +275,7 @@ void BmpViewerActivity::renderModal() {
   // between rows and skipped slots would keep stale frames on the strip (the
   // opt-in flag exists exactly for this modal-repaint case — the viewer's
   // other pages keep the skip semantics where empty slots intentionally leave
-  // content visible). Image Info's Confirm is a detail SHOW (Name/Path), and
+  // content visible). Image Info's Confirm is a detail SHOW (any row), and
   // the Info detail view is informational: Back only, with the unused slots
   // erased because the strip shrinks from four labels to one.
   if (viewerPage == ViewerPage::ImageSettings) {
@@ -296,7 +296,7 @@ void BmpViewerActivity::renderModal() {
                               slots.stepperSlots ? "+" : "");
     GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4, /*eraseUnused=*/true);
   } else if (viewerPage == ViewerPage::ImageInfo) {
-    // Name/Path are the selectable rows and Confirm SHOWS their detail.
+    // Confirm SHOWS the selected row's detail.
     const auto hint = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SHOW), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
     GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4);
   } else if (viewerPage == ViewerPage::InfoDetail) {
