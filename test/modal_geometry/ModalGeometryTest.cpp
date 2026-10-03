@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "GeometryTarget.h"
+#include "src/components/ListRowPresentation.h"
 #include "src/components/ModalTheme.h"
 #include "src/components/themes/BaseTheme.h"
 #include "src/util/ImageSettingsInput.h"
@@ -311,4 +312,104 @@ TEST(ModalPopup, AnchoredPopupLiesFullyInsideAnchor) {
   const Rect top = BaseTheme::popupRectFor(480, 800, 60, 18, 24, 16, FRAME, 0.075f, nullptr);
   EXPECT_EQ(top.x, (480 - (60 + 48)) / 2);
   EXPECT_EQ(top.y, static_cast<int>(800 * 0.075f));
+}
+
+// ---- Disabled-row cursor presentation (rowPresentation::disabledRowCursor +
+// the REAL list registration): the four row states must be visually distinct,
+// and a selected disabled row keeps a visible cursor while staying inert. ----
+
+// The resolve() precedence fact behind the UAT finding (the root cause, pinned
+// so the app-side workaround stays honest): StateDisabled wins over
+// StateSelected, so a selected disabled row resolves to the DISABLED style —
+// the strong selected presentation never draws there.
+TEST(DisabledFocus, ResolvePutsDisabledAboveSelected) {
+  const fui::StyleSet styles = fui::defaultListRowStyles();
+  // enabled+selected: the strong selection (solid black fill, white text).
+  const auto& selected = styles.resolve(fui::StateSelected);
+  EXPECT_TRUE(selected.background.kind == fui::PaintKind::Solid);
+  EXPECT_TRUE(selected.background.color == fui::Color::Black);
+  // disabled: subdued (white fill, light-gray text).
+  const auto& disabled = styles.resolve(fui::StateDisabled);
+  EXPECT_TRUE(disabled.background.kind == fui::PaintKind::Solid);
+  EXPECT_TRUE(disabled.background.color == fui::Color::White);
+  EXPECT_TRUE(disabled.foreground.kind == fui::PaintKind::Dither);
+  // selected+disabled resolves to the DISABLED style — SDK-wide precedence,
+  // deliberately untouched.
+  const fui::State both = static_cast<fui::State>(fui::StateSelected | fui::StateDisabled);
+  EXPECT_TRUE(styles.resolve(both).background.color == disabled.background.color);
+  EXPECT_TRUE(styles.resolve(both).foreground.kind == disabled.foreground.kind);
+  // The three presentations are distinct from each other.
+  EXPECT_TRUE(selected.background.color != disabled.background.color);
+  EXPECT_TRUE(styles.resolve(fui::StateNormal).background.color != selected.background.color);
+}
+
+// The weak cursor policy: the theme's own marker vocabulary for marker-based
+// selection styles, the SDK's underline marker for fill-based themes — never
+// absent for a selected disabled row.
+TEST(DisabledFocus, CursorMarkerFollowsTheme) {
+  namespace rp = rowPresentation;
+  EXPECT_EQ(rp::disabledRowCursor(fui::SelectionStyle::Underline), fui::SelectionMarker::Underline);
+  EXPECT_EQ(rp::disabledRowCursor(fui::SelectionStyle::Triangle), fui::SelectionMarker::Triangle);
+  EXPECT_EQ(rp::disabledRowCursor(fui::SelectionStyle::InvertFill), fui::SelectionMarker::Underline);
+  EXPECT_EQ(rp::disabledRowCursor(fui::SelectionStyle::LightPill), fui::SelectionMarker::Underline);
+}
+
+// Inertness proof against the REAL registration/routing: a selected DISABLED
+// row registers no touch hit at all (list() skips !enabled rows), so touch
+// activation can never mutate it — while its cursor comes from the marker
+// the app layer adds (pure policy above), not from any registered
+// interaction.
+TEST(DisabledFocus, SelectedDisabledRowIsInert) {
+  const auto device = geometryDevice(true, 44);
+  // Settings-shaped fragment: enabled row, DISABLED row (the selected one),
+  // enabled row. The selected disabled row carries StateSelected via
+  // props.selectedIndex and enabled=false, exactly the settings build does.
+  const auto buildFragment = [](fui::Frame<16>& frame, const int16_t y) {
+    fui::ListItem items[3]{};
+    items[0].label = "Enabled";
+    items[0].actionValue = 0;
+    items[1].label = "DisabledSelected";
+    items[1].actionValue = 1;
+    items[1].enabled = false;
+    items[2].label = "Enabled";
+    items[2].actionValue = 2;
+
+    fui::ListProps props{};
+    props.items = items;
+    props.count = 3;
+    props.scrollIndicator = false;
+    props.action = ACTION_ROW;
+    props.inputMask = fui::InputTouch;
+    props.rowHeight = ROW_H;
+    props.selectedIndex = 1;  // the cursor rests on the disabled row
+    fui::list(frame, fui::Rect{BODY_X, y, BODY_W, static_cast<int16_t>(3 * ROW_H)}, props);
+  };
+
+  fui::InteractionBuffer<16> interactions;
+  GeometryTarget target;
+  const fui::InputSnapshot noInput{};
+  interactions.beginPublishCycle();
+  fui::Frame<16> frame(target, device, noInput, interactions);
+  buildFragment(frame, BODY_Y);
+  interactions.publish();
+
+  // Only the ENABLED rows registered hits; the selected disabled row did not.
+  ASSERT_EQ(interactions.publishedCount(), 2u);
+  const fui::Interaction* hits = interactions.publishedData();
+  EXPECT_EQ(hits[0].value, 0);
+  EXPECT_EQ(hits[1].value, 2);
+
+  // A tap inside the selected disabled row's band routes NOWHERE.
+  const int16_t disabledY = static_cast<int16_t>(BODY_Y + ROW_H + ROW_H / 2);
+  const Routed r = routeTap(interactions, device, buildFragment, BODY_Y, BODY_X + 10, disabledY);
+  EXPECT_FALSE(r.routed);
+  // The enabled rows around it still route to their own rows.
+  const Routed first = routeTap(interactions, device, buildFragment, BODY_Y, BODY_X + 10,
+                                static_cast<int16_t>(BODY_Y + ROW_H / 2));
+  EXPECT_TRUE(first.routed);
+  EXPECT_EQ(first.value, 0);
+  const Routed last =
+      routeTap(interactions, device, buildFragment, BODY_Y, BODY_X + 10, static_cast<int16_t>(BODY_Y + ROW_H * 5 / 2));
+  EXPECT_TRUE(last.routed);
+  EXPECT_EQ(last.value, 2);
 }

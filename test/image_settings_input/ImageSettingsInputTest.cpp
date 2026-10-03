@@ -229,25 +229,21 @@ TEST(ImageSettingsInput, ModalBodyHeightCoversSettingsPage) {
   EXPECT_EQ(modalBodyHeight(0, 0, 0, 0), 3 * 0);
 }
 
-// Image Info page routing (imageSettingsInput::infoDetailForRow — the exact
-// function BmpViewerActivity::activateRow dispatches on): exactly two
-// selectable rows, Name = detail 0, Path = detail 1, anything else = nothing.
-// The page has NO back/Done action: Back is the physical Back key's page
-// route, so no Info-page dispatch can ever produce the screen-top
-// confirmation the hardware ghosted.
+// Image Info page routing (imageSettingsInput::infoDetailRowFor — the exact
+// function BmpViewerActivity::activateRow/openInfoDetail dispatch on): EVERY
+// valid row maps to itself (its own detail view — the selectable count IS the
+// built row set), invalid rows map to -1. Not pinned to any row count: PNG
+// builds fewer rows than BMP and format changes need no policy change.
 TEST(ImageSettingsInput, ImageInfoDetailRouting) {
-  using imageSettingsInput::InfoDetail;
-  EXPECT_EQ(imageSettingsInput::infoDetailForRow(0), InfoDetail::Name);
-  EXPECT_EQ(imageSettingsInput::infoDetailForRow(1), InfoDetail::Path);
-  // The metadata rows (Size/Format/Bit depth/File size) never take focus and
-  // activate nothing; out-of-range rows neither.
-  EXPECT_EQ(imageSettingsInput::infoDetailForRow(2), InfoDetail::None);
-  EXPECT_EQ(imageSettingsInput::infoDetailForRow(5), InfoDetail::None);
-  EXPECT_EQ(imageSettingsInput::infoDetailForRow(-1), InfoDetail::None);
-
-  // The Info page exposes exactly two selectable rows regardless of how many
-  // metadata rows follow (PNG = 4-5 metadata rows, BMP = 5).
-  EXPECT_EQ(imageSettingsInput::IMAGE_INFO_SELECTABLE_ROWS, 2);
+  for (const int count : {0, 1, 2, 4, 5, 6, 12}) {
+    for (int row = 0; row < count; ++row) {
+      EXPECT_EQ(imageSettingsInput::infoDetailRowFor(row, count), row) << "count=" << count << " row=" << row;
+    }
+    // Invalid rows (below, at and past the end) open nothing.
+    EXPECT_EQ(imageSettingsInput::infoDetailRowFor(-1, count), -1);
+    EXPECT_EQ(imageSettingsInput::infoDetailRowFor(count, count), -1);
+    EXPECT_EQ(imageSettingsInput::infoDetailRowFor(count + 5, count), -1);
+  }
 }
 
 // 1D modal-page routing (imageSettingsInput::modalInputActionFor — the exact

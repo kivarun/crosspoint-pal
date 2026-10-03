@@ -363,21 +363,21 @@ int BmpViewerActivity::buildPageItems() {
 
     case ViewerPage::ImageInfo:
       add(tr(STR_IMAGE_INFO), nullptr, true);
-      // Name and Path are the page's ONLY selectable rows (Confirm opens the
-      // value's detail view); the metadata rows (Size / Format / Bit depth /
-      // File size) are informational: enabled=false renders the SDK's
-      // disabled style, registers no interaction and never takes focus.
-      for (size_t i = 0; i < infoPreviewRows.size(); ++i) {
-        const bool selectable = i < imageSettingsInput::IMAGE_INFO_SELECTABLE_ROWS;
-        add(infoPreviewRows[i].first.c_str(), infoPreviewRows[i].second.c_str(), false, selectable);
+      // EVERY built row is selectable (hardware UAT: metadata values are
+      // truncated in the value column too, and Show must reach them all) —
+      // Confirm opens that row's detail view.
+      for (const auto& row : infoPreviewRows) {
+        add(row.first.c_str(), row.second.c_str());
       }
       break;
 
     case ViewerPage::InfoDetail: {
-      // Detail view: title header (the row's label) + the FULL value wrapped
-      // to the body width — the delete page's measured primitive. No
+      // Detail view: title header (the selected row's label) + the FULL value
+      // wrapped to the body width — the delete page's measured primitive. No
       // selectable data rows: Confirm is inert, Back returns to Image Info.
-      add(infoDetailLabel.c_str(), nullptr, true);
+      if (infoDetailIndex >= 0 && infoDetailIndex < static_cast<int>(infoRows.size())) {
+        add(infoRows[infoDetailIndex].first.c_str(), nullptr, true);
+      }
       for (const auto& line : infoDetailLines) {
         add(line.c_str(), nullptr, false, false);
       }
@@ -669,9 +669,8 @@ int BmpViewerActivity::pageSelectableCount() const {
     case ViewerPage::Slideshow:
       return slideshow::SLIDESHOW_PAGE_ROWS;  // Start / Interval / Order
     case ViewerPage::ImageInfo:
-      // Only Name and Path take focus (pure policy): the metadata rows are
-      // informational.
-      return imageSettingsInput::IMAGE_INFO_SELECTABLE_ROWS;
+      // The selectable count IS the built row set (no hardcoded constant).
+      return static_cast<int>(infoRows.size());
     case ViewerPage::InfoDetail:
       return 0;  // informational page: Confirm inert, Up/Down no-ops
     case ViewerPage::DeleteConfirm:
@@ -806,13 +805,15 @@ void BmpViewerActivity::openInfoPage() {
 }
 
 void BmpViewerActivity::openInfoDetail(const int row) {
-  // The FULL value of the Name/Path row, wrapped to the themed row width (the
+  // The FULL value of the selected row, wrapped to the themed row width (the
   // delete page's measured primitive — never the Info page's value-column
   // truncation), with as many lines as the modal body reasonably holds at the
   // themed row stride. The modal rect is sized for the largest page, so the
-  // detail view inherits that surface.
-  if (row < 0 || row >= static_cast<int>(infoRows.size())) return;
-  infoDetailLabel = infoRows[row].first;
+  // detail view inherits that surface. Generic routing: the header and the
+  // wrapped value re-read from infoRows at the detail index.
+  const int detail = imageSettingsInput::infoDetailRowFor(row, static_cast<int>(infoRows.size()));
+  if (detail < 0) return;
+  infoDetailIndex = detail;
 
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int border = metrics.popupFrameThickness;
@@ -825,7 +826,8 @@ void BmpViewerActivity::openInfoDetail(const int row) {
   int maxLines = lineStride > 0 ? availH / lineStride : 0;
   if (maxLines > MODAL_MAX_ROWS - 1) maxLines = MODAL_MAX_ROWS - 1;
   if (maxLines < 1) maxLines = 1;
-  infoDetailLines = renderer.wrappedText(uiScaleSpec().bodyFontId, infoRows[row].second.c_str(), rowW, maxLines);
+  infoDetailLines =
+      renderer.wrappedText(uiScaleSpec().bodyFontId, infoRows[infoDetailIndex].second.c_str(), rowW, maxLines);
 
   openModalPage(ViewerPage::InfoDetail);
 }
@@ -1110,19 +1112,10 @@ void BmpViewerActivity::activateRow() {
       break;
 
     case ViewerPage::ImageInfo:
-      // Name/Path detail (pure policy): Confirm opens the focused row's full
-      // value; the metadata rows never take focus, so they activate nothing.
-      // There is deliberately no back/Done action on this page.
-      switch (imageSettingsInput::infoDetailForRow(modalRow)) {
-        case imageSettingsInput::InfoDetail::Name:
-          openInfoDetail(0);
-          break;
-        case imageSettingsInput::InfoDetail::Path:
-          openInfoDetail(1);
-          break;
-        default:
-          break;
-      }
+      // Generic detail routing (pure policy): every valid row opens its own
+      // detail view — Confirm/Show on ANY Info row. There is deliberately no
+      // back/Done action on this page.
+      openInfoDetail(imageSettingsInput::infoDetailRowFor(modalRow, static_cast<int>(infoRows.size())));
       break;
 
     case ViewerPage::InfoDetail:

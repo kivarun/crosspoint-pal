@@ -140,19 +140,18 @@ inline int modalBodyHeight(const int headerHeight, const int rowHeight, const in
   return headerHeight + rows * rowHeight + rows * rowGap;
 }
 
-// Image Info page routing (pure policy, host-tested): the page shows the
-// title header, then Name and Path as the ONLY selectable rows (each Confirm
-// opens that value's detail view), then the informational metadata rows
-// (Size / Format / Bit depth / File size — never selectable, never focused).
+// Image Info page routing (pure policy, host-tested): EVERY row the page
+// actually built (Name, Path and the metadata rows alike) is selectable, and
+// Confirm opens THAT row's detail view — the selectable count derives from
+// the built row set, never from a hardcoded constant, so format-specific row
+// tables (PNG vs BMP) need no policy change. A valid row maps to itself (the
+// activity's detail index); an invalid row maps to -1 (nothing opens).
 // There is no back/Done action here: Back is the physical Back key's page
 // route, and the historical hardware "Done" ghost traced to a screen-top
 // confirmation popup outside the modal rect, never to this dispatch.
-enum class InfoDetail : uint8_t { None = 0, Name, Path };
-inline InfoDetail infoDetailForRow(const int row) {
-  if (row < 0 || row > 1) return InfoDetail::None;
-  return row == 0 ? InfoDetail::Name : InfoDetail::Path;
+inline int infoDetailRowFor(const int row, const int infoRowCount) {
+  return row >= 0 && row < infoRowCount ? row : -1;
 }
-inline constexpr int IMAGE_INFO_SELECTABLE_ROWS = 2;
 
 // Modal row cadence (pure policy, host-tested): on touch-capable targets the
 // visual row height must be at least the device's touch minimum, so

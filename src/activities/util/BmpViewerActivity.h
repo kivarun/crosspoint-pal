@@ -176,10 +176,11 @@ class BmpViewerActivity final : public Activity {
   ToneProfile draftProfile{};                                 // staged values while the settings page is open
   std::vector<std::pair<std::string, std::string>> infoRows;  // filled by openInfoPage() with FULL values
   // Image Info display copies: the value-column previews for the Info page's
-  // rows (truncated once at page entry), and the detail view's content
-  // (label + wrapped full-width lines, filled at detail entry).
+  // rows (truncated once at page entry), and the detail view's content: the
+  // selected row's INDEX (header/value re-read from infoRows) plus its full
+  // value wrapped to the body width, filled at detail entry.
   std::vector<std::pair<std::string, std::string>> infoPreviewRows;
-  std::string infoDetailLabel;
+  int infoDetailIndex = -1;
   std::vector<std::string> infoDetailLines;
 
   // Options page row actions (dynamic: Set sleep cover appears only when

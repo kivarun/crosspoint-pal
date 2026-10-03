@@ -38,6 +38,7 @@
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
+#include "components/ListRowPresentation.h"
 #include "fontIds.h"
 #include "util/SlideshowPolicy.h"
 
@@ -616,6 +617,21 @@ void SettingsActivity::buildScreen(UiScreen& screen) {
   // common fits-on-one-line case takes the renderer's fast path anyway.
   props.labelText = screen.theme().smallText;
   props.labelText.maxLines = 2;
+  // A selected DISABLED row keeps a visible cursor: StyleSet::resolve() puts
+  // StateDisabled above StateSelected (SDK-wide precedence, deliberately
+  // untouched), so the strong selected style never draws there and the
+  // physical-button cursor would vanish on the rows Sleep Screen = Slideshow
+  // disables. The app layer adds the theme's SELECTION MARKER to that one row
+  // (weaker than the fill selection; the subdued disabled text stays); the
+  // SAME settingsRowEnabled predicate drives this as drives the grey
+  // rendering and the Confirm guard.
+  const int selectedRow = ringPos() - 1;
+  const bool selectedDisabled =
+      selectedRow >= 0 && selectedRow < settingsCount && !settingsRowEnabled(settings[selectedRow]);
+  props.selectionMarker = selectedDisabled
+                              ? rowPresentation::disabledRowCursor(screen.theme().listSelectionStyle)
+                              : fui::SelectionMarker::None;
+
   syncTabListViewport(screen, props);
   screen.list(props);
 }
