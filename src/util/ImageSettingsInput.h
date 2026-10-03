@@ -130,13 +130,29 @@ inline int8_t quantizerStepped(const int8_t current, const int delta) {
 }
 
 // Modal panel body height (pure policy, host-tested): the panel must fit its
-// LARGEST page — Image Settings — laid out from the same quantities it
-// renders with: the title header plus the page's selectable rows (Reset + one
-// per ToneParam + Apply + the sleep row = paramCount + 3) at the row cadence.
+// LARGEST page — Image Settings — laid out from the same quantities it renders
+// with: the title header, then the page's rows (Reset + one per ToneParam +
+// Apply + the sleep row = paramCount + 3) at the resolved themed stride (each
+// row followed by the resolved theme row gap, as fui::list lays them out).
 // No row-count guess lives in the sizing path.
-inline int modalBodyHeight(const int headerHeight, const int rowHeight, const int paramCount) {
-  return headerHeight + (paramCount + 3) * rowHeight;
+inline int modalBodyHeight(const int headerHeight, const int rowHeight, const int rowGap, const int paramCount) {
+  const int rows = paramCount + 3;
+  return headerHeight + rows * rowHeight + rows * rowGap;
 }
+
+// Image Info page routing (pure policy, host-tested): the page shows the
+// title header, then Name and Path as the ONLY selectable rows (each Confirm
+// opens that value's detail view), then the informational metadata rows
+// (Size / Format / Bit depth / File size — never selectable, never focused).
+// There is no back/Done action here: Back is the physical Back key's page
+// route, and the historical hardware "Done" ghost traced to a screen-top
+// confirmation popup outside the modal rect, never to this dispatch.
+enum class InfoDetail : uint8_t { None = 0, Name, Path };
+inline InfoDetail infoDetailForRow(const int row) {
+  if (row < 0 || row > 1) return InfoDetail::None;
+  return row == 0 ? InfoDetail::Name : InfoDetail::Path;
+}
+inline constexpr int IMAGE_INFO_SELECTABLE_ROWS = 2;
 
 // Modal row cadence (pure policy, host-tested): on touch-capable targets the
 // visual row height must be at least the device's touch minimum, so

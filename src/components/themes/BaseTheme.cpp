@@ -731,19 +731,22 @@ void BaseTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
   }
 }
 
-Rect BaseTheme::drawPopup(const GfxRenderer& renderer, const char* message) const {
+Rect BaseTheme::drawPopup(const GfxRenderer& renderer, const char* message, const Rect* anchorRect) const {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int marginX = metrics.popupMarginX;
   const int marginY = metrics.popupMarginY;
   const int frameThickness = metrics.popupFrameThickness;
   const EpdFontFamily::Style popupFontFamily = metrics.popupTextBold ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR;
-  // Scale y position proportionally to screen height
-  const int y = static_cast<int>(renderer.getScreenHeight() * metrics.popupTopOffsetRatio);
+  // Screen-top by default; inside an anchor rect (modal-scoped popups) the y
+  // hugs the anchor's top so the popup never spills past the surface whose
+  // repaints must clear it.
+  const int y = anchorRect ? anchorRect->y
+                           : static_cast<int>(renderer.getScreenHeight() * metrics.popupTopOffsetRatio);
   const int textWidth = renderer.getTextWidth(UI_12_FONT_ID, message, popupFontFamily);
   const int textHeight = renderer.getLineHeight(UI_12_FONT_ID);
   const int w = textWidth + marginX * 2;
   const int h = textHeight + marginY * 2;
-  const int x = (renderer.getScreenWidth() - w) / 2;
+  const int x = anchorRect ? anchorRect->x + (anchorRect->width - w) / 2 : (renderer.getScreenWidth() - w) / 2;
 
   const bool useRoundedPopup = metrics.popupCornerRadius > 0;
   if (useRoundedPopup) {

@@ -230,6 +230,46 @@ TEST(SlideshowPageRows, ActionsSelectableCountAndHints) {
   EXPECT_TRUE(order.stepperSlots);
 }
 
+// ---- Sleep-screen settings applicability (pure policy): the two
+// sleep-cover presentation rows are inert while Sleep Screen = Slideshow
+// (the slideshow pipeline never consults them); Slideshow Interval/Order
+// stay enabled on every sleep screen. ----
+
+// Applicability table over the append-only sleep-screen byte (8 = Slideshow,
+// pinned by SLEEP_SCREEN_SLIDESHOW_VALUE).
+TEST(SleepScreenSettings, CoverRowsDisabledOnlyUnderSlideshow) {
+  using slideshow::SleepScreenRow;
+  // Slideshow: the two cover rows disabled, everything else enabled.
+  for (const auto row : {SleepScreenRow::CoverMode, SleepScreenRow::CoverFilter}) {
+    EXPECT_FALSE(slideshow::sleepScreenRowEnabled(8, row)) << "row=" << static_cast<int>(row);
+  }
+  EXPECT_TRUE(slideshow::sleepScreenRowEnabled(8, SleepScreenRow::Interval));
+  EXPECT_TRUE(slideshow::sleepScreenRowEnabled(8, SleepScreenRow::Order));
+  EXPECT_TRUE(slideshow::sleepScreenRowEnabled(8, SleepScreenRow::Other));
+
+  // Every other sleep screen (cover/custom/dark/quick-resume and the
+  // post-Slideshow append space): the cover rows are back, enabled.
+  for (const uint8_t mode : {0, 1, 2, 3, 4, 5, 6, 7, 9, 255}) {
+    EXPECT_TRUE(slideshow::sleepScreenRowEnabled(mode, SleepScreenRow::CoverMode)) << "mode=" << mode;
+    EXPECT_TRUE(slideshow::sleepScreenRowEnabled(mode, SleepScreenRow::CoverFilter)) << "mode=" << mode;
+  }
+}
+
+// Activation guard semantics: a disabled row cannot mutate its value or open
+// its picker — the activity dispatches Apply/Inert from the SAME
+// applicability predicate that greys the row, so the two can never disagree.
+TEST(SleepScreenSettings, DisabledRowIsInert) {
+  using slideshow::SleepScreenRow;
+  // The guard mirrors sleepScreenRowEnabled: disabled only for the cover
+  // rows under Slideshow (mode 8); the stored values are never touched by
+  // the guard (it is a pure predicate over mode + row).
+  EXPECT_FALSE(slideshow::sleepScreenRowEnabled(slideshow::SLEEP_SCREEN_SLIDESHOW_VALUE, SleepScreenRow::CoverMode));
+  EXPECT_TRUE(slideshow::sleepScreenRowEnabled(0, SleepScreenRow::CoverMode));
+  // Re-enabling keeps the value domain: the predicate reads no value, so
+  // switching Slideshow -> Cover cannot have reset anything.
+  EXPECT_EQ(slideshow::SLEEP_SCREEN_SLIDESHOW_VALUE, 8);
+}
+
 // ---- Randomized exhaustive cycle (LCG + cycle walking, adapted from
 // CrossPoint upstream PR #3841 by @gkaindl). All RNG values are fixed, so
 // these tests carry no statistical dependence. ----

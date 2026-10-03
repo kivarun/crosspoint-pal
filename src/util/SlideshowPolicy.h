@@ -48,6 +48,17 @@ inline constexpr bool allowedByBattery(const uint16_t percent, const bool extern
   return externalPowered || percent > BATTERY_CUTOFF_PERCENT;
 }
 
+// Which DISPLAY settings row is being judged (pure, host-tested). The
+// Slideshow sleep screen renders its frames through imageonly::renderImageFile()
+// and never consults the sleep-cover presentation settings, so those two rows
+// are inert while Slideshow is selected. Slideshow Interval/Order stay enabled
+// on every sleep screen: the Image Viewer slideshow consumes them regardless.
+enum class SleepScreenRow : uint8_t { Other = 0, CoverMode, CoverFilter, Interval, Order };
+inline constexpr bool sleepScreenRowEnabled(const uint8_t sleepScreenMode, const SleepScreenRow row) {
+  if (row != SleepScreenRow::CoverMode && row != SleepScreenRow::CoverFilter) return true;
+  return sleepScreenMode != SLEEP_SCREEN_SLIDESHOW_VALUE;
+}
+
 // Persisted slideshow order: an INDEX into this fixed table (append-safe —
 // new values are appended, existing indices never move). Shared by the
 // Image Viewer slideshow and Sleep Screen = Slideshow. A corrupt/out-of-range

@@ -214,16 +214,40 @@ TEST(ImageSettingsInput, StepperParamRowRoundTrip) {
 }
 
 // The modal panel is sized from its LARGEST page (Image Settings), computed
-// from the same quantities the page renders with: title header + (paramCount
-// + 3) rows — Reset + one per ToneParam + Apply + the sleep row. The old
-// sizing guessed "6 data rows"; this pins the real layout arithmetic.
+// from the same quantities the page renders with: title header, then
+// (paramCount + 3) rows — Reset + one per ToneParam + Apply + the sleep row —
+// each followed by the resolved theme row gap (fui::list's stride: every row
+// is followed by a gap, the header's gap included). The old sizing guessed
+// "6 data rows" and ignored the theme gap; this pins the real arithmetic.
 TEST(ImageSettingsInput, ModalBodyHeightCoversSettingsPage) {
   using imageSettingsInput::modalBodyHeight;
-  // The current page layout: header + 7 rows at 36px.
-  EXPECT_EQ(modalBodyHeight(30, 36, 4), 30 + 7 * 36);
-  EXPECT_EQ(modalBodyHeight(0, 36, 4), 7 * 36);
+  // The current page layout: header + 7 rows at 36px + a gap after each row.
+  EXPECT_EQ(modalBodyHeight(30, 36, 0, 4), 30 + 7 * 36);
+  EXPECT_EQ(modalBodyHeight(30, 36, 6, 4), 30 + 7 * (36 + 6));
+  EXPECT_EQ(modalBodyHeight(0, 36, 6, 4), 7 * (36 + 6));
   // Zero height/degenerate inputs stay additive (no hidden constants).
-  EXPECT_EQ(modalBodyHeight(0, 0, 0), 3 * 0);
+  EXPECT_EQ(modalBodyHeight(0, 0, 0, 0), 3 * 0);
+}
+
+// Image Info page routing (imageSettingsInput::infoDetailForRow — the exact
+// function BmpViewerActivity::activateRow dispatches on): exactly two
+// selectable rows, Name = detail 0, Path = detail 1, anything else = nothing.
+// The page has NO back/Done action: Back is the physical Back key's page
+// route, so no Info-page dispatch can ever produce the screen-top
+// confirmation the hardware ghosted.
+TEST(ImageSettingsInput, ImageInfoDetailRouting) {
+  using imageSettingsInput::InfoDetail;
+  EXPECT_EQ(imageSettingsInput::infoDetailForRow(0), InfoDetail::Name);
+  EXPECT_EQ(imageSettingsInput::infoDetailForRow(1), InfoDetail::Path);
+  // The metadata rows (Size/Format/Bit depth/File size) never take focus and
+  // activate nothing; out-of-range rows neither.
+  EXPECT_EQ(imageSettingsInput::infoDetailForRow(2), InfoDetail::None);
+  EXPECT_EQ(imageSettingsInput::infoDetailForRow(5), InfoDetail::None);
+  EXPECT_EQ(imageSettingsInput::infoDetailForRow(-1), InfoDetail::None);
+
+  // The Info page exposes exactly two selectable rows regardless of how many
+  // metadata rows follow (PNG = 4-5 metadata rows, BMP = 5).
+  EXPECT_EQ(imageSettingsInput::IMAGE_INFO_SELECTABLE_ROWS, 2);
 }
 
 // DeleteConfirm page contract, over the PRODUCTION-owned routing

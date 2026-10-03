@@ -31,11 +31,6 @@ constexpr char TRANSPARENT_SLEEP_ROOT_BMP[] = "/sleep-overlay.bmp";
 constexpr char TRANSPARENT_SLEEP_ROOT_PNG[] = "/sleep-overlay.png";
 constexpr size_t COPY_BUFFER_SIZE = 2048;
 
-// Row cadence of the modal pages: the side padding of fui::list's raw
-// defaults (sidePadding unset = 8px); the ROW height is the resolved
-// modalRowH (see computeModalRect).
-constexpr int16_t MODAL_SIDE_PAD = 8;
-
 std::string baseNameOf(const std::string& path) {
   const size_t lastSlash = path.find_last_of('/');
   return (lastSlash != std::string::npos) ? path.substr(lastSlash + 1) : path;
@@ -88,18 +83,22 @@ void BmpViewerActivity::computeModalRect() {
 
   // Exact height of the LARGEST page — Image Settings — computed from the
   // same quantities buildSettingsPage() renders with (title header + the
-  // page's rows at the resolved modal cadence) plus the panel's borders and
-  // padding. The other pages are header + fewer rows (Options ≤ 4, Info 6,
+  // page's rows at the resolved themed stride) plus the panel's borders and
+  // padding. The other pages are header + fewer rows (Options ≤ 4, Info 7,
   // Delete 5), so the settings page is the sizing invariant. Clamped to the
   // screen so a degenerate theme cannot push the panel off it.
   fui::GfxRendererTarget target = makeUiTarget(renderer);
-  refreshSharedUiThemeTokens(target);
+  const fui::ThemeTokens& tokens = refreshSharedUiThemeTokens(target);
+  const fui::DeviceContext device = target.deviceContext();
   // ONE cadence for every modal page (list rows, settings rows, touch
   // minimum, panel sizing): touch-capable targets raise the row height to the
   // device's touch minimum so ensureMinTouchRect() never expands a hit band
-  // into the neighboring row; button-only targets keep the 36px density.
-  const fui::DeviceContext device = target.deviceContext();
+  // into the neighboring row; button-only targets keep the 36px density. The
+  // theme's row gap (with its touch comfort bump) rides on top of every
+  // stride — sizing and rendering resolve it from the SAME tokens.
   modalRowH = static_cast<int16_t>(imageSettingsInput::modalRowHeight(device.hasTouch, device.minTouchSize));
+  const modalTheme::ModalListTheme theme = modalTheme::resolve(tokens, device.hasTouch);
+  modalRowGap = theme.rowGap;
   const int border = metrics.popupFrameThickness;
 
   // Width: the standard OptionPopup convention; on touch targets the two
@@ -113,22 +112,23 @@ void BmpViewerActivity::computeModalRect() {
     int16_t maxLabelWidth = 0;
     int16_t maxValueWidth = 0;
     int requiredBodyWidth = 0;
-    measureStepperExtents(target, maxLabelWidth, maxValueWidth);
+    measureStepperExtents(target, theme, maxLabelWidth, maxValueWidth);
     requiredBodyWidth = imageSettingsInput::stepperRequiredBodyWidth(
-        MODAL_SIDE_PAD, maxLabelWidth, maxValueWidth, target.lineHeight(fui::GfxRendererTarget::FONT_BODY),
+        theme.sidePadding, maxLabelWidth, maxValueWidth, target.lineHeight(fui::GfxRendererTarget::FONT_BODY),
         device.minTouchSize);
-    measureSlideshowExtents(target, maxLabelWidth, maxValueWidth);
+    measureSlideshowExtents(target, theme, maxLabelWidth, maxValueWidth);
     requiredBodyWidth = std::max<int>(requiredBodyWidth,
                                       imageSettingsInput::stepperRequiredBodyWidth(
-                                          MODAL_SIDE_PAD, maxLabelWidth, maxValueWidth,
+                                          theme.sidePadding, maxLabelWidth, maxValueWidth,
                                           target.lineHeight(fui::GfxRendererTarget::FONT_BODY), device.minTouchSize));
     width = std::min<int>(std::max<int>(width, requiredBodyWidth + border * 2 + 8),
                           screenW - metrics.optionPopupDialogSideMargin * 2);
   }
 
-  const int height = std::min<int>(screenH, imageSettingsInput::modalBodyHeight(modalHeaderHeight(target), modalRowH,
-                                                                                static_cast<int>(ToneParam::Count)) +
-                                                border * 2 + 8);
+  const int height =
+      std::min<int>(screenH, imageSettingsInput::modalBodyHeight(modalHeaderHeight(target), modalRowH, modalRowGap,
+                                                                 static_cast<int>(ToneParam::Count)) +
+                                   border * 2 + 8);
 
   modalRect = fui::Rect{static_cast<int16_t>((screenW - width) / 2), static_cast<int16_t>((screenH - height) / 2),
                         static_cast<int16_t>(width), static_cast<int16_t>(height)};
@@ -141,13 +141,13 @@ int16_t BmpViewerActivity::modalHeaderHeight(const fui::DrawTarget& target) {
   return static_cast<int16_t>(target.lineHeight(fui::GfxRendererTarget::FONT_SMALL) + 4);
 }
 
-void BmpViewerActivity::measureStepperExtents(const fui::DrawTarget& target, int16_t& maxLabelWidth,
-                                              int16_t& maxValueWidth) const {
+void BmpViewerActivity::measureStepperExtents(const fui::DrawTarget& target, const modalTheme::ModalListTheme& theme,
+                                              int16_t& maxLabelWidth, int16_t& maxValueWidth) const {
   // The settings page's label/value measurement owner: the widest localized
-  // row label and the widest possible value text (static format maxima plus
-  // the widest localized quantizer label), in the fonts the rows render with.
-  fui::TextStyle labelStyle{};
-  labelStyle.font = fui::GfxRendererTarget::FONT_BODY;
+  // row label (in the themed label style — title boldness included) and the
+  // widest possible value text (static format maxima plus the widest
+  // localized quantizer label) in the font the rows render values with.
+  const fui::TextStyle& labelStyle = theme.bodyStyle;
   fui::TextStyle valueStyle{};
   valueStyle.font = fui::GfxRendererTarget::FONT_BODY;
 
@@ -168,36 +168,50 @@ void BmpViewerActivity::measureStepperExtents(const fui::DrawTarget& target, int
   }
 }
 
-void BmpViewerActivity::measureSlideshowExtents(const fui::DrawTarget& target, int16_t& maxLabelWidth,
-                                                int16_t& maxValueWidth) const {
+void BmpViewerActivity::measureSlideshowExtents(const fui::DrawTarget& target, const modalTheme::ModalListTheme& theme,
+                                                int16_t& maxLabelWidth, int16_t& maxValueWidth) const {
   // The Slideshow page's label/value measurement owner: the widest row label
-  // ("Start slideshow") and the widest interval/order value, in the same fonts
-  // the rows render with.
-  fui::TextStyle style{};
-  style.font = fui::GfxRendererTarget::FONT_BODY;
+  // ("Start slideshow", themed label style) and the widest interval/order
+  // value, in the same fonts the rows render with.
+  const fui::TextStyle& labelStyle = theme.bodyStyle;
+  const fui::TextStyle& valueStyle = labelStyle;
 
   maxLabelWidth = 0;
   for (const char* label : {tr(STR_START_SLIDESHOW), tr(STR_INTERVAL), tr(STR_SLIDESHOW_ORDER)}) {
-    maxLabelWidth = std::max<int16_t>(maxLabelWidth, target.measureText(style.font, label, style).width);
+    maxLabelWidth = std::max<int16_t>(maxLabelWidth, target.measureText(labelStyle.font, label, labelStyle).width);
   }
   maxValueWidth = 0;
   for (const char* value : {tr(STR_SLIDESHOW_INTERVAL_1_MIN), tr(STR_SLIDESHOW_INTERVAL_5_MIN),
                             tr(STR_SLIDESHOW_INTERVAL_10_MIN), tr(STR_SLIDESHOW_INTERVAL_30_MIN),
                             tr(STR_SLIDESHOW_ORDER_FORWARD), tr(STR_SLIDESHOW_ORDER_REVERSE),
                             tr(STR_SLIDESHOW_ORDER_RANDOM)}) {
-    maxValueWidth = std::max<int16_t>(maxValueWidth, target.measureText(style.font, value, style).width);
+    maxValueWidth = std::max<int16_t>(maxValueWidth, target.measureText(valueStyle.font, value, valueStyle).width);
   }
+}
+
+Rect BmpViewerActivity::modalAnchorRect() const {
+  return Rect{modalRect.x, modalRect.y, modalRect.width, modalRect.height};
 }
 
 void BmpViewerActivity::renderModal() {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int border = metrics.popupFrameThickness;
+  const int cornerRadius = metrics.popupCornerRadius;
 
-  // Opaque single surface: theme border + solid white body. Nothing of the
-  // previous page (or the image) bleeds through.
-  renderer.fillRect(modalRect.x, modalRect.y, modalRect.width, modalRect.height, true);
-  renderer.fillRect(modalRect.x + border, modalRect.y + border, modalRect.width - border * 2,
-                    modalRect.height - border * 2, false);
+  // Opaque single surface in the theme's popup shape (the same primitives and
+  // popup metrics BaseTheme::drawPopup draws confirmations with): solid white
+  // body inside a black frame, rounded when the theme's popups are. Nothing
+  // of the previous page (or the image) bleeds through.
+  if (cornerRadius > 0) {
+    renderer.fillRoundedRect(modalRect.x, modalRect.y, modalRect.width, modalRect.height, cornerRadius + border,
+                             Color::Black);
+    renderer.fillRoundedRect(modalRect.x + border, modalRect.y + border, modalRect.width - border * 2,
+                             modalRect.height - border * 2, cornerRadius, Color::White);
+  } else {
+    renderer.fillRect(modalRect.x, modalRect.y, modalRect.width, modalRect.height, true);
+    renderer.fillRect(modalRect.x + border, modalRect.y + border, modalRect.width - border * 2,
+                      modalRect.height - border * 2, false);
+  }
 
   // FreeInkUI frame setup, mirroring OptionPopup::render (raw primitives): the
   // frame registers each enabled row (and stepper control) on the interaction
@@ -206,7 +220,12 @@ void BmpViewerActivity::renderModal() {
   // mapped-input path, so the buffer is touch-only and never competes with
   // them for dispatch.
   fui::GfxRendererTarget target = makeUiTarget(renderer);
-  refreshSharedUiThemeTokens(target);
+  // ONE theme resolution for the whole surface: the tokens' shape (row styles
+  // + selection style, gap, radius, side padding, inset, text roles) drives
+  // the list pages, the settingRow/stepperRow pages and the detail views
+  // alike — the modal follows the active UI theme like every themed list.
+  const fui::ThemeTokens& tokens = refreshSharedUiThemeTokens(target);
+  const modalTheme::ModalListTheme theme = modalTheme::resolve(tokens, target.deviceContext().hasTouch);
   const fui::DeviceContext device = target.deviceContext();
   const fui::InputSnapshot noInput{};
   modalInteractions.beginPublishCycle();
@@ -218,9 +237,9 @@ void BmpViewerActivity::renderModal() {
   if (viewerPage == ViewerPage::ImageSettings) {
     // Stepper rows are SDK components, not list items — the settings page
     // lays out directly with the same cadence list() renders the other pages.
-    buildSettingsPage(frame, body);
+    buildSettingsPage(frame, body, theme);
   } else if (viewerPage == ViewerPage::Slideshow) {
-    buildSlideshowPage(frame, body);
+    buildSlideshowPage(frame, body, theme);
   } else {
     const int rows = buildPageItems();
 
@@ -233,9 +252,11 @@ void BmpViewerActivity::renderModal() {
     // The resolved modal cadence as an explicit row height: the visual row
     // and list()'s device-minimum-based hit rect then agree, so
     // ensureMinTouchRect() never expands one row's band into the next.
+    // Labels follow the theme body style (title boldness); values keep the
+    // body font the modal's cadence was measured for.
     props.rowHeight = modalRowH;
-    props.labelText.font = fui::GfxRendererTarget::FONT_BODY;
     props.valueText.font = fui::GfxRendererTarget::FONT_BODY;
+    modalTheme::applyListProps(theme, props);
     fui::list(frame, body, props);
   }
   modalInteractions.publish();
@@ -254,7 +275,9 @@ void BmpViewerActivity::renderModal() {
   // between rows and skipped slots would keep stale frames on the strip (the
   // opt-in flag exists exactly for this modal-repaint case — the viewer's
   // other pages keep the skip semantics where empty slots intentionally leave
-  // content visible).
+  // content visible). Image Info's Confirm is a detail SHOW (Name/Path), and
+  // the Info detail view is informational: Back only, with the unused slots
+  // erased because the strip shrinks from four labels to one.
   if (viewerPage == ViewerPage::ImageSettings) {
     const char* confirmLabel;
     if (modalRow == 0) {
@@ -271,6 +294,13 @@ void BmpViewerActivity::renderModal() {
     const auto hint =
         mappedInput.mapLabels(tr(STR_BACK), slots.confirmStart ? tr(STR_START) : "+", slots.stepperSlots ? "-" : "",
                               slots.stepperSlots ? "+" : "");
+    GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4, /*eraseUnused=*/true);
+  } else if (viewerPage == ViewerPage::ImageInfo) {
+    // Name/Path are the selectable rows and Confirm SHOWS their detail.
+    const auto hint = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SHOW), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+    GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4);
+  } else if (viewerPage == ViewerPage::InfoDetail) {
+    const auto hint = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4, /*eraseUnused=*/true);
   } else {
     const auto hint = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
@@ -333,10 +363,26 @@ int BmpViewerActivity::buildPageItems() {
 
     case ViewerPage::ImageInfo:
       add(tr(STR_IMAGE_INFO), nullptr, true);
-      for (const auto& row : infoRows) {
-        add(row.first.c_str(), row.second.c_str());
+      // Name and Path are the page's ONLY selectable rows (Confirm opens the
+      // value's detail view); the metadata rows (Size / Format / Bit depth /
+      // File size) are informational: enabled=false renders the SDK's
+      // disabled style, registers no interaction and never takes focus.
+      for (size_t i = 0; i < infoPreviewRows.size(); ++i) {
+        const bool selectable = i < imageSettingsInput::IMAGE_INFO_SELECTABLE_ROWS;
+        add(infoPreviewRows[i].first.c_str(), infoPreviewRows[i].second.c_str(), false, selectable);
       }
       break;
+
+    case ViewerPage::InfoDetail: {
+      // Detail view: title header (the row's label) + the FULL value wrapped
+      // to the body width — the delete page's measured primitive. No
+      // selectable data rows: Confirm is inert, Back returns to Image Info.
+      add(infoDetailLabel.c_str(), nullptr, true);
+      for (const auto& line : infoDetailLines) {
+        add(line.c_str(), nullptr, false, false);
+      }
+      break;
+    }
 
     case ViewerPage::DeleteConfirm: {
       // Page order (documented + pinned by the host test): title header + Name
@@ -358,7 +404,8 @@ int BmpViewerActivity::buildPageItems() {
   return count;
 }
 
-void BmpViewerActivity::buildSettingsPage(fui::Frame<MODAL_INTERACTION_CAPACITY>& frame, const fui::Rect& body) {
+void BmpViewerActivity::buildSettingsPage(fui::Frame<MODAL_INTERACTION_CAPACITY>& frame, const fui::Rect& body,
+                                          const modalTheme::ModalListTheme& theme) {
   // Values come from the STAGED draft (activeTone is untouched until Apply).
   snprintf(valueScratch[0], sizeof(valueScratch[0]), "%u %%", draftProfile.brightnessPct);
   snprintf(valueScratch[1], sizeof(valueScratch[1]), "%d.%02d", draftProfile.gammaPct / 100,
@@ -380,40 +427,44 @@ void BmpViewerActivity::buildSettingsPage(fui::Frame<MODAL_INTERACTION_CAPACITY>
   }
   snprintf(valueScratch[3], sizeof(valueScratch[3]), "%s", quantizerText);
 
-  // Title header exactly as fui::list renders it (raw defaults: TextStyle{}
-  // + a 1px underline 2px below, header row = line height + 4, shared with
-  // computeModalRect's sizing via modalHeaderHeight()).
+  // Title header exactly as fui::list renders isHeader rows for this theme:
+  // the theme's small text role + a 1px underline 2px below (header row =
+  // line height + 4, shared with computeModalRect's sizing via
+  // modalHeaderHeight()).
+  const int16_t rowX = static_cast<int16_t>(body.x + theme.rowInset);
+  const int16_t rowW = static_cast<int16_t>(body.width - theme.rowInset * 2);
   int16_t cursorY = body.y;
-  const fui::TextStyle headerStyle{};  // font 0 = FONT_SMALL, as list() renders headers
-  const int16_t headerLh = frame.target().lineHeight(headerStyle.font);
-  frame.target().text(fui::Rect{static_cast<int16_t>(body.x + MODAL_SIDE_PAD), cursorY,
-                                static_cast<int16_t>(body.width - MODAL_SIDE_PAD * 2), headerLh},
-                      tr(STR_IMAGE_SETTINGS), headerStyle);
+  const int16_t headerLh = frame.target().lineHeight(theme.headerStyle.font);
+  frame.target().text(fui::Rect{static_cast<int16_t>(rowX + theme.sidePadding), cursorY,
+                                static_cast<int16_t>(rowW - theme.sidePadding * 2), headerLh},
+                      tr(STR_IMAGE_SETTINGS), theme.headerStyle);
   frame.target().fill(
-      fui::Rect{static_cast<int16_t>(body.x + MODAL_SIDE_PAD), static_cast<int16_t>(cursorY + headerLh + 2),
-                static_cast<int16_t>(body.width - MODAL_SIDE_PAD * 2), 1},
-      fui::Paint::solid(fui::Color::Black));
-  cursorY = static_cast<int16_t>(cursorY + modalHeaderHeight(frame.target()));
+      fui::Rect{static_cast<int16_t>(rowX + theme.sidePadding), static_cast<int16_t>(cursorY + headerLh + 2),
+                static_cast<int16_t>(rowW - theme.sidePadding * 2), 1},
+      fui::Paint::solid(theme.headerStyle.color));
+  cursorY = static_cast<int16_t>(cursorY + modalHeaderHeight(frame.target()) + theme.rowGap);
 
   // Shared row contract: a full-row hit with the row's actionValue (the value
   // Confirm and touch activation dispatch on); the focused row follows
-  // modalRow; minTouchSize = the row height, so ensureMinTouchRect() never
-  // expands a 36px hit band into the neighboring rows (its centered expansion
-  // would hand boundary taps to the LATER row under newest-first routing).
-  // settingRow registers the hit itself, so there is no manual hit-testing
-  // anywhere on the page.
+  // modalRow (the theme's selection style); minTouchSize = the row height, so
+  // ensureMinTouchRect() never expands a hit band into the neighboring rows
+  // (its centered expansion would hand boundary taps to the LATER row under
+  // newest-first routing). settingRow registers the hit itself, so there is
+  // no manual hit-testing anywhere on the page. Rows advance by the themed
+  // stride (row height + gap) — the same values computeModalRect sized the
+  // panel with.
   fui::TextStyle valueStyle{};
   valueStyle.font = fui::GfxRendererTarget::FONT_BODY;
   const auto rowProps = [&](const char* label, const int actionValue) {
     fui::SettingRowProps row{};
     row.label = label;
-    row.labelText.font = fui::GfxRendererTarget::FONT_BODY;
     row.valueText = valueStyle;
     row.action = ACTION_ROW;
     row.valueId = static_cast<int16_t>(actionValue);
     row.inputMask = fui::InputTouch;
     row.minTouchSize = modalRowH;
-    if (modalRow == actionValue) row.state = fui::StateFocused;
+    if (modalRow == actionValue) row.state = fui::StateSelected;
+    modalTheme::applySettingRow(theme, row);
     return row;
   };
 
@@ -429,8 +480,8 @@ void BmpViewerActivity::buildSettingsPage(fui::Frame<MODAL_INTERACTION_CAPACITY>
   const bool hasTouch = frame.device().hasTouch;
 
   fui::SettingRowProps reset = rowProps(tr(STR_RESET_TO_DEFAULTS), 0);
-  fui::settingRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, reset);
-  cursorY = static_cast<int16_t>(cursorY + modalRowH);
+  fui::settingRow(frame, fui::Rect{rowX, cursorY, rowW, modalRowH}, reset);
+  cursorY = static_cast<int16_t>(cursorY + modalRowH + theme.rowGap);
 
   const char* labels[] = {tr(STR_BRIGHTNESS), tr(STR_GAMMA), tr(STR_FILTER_CONTRAST), tr(STR_QUANTIZER)};
   const char* widest[] = {"110 %", "1.30", "130 %", nullptr};
@@ -448,8 +499,8 @@ void BmpViewerActivity::buildSettingsPage(fui::Frame<MODAL_INTERACTION_CAPACITY>
     for (int param = 0; param < static_cast<int>(ToneParam::Count); ++param) {
       auto row = rowProps(labels[param], param + 1);
       row.value = valueScratch[param];
-      fui::settingRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, row);
-      cursorY = static_cast<int16_t>(cursorY + modalRowH);
+      fui::settingRow(frame, fui::Rect{rowX, cursorY, rowW, modalRowH}, row);
+      cursorY = static_cast<int16_t>(cursorY + modalRowH + theme.rowGap);
     }
   } else {
     // ONE page-wide fixed column set for every editable row: valueWidth from
@@ -458,8 +509,8 @@ void BmpViewerActivity::buildSettingsPage(fui::Frame<MODAL_INTERACTION_CAPACITY>
     // controlsW pins controlsX identically on all rows.
     int16_t maxLabelWidth = 0;
     int16_t maxValueWidth = 0;
-    measureStepperExtents(frame.target(), maxLabelWidth, maxValueWidth);
-    const auto cols = imageSettingsInput::stepperColumns(body.width, MODAL_SIDE_PAD, maxLabelWidth, maxValueWidth,
+    measureStepperExtents(frame.target(), theme, maxLabelWidth, maxValueWidth);
+    const auto cols = imageSettingsInput::stepperColumns(rowW, theme.sidePadding, maxLabelWidth, maxValueWidth,
                                                          frame.target().lineHeight(fui::GfxRendererTarget::FONT_BODY),
                                                          frame.device().minTouchSize);
     for (int param = 0; param < static_cast<int>(ToneParam::Count); ++param) {
@@ -474,55 +525,58 @@ void BmpViewerActivity::buildSettingsPage(fui::Frame<MODAL_INTERACTION_CAPACITY>
       stepper.decrementValue = static_cast<int16_t>(param);
       stepper.increment = ACTION_INCREMENT;
       stepper.incrementValue = static_cast<int16_t>(param);
-      fui::stepperRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, stepper);
-      cursorY = static_cast<int16_t>(cursorY + modalRowH);
+      fui::stepperRow(frame, fui::Rect{rowX, cursorY, rowW, modalRowH}, stepper);
+      cursorY = static_cast<int16_t>(cursorY + modalRowH + theme.rowGap);
     }
   }
 
   const int paramCount = static_cast<int>(ToneParam::Count);
   fui::SettingRowProps apply = rowProps(tr(STR_APPLY), paramCount + 1);
-  fui::settingRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, apply);
-  cursorY = static_cast<int16_t>(cursorY + modalRowH);
+  fui::settingRow(frame, fui::Rect{rowX, cursorY, rowW, modalRowH}, apply);
+  cursorY = static_cast<int16_t>(cursorY + modalRowH + theme.rowGap);
   fui::SettingRowProps sleep = rowProps(tr(STR_USE_FOR_SLEEP_RENDERING), paramCount + 2);
-  fui::settingRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, sleep);
+  fui::settingRow(frame, fui::Rect{rowX, cursorY, rowW, modalRowH}, sleep);
 }
 
-void BmpViewerActivity::buildSlideshowPage(fui::Frame<MODAL_INTERACTION_CAPACITY>& frame, const fui::Rect& body) {
-  // Title header exactly as fui::list renders it (shared cadence with the
-  // settings page).
+void BmpViewerActivity::buildSlideshowPage(fui::Frame<MODAL_INTERACTION_CAPACITY>& frame, const fui::Rect& body,
+                                           const modalTheme::ModalListTheme& theme) {
+  // Title header exactly as fui::list renders isHeader rows for this theme
+  // (shared cadence with the settings page).
+  const int16_t rowX = static_cast<int16_t>(body.x + theme.rowInset);
+  const int16_t rowW = static_cast<int16_t>(body.width - theme.rowInset * 2);
   int16_t cursorY = body.y;
-  const fui::TextStyle headerStyle{};  // font 0 = FONT_SMALL, as list() renders headers
-  const int16_t headerLh = frame.target().lineHeight(headerStyle.font);
-  frame.target().text(fui::Rect{static_cast<int16_t>(body.x + MODAL_SIDE_PAD), cursorY,
-                                static_cast<int16_t>(body.width - MODAL_SIDE_PAD * 2), headerLh},
-                      tr(STR_SLIDESHOW), headerStyle);
+  const int16_t headerLh = frame.target().lineHeight(theme.headerStyle.font);
+  frame.target().text(fui::Rect{static_cast<int16_t>(rowX + theme.sidePadding), cursorY,
+                                static_cast<int16_t>(rowW - theme.sidePadding * 2), headerLh},
+                      tr(STR_SLIDESHOW), theme.headerStyle);
   frame.target().fill(
-      fui::Rect{static_cast<int16_t>(body.x + MODAL_SIDE_PAD), static_cast<int16_t>(cursorY + headerLh + 2),
-                static_cast<int16_t>(body.width - MODAL_SIDE_PAD * 2), 1},
-      fui::Paint::solid(fui::Color::Black));
-  cursorY = static_cast<int16_t>(cursorY + modalHeaderHeight(frame.target()));
+      fui::Rect{static_cast<int16_t>(rowX + theme.sidePadding), static_cast<int16_t>(cursorY + headerLh + 2),
+                static_cast<int16_t>(rowW - theme.sidePadding * 2), 1},
+      fui::Paint::solid(theme.headerStyle.color));
+  cursorY = static_cast<int16_t>(cursorY + modalHeaderHeight(frame.target()) + theme.rowGap);
 
   // Row contract identical to the Image Settings page (full-row hit, focus
-  // follows modalRow, minTouchSize = the row height).
+  // follows modalRow in the theme's selection style, minTouchSize = the row
+  // height, themed stride).
   fui::TextStyle valueStyle{};
   valueStyle.font = fui::GfxRendererTarget::FONT_BODY;
   const auto rowProps = [&](const char* label, const int actionValue) {
     fui::SettingRowProps row{};
     row.label = label;
-    row.labelText.font = fui::GfxRendererTarget::FONT_BODY;
     row.valueText = valueStyle;
     row.action = ACTION_ROW;
     row.valueId = static_cast<int16_t>(actionValue);
     row.inputMask = fui::InputTouch;
     row.minTouchSize = modalRowH;
-    if (modalRow == actionValue) row.state = fui::StateFocused;
+    if (modalRow == actionValue) row.state = fui::StateSelected;
+    modalTheme::applySettingRow(theme, row);
     return row;
   };
 
   // Row 0: Start slideshow — arms the CURRENT image (Viewer mode) and hands
   // the frame sleep to the main loop.
-  fui::settingRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, rowProps(tr(STR_START_SLIDESHOW), 0));
-  cursorY = static_cast<int16_t>(cursorY + modalRowH);
+  fui::settingRow(frame, fui::Rect{rowX, cursorY, rowW, modalRowH}, rowProps(tr(STR_START_SLIDESHOW), 0));
+  cursorY = static_cast<int16_t>(cursorY + modalRowH + theme.rowGap);
 
   // Row 1: Interval — the shared persisted cadence; stepping persists
   // immediately and repaints the modal only (the image never re-renders).
@@ -558,10 +612,10 @@ void BmpViewerActivity::buildSlideshowPage(fui::Frame<MODAL_INTERACTION_CAPACITY
     // hardware Left/Right keys step the selected row's value (button hints
     // say so).
     interval.value = intervalLabels[intervalIndex];
-    fui::settingRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, interval);
-    cursorY = static_cast<int16_t>(cursorY + modalRowH);
+    fui::settingRow(frame, fui::Rect{rowX, cursorY, rowW, modalRowH}, interval);
+    cursorY = static_cast<int16_t>(cursorY + modalRowH + theme.rowGap);
     order.value = orderLabels[orderIndex];
-    fui::settingRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, order);
+    fui::settingRow(frame, fui::Rect{rowX, cursorY, rowW, modalRowH}, order);
     return;
   }
 
@@ -571,8 +625,8 @@ void BmpViewerActivity::buildSlideshowPage(fui::Frame<MODAL_INTERACTION_CAPACITY
   // positions on every row.
   int16_t maxLabelWidth = 0;
   int16_t maxValueWidth = 0;
-  measureSlideshowExtents(frame.target(), maxLabelWidth, maxValueWidth);
-  const auto cols = imageSettingsInput::stepperColumns(body.width, MODAL_SIDE_PAD, maxLabelWidth, maxValueWidth,
+  measureSlideshowExtents(frame.target(), theme, maxLabelWidth, maxValueWidth);
+  const auto cols = imageSettingsInput::stepperColumns(rowW, theme.sidePadding, maxLabelWidth, maxValueWidth,
                                                        frame.target().lineHeight(fui::GfxRendererTarget::FONT_BODY),
                                                        frame.device().minTouchSize);
 
@@ -587,15 +641,15 @@ void BmpViewerActivity::buildSlideshowPage(fui::Frame<MODAL_INTERACTION_CAPACITY
   stepper.decrementValue = static_cast<int16_t>(slideshow::INTERVAL_PAGE_ROW);
   stepper.increment = ACTION_INCREMENT;
   stepper.incrementValue = static_cast<int16_t>(slideshow::INTERVAL_PAGE_ROW);
-  fui::stepperRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, stepper);
-  cursorY = static_cast<int16_t>(cursorY + modalRowH);
+  fui::stepperRow(frame, fui::Rect{rowX, cursorY, rowW, modalRowH}, stepper);
+  cursorY = static_cast<int16_t>(cursorY + modalRowH + theme.rowGap);
 
   stepper.row = order;
   stepper.value = orderLabels[orderIndex];
   stepper.widestValue = orderWidest;
   stepper.decrementValue = static_cast<int16_t>(slideshow::ORDER_PAGE_ROW);
   stepper.incrementValue = static_cast<int16_t>(slideshow::ORDER_PAGE_ROW);
-  fui::stepperRow(frame, fui::Rect{body.x, cursorY, body.width, modalRowH}, stepper);
+  fui::stepperRow(frame, fui::Rect{rowX, cursorY, rowW, modalRowH}, stepper);
 }
 
 int BmpViewerActivity::pageSelectableCount() const {
@@ -615,7 +669,11 @@ int BmpViewerActivity::pageSelectableCount() const {
     case ViewerPage::Slideshow:
       return slideshow::SLIDESHOW_PAGE_ROWS;  // Start / Interval / Order
     case ViewerPage::ImageInfo:
-      return static_cast<int>(infoRows.size());
+      // Only Name and Path take focus (pure policy): the metadata rows are
+      // informational.
+      return imageSettingsInput::IMAGE_INFO_SELECTABLE_ROWS;
+    case ViewerPage::InfoDetail:
+      return 0;  // informational page: Confirm inert, Up/Down no-ops
     case ViewerPage::DeleteConfirm:
       return 2;  // Cancel / Delete
     default:
@@ -661,12 +719,15 @@ void BmpViewerActivity::menuAction(ViewerAction action) {
       deleteHeadline = baseNameOf(filePath);
       // Full-width wrapped filename lines (existing measured primitive: ≤2
       // lines, UTF-8-safe split for spaceless names, ellipsis on overflow).
-      // Filled once per page entry, reused by repaints.
+      // Filled once per page entry, reused by repaints. The wrap width is
+      // the themed row's text width (insets + side padding included).
       deleteNameLines.clear();
       {
         const auto& metrics = UITheme::getInstance().getMetrics();
-        const int sidePad = 8;  // list()'s raw sidePadding default
-        const int rowW = modalRect.width - metrics.popupFrameThickness * 2 - sidePad * 2;
+        fui::GfxRendererTarget target = makeUiTarget(renderer);
+        const modalTheme::ModalListTheme theme =
+            modalTheme::resolve(refreshSharedUiThemeTokens(target), target.deviceContext().hasTouch);
+        const int rowW = modalRect.width - metrics.popupFrameThickness * 2 - theme.rowInset * 2 - theme.sidePadding * 2;
         deleteNameLines = renderer.wrappedText(uiScaleSpec().bodyFontId, deleteHeadline.c_str(), rowW, 2);
       }
       openModalPage(ViewerPage::DeleteConfirm);
@@ -714,24 +775,59 @@ void BmpViewerActivity::openInfoPage() {
     }
   }
 
-  // Truncate oversized values (long paths) to the value column: the label
-  // column and the text gap mirror fui::list's default row layout.
+  // Value-column PREVIEWS for the Info page's rows: infoRows keeps the FULL
+  // values (the detail views wrap them); the page rows show a truncated copy
+  // so nothing overflows the themed row layout. The label column, the text
+  // gap and the insets mirror the themed row layout the page renders with.
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int border = metrics.popupFrameThickness;
-  const int sidePad = 8;  // list()'s raw sidePadding default
+  fui::GfxRendererTarget target = makeUiTarget(renderer);
+  const modalTheme::ModalListTheme theme =
+      modalTheme::resolve(refreshSharedUiThemeTokens(target), target.deviceContext().hasTouch);
+  const int sidePad = theme.sidePadding;
   const int textGap = 10;
+  const int bodyFont = uiScaleSpec().bodyFontId;
+  const auto labelFamilyStyle = theme.bodyStyle.bold ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR;
   const int labelColW = std::accumulate(infoRows.begin(), infoRows.end(), 0, [&](const int width, const auto& row) {
-    return std::max(width, renderer.getTextWidth(UI_10_FONT_ID, row.first.c_str()));
+    return std::max(width, static_cast<int>(renderer.getTextWidth(bodyFont, row.first.c_str(), labelFamilyStyle)));
   });
-  const int availW = modalRect.width - border * 2 - sidePad * 2 - labelColW - textGap;
-  const int valueFont = uiScaleSpec().bodyFontId;
-  for (auto& row : infoRows) {
-    if (renderer.getTextWidth(valueFont, row.second.c_str()) > availW) {
-      row.second = renderer.truncatedText(valueFont, row.second.c_str(), availW);
+  const int availW = modalRect.width - border * 2 - theme.rowInset * 2 - sidePad * 2 - labelColW - textGap;
+  infoPreviewRows.clear();
+  infoPreviewRows.reserve(infoRows.size());
+  for (const auto& row : infoRows) {
+    std::string value = row.second;
+    if (renderer.getTextWidth(bodyFont, value.c_str()) > availW) {
+      value = renderer.truncatedText(bodyFont, value.c_str(), availW);
     }
+    infoPreviewRows.emplace_back(row.first, std::move(value));
   }
 
   openModalPage(ViewerPage::ImageInfo);
+}
+
+void BmpViewerActivity::openInfoDetail(const int row) {
+  // The FULL value of the Name/Path row, wrapped to the themed row width (the
+  // delete page's measured primitive — never the Info page's value-column
+  // truncation), with as many lines as the modal body reasonably holds at the
+  // themed row stride. The modal rect is sized for the largest page, so the
+  // detail view inherits that surface.
+  if (row < 0 || row >= static_cast<int>(infoRows.size())) return;
+  infoDetailLabel = infoRows[row].first;
+
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int border = metrics.popupFrameThickness;
+  fui::GfxRendererTarget target = makeUiTarget(renderer);
+  const modalTheme::ModalListTheme theme =
+      modalTheme::resolve(refreshSharedUiThemeTokens(target), target.deviceContext().hasTouch);
+  const int rowW = modalRect.width - border * 2 - theme.rowInset * 2 - theme.sidePadding * 2;
+  const int lineStride = modalRowH + theme.rowGap;
+  const int availH = modalRect.height - border * 2 - modalHeaderHeight(target);
+  int maxLines = lineStride > 0 ? availH / lineStride : 0;
+  if (maxLines > MODAL_MAX_ROWS - 1) maxLines = MODAL_MAX_ROWS - 1;
+  if (maxLines < 1) maxLines = 1;
+  infoDetailLines = renderer.wrappedText(uiScaleSpec().bodyFontId, infoRows[row].second.c_str(), rowW, maxLines);
+
+  openModalPage(ViewerPage::InfoDetail);
 }
 
 void BmpViewerActivity::performDelete() {
@@ -1006,9 +1102,23 @@ void BmpViewerActivity::activateRow() {
       break;
 
     case ViewerPage::ImageInfo:
-      // Confirm returns to the root options page (same surface, no image render).
-      openModalPage(ViewerPage::Options);
+      // Name/Path detail (pure policy): Confirm opens the focused row's full
+      // value; the metadata rows never take focus, so they activate nothing.
+      // There is deliberately no back/Done action on this page.
+      switch (imageSettingsInput::infoDetailForRow(modalRow)) {
+        case imageSettingsInput::InfoDetail::Name:
+          openInfoDetail(0);
+          break;
+        case imageSettingsInput::InfoDetail::Path:
+          openInfoDetail(1);
+          break;
+        default:
+          break;
+      }
       break;
+
+    case ViewerPage::InfoDetail:
+      break;  // informational page: Confirm does nothing
 
     case ViewerPage::DeleteConfirm:
       // Production-owned routing policy (host-tested): action 0 = Cancel,
@@ -1048,6 +1158,10 @@ void BmpViewerActivity::modalBack() {
     case ViewerPage::Slideshow:
       // The interval persists per step; Back just returns to the root page.
       openModalPage(ViewerPage::Options);
+      break;
+    case ViewerPage::InfoDetail:
+      // Back returns to the Image Info page the detail was opened from.
+      openModalPage(ViewerPage::ImageInfo);
       break;
     case ViewerPage::ImageInfo:
     case ViewerPage::DeleteConfirm:
@@ -1129,7 +1243,8 @@ void BmpViewerActivity::applySettings() {
   // "Use for sleep rendering" never touches this profile).
   if (!commitDraftProfile(SETTINGS.viewerRenderProfile)) {
     LOG_ERR("BMP", "Failed to save viewer render profile");
-    GUI.drawPopup(renderer, tr(STR_FAILED_LOWER));
+    const Rect anchor = modalAnchorRect();
+    GUI.drawPopup(renderer, tr(STR_FAILED_LOWER), &anchor);
     delay(1000);
     repaintModal();
     return;
@@ -1153,17 +1268,25 @@ void BmpViewerActivity::saveSleepProfile() {
   // "Use for sleep rendering": persist the STAGED draft (not activeTone — the
   // two may differ) as the sleep render profile. Transactional (see
   // commitDraftProfile): a failed SD write restores the previous profile (no
-  // unsaved-but-active state), shows the failure popup (never a false Done),
-  // and stays on the settings page with the draft intact for a retry. No
-  // image render, no activeTone change, no viewerRenderProfile change, no
+  // unsaved-but-active state), shows the failure indication (never a false
+  // Done), and stays on the settings page with the draft intact for a retry.
+  // No image render, no activeTone change, no viewerRenderProfile change, no
   // sleep-cover file/mode touch.
+  //
+  // The confirmation anchors INSIDE the modal surface (drawPopup's anchor):
+  // a screen-top popup sits outside the modal rect and the modal's partial
+  // repaints never clear it — the hardware "Done" ghost that outlived the
+  // settings page and every later modal navigation.
   if (!commitDraftProfile(SETTINGS.sleepRenderProfile)) {
-    GUI.drawPopup(renderer, tr(STR_FAILED_LOWER));
+    LOG_ERR("BMP", "Failed to save sleep render profile");
+    const Rect anchor = modalAnchorRect();
+    GUI.drawPopup(renderer, tr(STR_FAILED_LOWER), &anchor);
     delay(1000);
     repaintModal();
     return;
   }
-  GUI.drawPopup(renderer, tr(STR_DONE));
+  const Rect anchor = modalAnchorRect();
+  GUI.drawPopup(renderer, tr(STR_DONE), &anchor);
   delay(1000);
   openModalPage(ViewerPage::Options);
 }
@@ -1285,7 +1408,8 @@ void BmpViewerActivity::startViewerSlideshow() {
   // timer continuation starts a new cycle from here (RTC-only, no SD write).
   if (!slideshow::arm(filePath, slideshow::Mode::Viewer)) {
     LOG_ERR("BMP", "Slideshow arm rejected");
-    GUI.drawPopup(renderer, tr(STR_FAILED_LOWER));
+    const Rect anchor = modalAnchorRect();
+    GUI.drawPopup(renderer, tr(STR_FAILED_LOWER), &anchor);
     delay(1000);
     repaintModal();
     return;

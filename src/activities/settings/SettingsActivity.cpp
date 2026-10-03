@@ -39,8 +39,35 @@
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
 #include "fontIds.h"
+#include "util/SlideshowPolicy.h"
 
 namespace fui = freeink::ui;
+
+namespace {
+
+// The DISPLAY rows the Slideshow sleep screen disables (slideshow:: pure
+// policy): the cover mode/filter rows feed only the static sleep-cover
+// pipeline, which Sleep Screen = Slideshow never runs. Interval/Order stay
+// enabled on every sleep screen (the Image Viewer slideshow consumes them
+// regardless).
+slideshow::SleepScreenRow sleepScreenRowFor(const SettingInfo& setting) {
+  if (setting.valuePtr == &CrossPointSettings::sleepScreenCoverMode) return slideshow::SleepScreenRow::CoverMode;
+  if (setting.valuePtr == &CrossPointSettings::sleepScreenCoverFilter) return slideshow::SleepScreenRow::CoverFilter;
+  if (setting.valuePtr == &CrossPointSettings::slideshowInterval) return slideshow::SleepScreenRow::Interval;
+  if (setting.valuePtr == &CrossPointSettings::slideshowOrder) return slideshow::SleepScreenRow::Order;
+  return slideshow::SleepScreenRow::Other;
+}
+
+// ONE applicability source for both the row's visual enabled state and its
+// activation guard: a disabled row renders the SDK's grey disabled style,
+// ignores Confirm and touch taps and never opens its picker; its stored value
+// is never mutated, and it re-enables with the value intact when the sleep
+// screen leaves Slideshow.
+bool settingsRowEnabled(const SettingInfo& setting) {
+  return slideshow::sleepScreenRowEnabled(SETTINGS.sleepScreen, sleepScreenRowFor(setting));
+}
+
+}  // namespace
 
 SettingsActivity::SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
     : UiTabListActivity("Settings", renderer, mappedInput) {}
@@ -283,6 +310,11 @@ void SettingsActivity::toggleCurrentSetting() {
   const auto& setting = (*currentSettings)[selectedSetting];
   const bool sleepScreenChanged = setting.valuePtr == &CrossPointSettings::sleepScreen;
   const bool quickResumeTimeoutChanged = setting.valuePtr == &CrossPointSettings::quickResumeSleepScreen;
+
+  // Activation guard (the same predicate that renders the row grey): while
+  // Sleep Screen = Slideshow the cover mode/filter rows are inert — Confirm
+  // never mutates their value and never opens the enum picker.
+  if (!settingsRowEnabled(setting)) return;
 
   if (setting.nameId == StrId::STR_TIME_TO_SLEEP) {
     openSleepTimeoutPicker();
@@ -557,6 +589,10 @@ void SettingsActivity::buildScreen(UiScreen& screen) {
     const bool checkbox = setting.type == SettingType::TOGGLE ||
                           (setting.type == SettingType::ENUM && setting.enumStringValues.empty() &&
                            labels.size() == 2 && labels[0] == StrId::STR_STATE_OFF && labels[1] == StrId::STR_STATE_ON);
+    // Enabled state from the SAME predicate the Confirm guard uses — refreshed
+    // every build, so leaving the Sleep Screen picker repaints the two cover
+    // rows' grey state immediately, with their stored values untouched.
+    rowItems_[i].enabled = settingsRowEnabled(setting);
     if (checkbox && (setting.valuePtr || setting.valueGetter)) {
       const bool checked = setting.valuePtr ? SETTINGS.*(setting.valuePtr) != 0 : setting.valueGetter() != 0;
       rowValues_[i].clear();
@@ -598,13 +634,22 @@ void SettingsActivity::drawChrome() {
 
 void SettingsActivity::drawFooter() {
   const int ring = ringPos();
-  const auto confirmLabel =
-      (ring == 0) ? I18N.get(categoryNames[(selectedCategoryIndex + 1) % categoryCount])
-                  : (ring > 0 && (*currentSettings)[ring - 1].nameId == StrId::STR_TIME_TO_SLEEP ? tr(STR_SELECT)
-                                                                                                 : tr(STR_TOGGLE));
+  const char* confirmLabel;
+  if (ring == 0) {
+    confirmLabel = I18N.get(categoryNames[(selectedCategoryIndex + 1) % categoryCount]);
+  } else {
+    const auto& setting = (*currentSettings)[ring - 1];
+    // A disabled row promises no Toggle: Confirm is a no-op there.
+    confirmLabel = !settingsRowEnabled(setting) ? ""
+                   : setting.nameId == StrId::STR_TIME_TO_SLEEP ? tr(STR_SELECT)
+                                                                : tr(STR_TOGGLE);
+  }
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  // Only the Confirm slot can go empty (Back/Up/Down always draw); the
+  // opt-in erase clears a stale Toggle frame when the selection lands on a
+  // disabled row.
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, /*eraseUnused=*/true);
 }
 
 void SettingsActivity::render(RenderLock&& lock) {

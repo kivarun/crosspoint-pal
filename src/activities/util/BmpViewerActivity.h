@@ -11,6 +11,7 @@
 #include "GfxRenderer.h"
 #include "MappedInputManager.h"
 #include "activities/Activity.h"
+#include "components/ModalTheme.h"
 #include "util/ImageSettingsInput.h"
 
 // Image viewer: full-screen BMP/PNG viewing with an Options modal for render
@@ -27,7 +28,9 @@
 // Apply).
 enum class ToneParam : uint8_t { Brightness = 0, Gamma = 1, Contrast = 2, Quantizer = 3, Count = 4 };
 
-enum class ViewerPage : uint8_t { Viewer, Options, ImageSettings, ImageInfo, DeleteConfirm, Slideshow };
+struct Rect;  // the app rect (components/themes/BaseTheme.h)
+
+enum class ViewerPage : uint8_t { Viewer, Options, ImageSettings, ImageInfo, InfoDetail, DeleteConfirm, Slideshow };
 
 // Actions of the Options page rows (order built at page build).
 enum class ViewerAction : uint8_t { Settings = 0, Info, SleepCover, Delete, Slideshow };
@@ -77,6 +80,10 @@ class BmpViewerActivity final : public Activity {
   bool renderImageOnlyFrame();
   void openOptionsMenu();
   void computeModalRect();
+  // The modal rect as BaseTheme::drawPopup's anchor type (the app Rect) —
+  // popups drawn over the modal surface anchor inside it, so the modal's own
+  // partial repaints clear them again.
+  Rect modalAnchorRect() const;
   void renderModal();
   void repaintModal();
   // Page transition inside the modal surface: closes the touch handshake
@@ -87,21 +94,25 @@ class BmpViewerActivity final : public Activity {
   // Image Settings page: manual layout from SDK primitives (title header in
   // the list cadence, settingRow for the action rows, stepperRow for the four
   // editable ToneParam rows); every component registers its own interactions.
-  void buildSettingsPage(freeink::ui::Frame<MODAL_INTERACTION_CAPACITY>& frame, const freeink::ui::Rect& body);
+  // The page renders with the resolved modal theme (rows, header, stride).
+  void buildSettingsPage(freeink::ui::Frame<MODAL_INTERACTION_CAPACITY>& frame, const freeink::ui::Rect& body,
+                         const modalTheme::ModalListTheme& theme);
   // Slideshow page: the same architecture (title header + settingRow Start +
-  // a stepperRow for the shared persisted interval); no draft staging, the
-  // interval persists per step and the image is never re-rendered.
-  void buildSlideshowPage(freeink::ui::Frame<MODAL_INTERACTION_CAPACITY>& frame, const freeink::ui::Rect& body);
+  // steppers for the shared persisted interval/order); no draft staging, the
+  // steps persist immediately and the image is never re-rendered.
+  void buildSlideshowPage(freeink::ui::Frame<MODAL_INTERACTION_CAPACITY>& frame, const freeink::ui::Rect& body,
+                          const modalTheme::ModalListTheme& theme);
   // Pixel extents of the Slideshow page's label/value columns measured from
-  // the localized strings — feeds the modal width sizing on touch targets.
-  void measureSlideshowExtents(const freeink::ui::DrawTarget& target, int16_t& maxLabelWidth,
-                               int16_t& maxValueWidth) const;
+  // the localized strings in the themed label style — feeds the modal width
+  // sizing on touch targets.
+  void measureSlideshowExtents(const freeink::ui::DrawTarget& target, const modalTheme::ModalListTheme& theme,
+                               int16_t& maxLabelWidth, int16_t& maxValueWidth) const;
   // Pixel extents of the settings page's label/value columns measured from
   // the localized strings (widest row label, widest possible value) — the
   // single measurement owner for the fixed stepper columns and the modal
   // width sizing.
-  void measureStepperExtents(const freeink::ui::DrawTarget& target, int16_t& maxLabelWidth,
-                             int16_t& maxValueWidth) const;
+  void measureStepperExtents(const freeink::ui::DrawTarget& target, const modalTheme::ModalListTheme& theme,
+                             int16_t& maxLabelWidth, int16_t& maxValueWidth) const;
   int pageSelectableCount() const;
   void handleModalInput();
   void handleSettingsAxesInput();
@@ -117,6 +128,10 @@ class BmpViewerActivity final : public Activity {
   bool commitDraftProfile(ToneProfile& profile);
   void menuAction(ViewerAction action);
   void openInfoPage();
+  // Image Info detail view: the FULL Name/Path value, wrapped to the modal's
+  // body width (the same measured primitive the delete page uses); no
+  // selectable rows, Confirm inert, Back returns to Image Info.
+  void openInfoDetail(int row);
   void performDelete();
   // Slideshow page actions: the interval/order steps persist the shared
   // setting (modal-only repaint, the image is never re-rendered); the start
@@ -146,8 +161,11 @@ class BmpViewerActivity final : public Activity {
   // ONE modal cadence, resolved from the DeviceContext (modalRowHeight
   // policy): every modal page's visual row height AND touch minimum AND the
   // panel sizing use this single value — visual row height == touch minimum,
-  // so a row's hit band can never bleed into its neighbor's.
+  // so a row's hit band can never bleed into its neighbor's. The theme's row
+  // gap rides on top of every stride (resolved once per modal open, the same
+  // value the sizing math and every page builder lay rows out with).
   int16_t modalRowH = imageSettingsInput::MODAL_MIN_ROW_H;
+  int16_t modalRowGap = 0;
 
   // Tone state (RAM-only, survives image navigation within the session):
   // activeTone is what the decoder consumes, draftProfile stages edits while
@@ -156,7 +174,13 @@ class BmpViewerActivity final : public Activity {
   int modalRow = 0;                                           // selected row of the current page
   ToneLut activeTone{};                                       // ACTIVE session-wide settings (consumed by the decoder)
   ToneProfile draftProfile{};                                 // staged values while the settings page is open
-  std::vector<std::pair<std::string, std::string>> infoRows;  // filled by openInfoPage()
+  std::vector<std::pair<std::string, std::string>> infoRows;  // filled by openInfoPage() with FULL values
+  // Image Info display copies: the value-column previews for the Info page's
+  // rows (truncated once at page entry), and the detail view's content
+  // (label + wrapped full-width lines, filled at detail entry).
+  std::vector<std::pair<std::string, std::string>> infoPreviewRows;
+  std::string infoDetailLabel;
+  std::vector<std::string> infoDetailLines;
 
   // Options page row actions (dynamic: Set sleep cover appears only when
   // canSetSleepCover()).

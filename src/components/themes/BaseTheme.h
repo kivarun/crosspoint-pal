@@ -283,7 +283,11 @@ class BaseTheme {
   virtual void drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                               const std::function<std::string(int index)>& buttonLabel,
                               const std::function<UIIcon(int index)>& rowIcon) const;
-  virtual Rect drawPopup(const GfxRenderer& renderer, const char* message) const;
+  // anchorRect (optional): centers the popup horizontally inside the given
+  // rect and anchors it to the rect's top instead of the screen-top metrics
+  // offset — for popups drawn over a modal surface, where the modal's partial
+  // repaints cover exactly the anchor rect and clear the popup again.
+  virtual Rect drawPopup(const GfxRenderer& renderer, const char* message, const Rect* anchorRect = nullptr) const;
   virtual void fillPopupProgress(const GfxRenderer& renderer, const Rect& layout, const int progress) const;
   static void drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage, const int pageCount,
                             std::string title, const int paddingBottom = 0, const int textYOffset = 0,

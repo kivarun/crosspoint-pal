@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "GeometryTarget.h"
+#include "src/components/ModalTheme.h"
 #include "src/util/ImageSettingsInput.h"
 
 namespace fui = freeink::ui;
@@ -201,4 +202,83 @@ TEST(ModalGeometry, RowCadenceResolvesFromDeviceContext) {
   EXPECT_EQ(modalRowHeight(true, 48), 48);
   EXPECT_EQ(modalRowHeight(false, 44), 36);
   EXPECT_EQ(modalRowHeight(false, 24), 36);
+}
+
+// ---- Modal theme resolution (modalTheme::resolve/applyListProps): the
+// modal follows the ACTIVE theme's tokens the same way FreeInkApp's
+// resolveListProps themes app lists. Pure resolver proofs — no pixel
+// snapshots; the values below are the themes' ThemeMetrics data
+// (uiThemeTokens() copies into the tokens verbatim). ----
+
+// Builds the ThemeTokens the firmware's uiThemeTokens() derives for a theme
+// shape (themeTokensForLineHeight default + the theme's list metrics).
+fui::ThemeTokens tokensFor(const int gap, const uint8_t radius, const fui::SelectionStyle selection,
+                           const bool titleBold) {
+  fui::ThemeTokens tokens = fui::themeTokensForLineHeight(24);
+  tokens.listRowGap = static_cast<int16_t>(gap);
+  tokens.listRowRadius = radius;
+  tokens.listSelectionStyle = selection;
+  tokens.bodyText.bold = titleBold;
+  return tokens;
+}
+
+// Two substantially different theme shapes resolve to different modal
+// presentation values — Classic (no gap/radius, invert selection) vs
+// RoundedRaff (6px gap, 20px radius cards, bold titles) vs Lyra (light pill):
+// the modal can NOT look the same under every theme anymore.
+TEST(ModalTheme, DistinctThemesResolveDistinctModalValues) {
+  namespace mt = modalTheme;
+  const auto classic = mt::resolve(tokensFor(0, 0, fui::SelectionStyle::InvertFill, false), false);
+  const auto raff = mt::resolve(tokensFor(6, 20, fui::SelectionStyle::InvertFill, true), false);
+
+  EXPECT_EQ(classic.rowGap, 0);
+  EXPECT_EQ(raff.rowGap, 6);
+  EXPECT_EQ(classic.rowRadius, 0);
+  EXPECT_EQ(raff.rowRadius, 20);
+  EXPECT_FALSE(classic.bodyStyle.bold);
+  EXPECT_TRUE(raff.bodyStyle.bold);
+
+  // Lyra's LightPill selection expands over the row styles exactly as
+  // Screen::list() does; Classic keeps InvertFill (no marker).
+  const auto lyra = mt::resolve(tokensFor(0, 6, fui::SelectionStyle::LightPill, false), false);
+  EXPECT_EQ(lyra.rowStyles.selected.background.kind, fui::PaintKind::Dither);
+  EXPECT_EQ(classic.rowStyles.selected.background.kind, fui::PaintKind::Solid);
+  EXPECT_EQ(lyra.marker, fui::SelectionMarker::None);
+
+  // Underline/Triangle themes resolve the marker + normal-selected rows.
+  const auto underlined = mt::resolve(tokensFor(0, 0, fui::SelectionStyle::Underline, false), false);
+  EXPECT_EQ(underlined.marker, fui::SelectionMarker::Underline);
+  EXPECT_EQ(underlined.rowStyles.selected.background.kind, classic.rowStyles.normal.background.kind);
+}
+
+// ONE resolution drives every modal page type: list() pages, settingRow
+// pages and stepper rows take the same row styles, gap, radius, side padding
+// and row inset — no page renders its own cadence.
+TEST(ModalTheme, SameResolvedThemeAcrossModalPageTypes) {
+  namespace mt = modalTheme;
+  const auto theme = mt::resolve(tokensFor(6, 20, fui::SelectionStyle::LightPill, true), true);
+  // Touch bumps the gap to the theme's touch comfort gap minimum.
+  EXPECT_EQ(theme.rowGap, 6);
+
+  // A list page takes exactly the resolved values.
+  fui::ListProps listProps{};
+  listProps.valueText.font = 1;  // explicit values pass through (resolveListProps parity)
+  mt::applyListProps(theme, listProps);
+  EXPECT_EQ(listProps.rowGap, theme.rowGap);
+  EXPECT_EQ(listProps.rowRadius, theme.rowRadius);
+  EXPECT_EQ(listProps.sidePadding, theme.sidePadding);
+  EXPECT_EQ(listProps.rowInset, theme.rowInset);
+  EXPECT_EQ(listProps.selectionMarker, theme.marker);
+  EXPECT_TRUE(listProps.rowStyles.selected.background.kind == theme.rowStyles.selected.background.kind);
+  EXPECT_TRUE(listProps.labelText.bold == theme.bodyStyle.bold);
+  EXPECT_EQ(listProps.valueText.font, 1);
+  EXPECT_EQ(listProps.headerText.font, theme.headerStyle.font);
+
+  // The settingRow pages take the SAME resolved values.
+  fui::SettingRowProps row{};
+  mt::applySettingRow(theme, row);
+  EXPECT_TRUE(row.styles.selected.background.kind == theme.rowStyles.selected.background.kind);
+  EXPECT_EQ(row.radius, theme.rowRadius);
+  EXPECT_EQ(row.sidePadding, theme.sidePadding);
+  EXPECT_TRUE(row.labelText.bold == theme.bodyStyle.bold);
 }
