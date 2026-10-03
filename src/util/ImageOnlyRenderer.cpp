@@ -216,10 +216,11 @@ std::string nextImageAfter(const std::string& currentPath, const slideshow::Orde
       nextIndex = slideshow::indexAfterAdvance(currentIndex, static_cast<int>(images.size()), order, randomValue);
       break;
     case slideshow::Order::Random: {
-      // The device RNG (esp_random.h) only feeds a new cycle's increment;
-      // mid-cycle the pure policy ignores it.
+      // The CALLER's random value feeds a new cycle's increment (device RNG
+      // ownership stays with the activity layer; the seam stays
+      // deterministic/testable). Mid-cycle the pure policy ignores it.
       const auto step =
-          slideshow::randomCycleNext(currentIndex, static_cast<int>(images.size()), cycle, esp_random());
+          slideshow::randomCycleNext(currentIndex, static_cast<int>(images.size()), cycle, randomValue);
       if (step.index < 0) return {};
       cycleOut = step.state;
       nextIndex = step.index;

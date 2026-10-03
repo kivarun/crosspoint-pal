@@ -323,15 +323,36 @@ TEST(RandomCycle, ResetSemantics) {
   const auto stale = slideshow::randomCycleNext(0, 3, corrupt, 7);
   EXPECT_TRUE(slideshow::randomCycleValid(stale.state, 3));
 
-  // Missing current index: safe deterministic reset from the first entry.
-  const auto missing = slideshow::randomCycleNext(-1, 3, ok, 7);
+  // Missing current index: a FRESH cycle, proven by the increment change —
+  // the valid old cycle carried increment 7; randomValue 42 derives 1.
+  EXPECT_EQ(slideshow::randomCycleIncrement(42, 3), 1);
+  const auto missing = slideshow::randomCycleNext(-1, 3, ok, 42);
   EXPECT_GE(missing.index, 0);
   EXPECT_LT(missing.index, 3);
+  EXPECT_EQ(missing.state.increment, 1);  // reset used the caller's RNG value
   EXPECT_TRUE(slideshow::randomCycleValid(missing.state, 3));
+  // An out-of-range current index behaves the same (fresh cycle).
+  const auto outOfRange = slideshow::randomCycleNext(3, 3, ok, 42);
+  EXPECT_EQ(outOfRange.state.increment, 1);
+  EXPECT_TRUE(slideshow::randomCycleValid(outOfRange.state, 3));
 
   // Empty directory: fail closed.
   EXPECT_EQ(slideshow::randomCycleNext(0, 0, ok, 7).index, -1);
   EXPECT_EQ(slideshow::randomCycleNext(0, -3, ok, 7).index, -1);
+}
+
+// The caller's randomValue owns the new-cycle increment: different values
+// derive different odd increments deterministically.
+TEST(RandomCycle, CallerOwnedRandomValue) {
+  const slideshow::RandomCycleState fresh{};
+  EXPECT_EQ(slideshow::randomCycleNext(0, 3, fresh, 42).state.increment, 1);
+  EXPECT_EQ(slideshow::randomCycleNext(0, 3, fresh, 43).state.increment, 3);
+  // Mid-cycle the value is ignored: the increment stays the cycle's own.
+  slideshow::RandomCycleState mid{};
+  mid.increment = 3;  // valid odd increment for modulus 4
+  mid.remaining = 1;
+  mid.total = 3;
+  EXPECT_EQ(slideshow::randomCycleNext(0, 3, mid, 4294967295u).state.increment, 3);
 }
 
 // LCG shapes: power-of-two modulus and the odd increment derivation.

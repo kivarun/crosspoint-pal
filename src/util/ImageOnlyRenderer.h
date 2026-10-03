@@ -71,8 +71,9 @@ std::vector<std::string> listImageFiles(const std::string& dirPath);
 // image is shown exactly once before the first repeat, and the walk position
 // is the current image's index. cycle is the retained metadata IN/OUT —
 // returned updated (pass-through for Forward/Reverse); the caller persists
-// it, this module owns no persistence. randomValue feeds a new cycle's
-// increment. path is "" when the directory holds no candidate image.
+// it, this module owns no persistence. randomValue is the CALLER's device-RNG
+// value feeding a new cycle's increment. path is "" when the directory holds
+// no candidate image.
 std::string nextImageAfter(const std::string& currentPath, const slideshow::Order order,
                            const slideshow::RandomCycleState& cycle, const uint32_t randomValue,
                            slideshow::RandomCycleState& cycleOut);

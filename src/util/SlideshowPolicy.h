@@ -184,9 +184,11 @@ struct RandomCycleStep {
 };
 
 // Pure next-frame policy of the Random order. randomValue feeds a NEW
-// cycle's increment when the current one is exhausted or invalid; mid-cycle
-// it is ignored. currentIndex out of range (retained path missing from the
-// scan) resets the cycle and walks deterministically from the first entry.
+// cycle's increment. A fresh cycle is started when the current one is
+// exhausted or invalid (corrupt metadata / directory changed) — or when the
+// current index is out of range (the retained path is missing from the
+// scan): a cycle always continues from a real position on the LCG walk, so
+// a missing current never rides a formally valid old cycle.
 inline RandomCycleStep randomCycleNext(const int currentIndex, const int count,
                                        const RandomCycleState& cycle, const uint32_t randomValue) {
   RandomCycleStep step{};
@@ -200,9 +202,10 @@ inline RandomCycleStep randomCycleNext(const int currentIndex, const int count,
     return step;
   }
 
-  // Exhausted or invalid (corrupt metadata / directory changed): a new cycle
+  const bool haveCurrent = currentIndex >= 0 && currentIndex < count;
+  // Exhausted, invalid, or no current frame to continue from: a new cycle
   // starts at the current frame, with a fresh odd increment from the RNG.
-  step.state = (cycle.remaining == 0 || !randomCycleValid(cycle, count))
+  step.state = (cycle.remaining == 0 || !haveCurrent || !randomCycleValid(cycle, count))
                    ? randomCycleReset(randomValue, count)
                    : cycle;
   --step.state.remaining;
@@ -210,8 +213,8 @@ inline RandomCycleStep randomCycleNext(const int currentIndex, const int count,
   // Cycle-walk the LCG from the current position: skip out-of-range states
   // and the frame already on screen. Terminates within the modulus: for
   // count > 1 at least one valid frame other than the current one is on the
-  // full-period cycle.
-  const bool haveCurrent = currentIndex >= 0 && currentIndex < count;
+  // full-period cycle. A reset with a missing current walks deterministically
+  // from the first entry.
   uint32_t state = haveCurrent ? static_cast<uint32_t>(currentIndex) : 0u;
   const uint32_t m = randomCycleModulus(count);
   do {
