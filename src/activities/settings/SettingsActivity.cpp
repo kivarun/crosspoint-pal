@@ -18,6 +18,7 @@
 #include "ClearCacheActivity.h"
 #include "ClockSettingsActivity.h"
 #include "CrossPointSettings.h"
+#include "Rtc32kDiagnosticsActivity.h"
 #include "FontDownloadActivity.h"
 #include "HomeButtonSettingsActivity.h"
 #include "KOReaderSettingsActivity.h"
@@ -140,6 +141,12 @@ void SettingsActivity::rebuildSettingsLists() {
   systemSettings.push_back(SettingInfo::Action(StrId::STR_PLUGINS, SettingAction::Plugins));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_KEYBOARD_LAYOUTS, SettingAction::KeyboardLayouts));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_ABOUT, SettingAction::About));
+  // X4C-only solder-joint diagnostics (experiment branch): temporary entry,
+  // launches the hardware screen — no persistent settings involved.
+  if (BoardConfig::isX4Classic()) {
+    systemSettings.push_back(
+        SettingInfo::Action(StrId::STR_RTC_32K_DIAGNOSTICS, SettingAction::Rtc32kDiagnostics));
+  }
   systemSettings.push_back(SettingInfo::Action(StrId::STR_LANGUAGE, SettingAction::Language));
   readerSettings.insert(readerSettings.begin(),
                         SettingInfo::Action(StrId::STR_TEXT_SETTINGS, SettingAction::TextSettings));
@@ -478,6 +485,13 @@ void SettingsActivity::toggleCurrentSetting() {
           startActivityForResult(std::move(activity), nullptr);
         } else {
           LOG_ERR("SETTINGS", "OOM: AboutActivity");
+        }
+        break;
+      case SettingAction::Rtc32kDiagnostics:
+        if (auto activity = makeUniqueNoThrow<Rtc32kDiagnosticsActivity>(renderer, mappedInput)) {
+          startActivityForResult(std::move(activity), nullptr);
+        } else {
+          LOG_ERR("SETTINGS", "OOM: Rtc32kDiagnosticsActivity");
         }
         break;
       case SettingAction::None:
