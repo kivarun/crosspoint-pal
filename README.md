@@ -193,7 +193,7 @@ Conversion runs the firmware repo's `lib/EpdFont/scripts/fontconvert_sdcard.py` 
 
 ```bash
 git clone --recursive https://github.com/kivarun/crosspoint-pal
-cd crosspoint-reader
+cd crosspoint-pal
 
 # if cloned without --recursive:
 git submodule update --init --recursive

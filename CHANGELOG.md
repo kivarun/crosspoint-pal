@@ -7,7 +7,7 @@ is bare semver without a `v` prefix (the OTA plumbing keys release assets by
 ## CrossPoint Pal 0.1.0 — Image Viewer & Low-Power Slideshow
 
 First public release. Based on upstream `crosspoint-reader/crosspoint-reader`
-`develop` @ `149dd5329953b4d160cc6bc938f32e427a3c9dcc`.
+`develop` @ `5ab0f290a5d88cb54fb7e2906c6bc0ab829770f0`.
 
 Hardware-verified binary: **XTEINK X4 Classic** only.
 
