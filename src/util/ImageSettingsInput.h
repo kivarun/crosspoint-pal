@@ -263,4 +263,21 @@ inline DeleteAction deleteConfirmActionForRow(const int row) {
   }
 }
 
+// 1D modal-page input routing (pure policy, host-tested): the merged list
+// navigation of the options / info / delete pages. Back routes on EVERY page
+// — informational pages with no selectable rows (the Image Info detail view)
+// keep only Back, which is their sole exit; the rows guard would otherwise
+// swallow it and trap the user on the detail view. Confirm and the row axes
+// stay inert when the page has no selectable rows.
+enum class ModalPageAction : uint8_t { None = 0, Back, RowUp, RowDown, Activate };
+inline ModalPageAction modalInputActionFor(const int selectableRows, const bool navPrevious,
+                                           const bool navNext, const bool confirm, const bool back) {
+  if (back) return ModalPageAction::Back;
+  if (selectableRows <= 0) return ModalPageAction::None;
+  if (navPrevious) return ModalPageAction::RowUp;
+  if (navNext) return ModalPageAction::RowDown;
+  if (confirm) return ModalPageAction::Activate;
+  return ModalPageAction::None;
+}
+
 }  // namespace imageSettingsInput

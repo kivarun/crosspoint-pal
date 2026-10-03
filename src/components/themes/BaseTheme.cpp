@@ -737,16 +737,15 @@ Rect BaseTheme::drawPopup(const GfxRenderer& renderer, const char* message, cons
   const int marginY = metrics.popupMarginY;
   const int frameThickness = metrics.popupFrameThickness;
   const EpdFontFamily::Style popupFontFamily = metrics.popupTextBold ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR;
-  // Screen-top by default; inside an anchor rect (modal-scoped popups) the y
-  // hugs the anchor's top so the popup never spills past the surface whose
-  // repaints must clear it.
-  const int y = anchorRect ? anchorRect->y
-                           : static_cast<int>(renderer.getScreenHeight() * metrics.popupTopOffsetRatio);
   const int textWidth = renderer.getTextWidth(UI_12_FONT_ID, message, popupFontFamily);
   const int textHeight = renderer.getLineHeight(UI_12_FONT_ID);
-  const int w = textWidth + marginX * 2;
-  const int h = textHeight + marginY * 2;
-  const int x = anchorRect ? anchorRect->x + (anchorRect->width - w) / 2 : (renderer.getScreenWidth() - w) / 2;
+  const Rect content =
+      popupRectFor(renderer.getScreenWidth(), renderer.getScreenHeight(), textWidth, textHeight, marginX, marginY,
+                   frameThickness, metrics.popupTopOffsetRatio, anchorRect);
+  const int x = content.x;
+  const int y = content.y;
+  const int w = content.width;
+  const int h = content.height;
 
   const bool useRoundedPopup = metrics.popupCornerRadius > 0;
   if (useRoundedPopup) {

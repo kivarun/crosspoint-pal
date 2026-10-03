@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -283,11 +284,40 @@ class BaseTheme {
   virtual void drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                               const std::function<std::string(int index)>& buttonLabel,
                               const std::function<UIIcon(int index)>& rowIcon) const;
-  // anchorRect (optional): centers the popup horizontally inside the given
-  // rect and anchors it to the rect's top instead of the screen-top metrics
-  // offset — for popups drawn over a modal surface, where the modal's partial
-  // repaints cover exactly the anchor rect and clear the popup again.
+  // anchorRect (optional): the popup draws inside the given rect instead of
+  // the screen-top metrics offset — for popups drawn over a modal surface,
+  // where the modal's partial repaints cover exactly the anchor rect and
+  // clear the popup again. The FULL popup box (frame thickness on every side
+  // included) stays inside the anchor.
   virtual Rect drawPopup(const GfxRenderer& renderer, const char* message, const Rect* anchorRect = nullptr) const;
+  // Pure placement of the popup's CONTENT box (host-tested; drawPopup draws
+  // exactly this): unanchored = screen-top metrics offset, horizontally
+  // centered; anchored = content top at anchor top + frame thickness and
+  // horizontally centered inside the anchor, clamped so the outer box (the
+  // content plus frameThickness on every side) lies within the anchor.
+  static Rect popupRectFor(const int screenWidth, const int screenHeight, const int textWidth, const int textHeight,
+                           const int marginX, const int marginY, const int frameThickness,
+                           const float topOffsetRatio, const Rect* anchorRect = nullptr) {
+    const int w = textWidth + marginX * 2;
+    const int h = textHeight + marginY * 2;
+    if (!anchorRect) {
+      // Screen-top by default: y scales with the screen height, x centers on
+      // the screen — the original drawPopup placement, unchanged.
+      return Rect{(screenWidth - w) / 2, static_cast<int>(screenHeight * topOffsetRatio), w, h};
+    }
+    // Anchored: content top just below the frame's outer ring, horizontally
+    // centered; the clamp keeps the FULL box (the content plus
+    // frameThickness on every side) inside the anchor, so the caller's
+    // repaint of exactly the anchor rect clears the popup again. A message
+    // wider than the anchor interior cannot fit and stays left-anchored
+    // inside it.
+    int x = anchorRect->x + (anchorRect->width - w) / 2;
+    const int minX = anchorRect->x + frameThickness;
+    const int maxX = anchorRect->x + anchorRect->width - w - frameThickness;
+    x = maxX < minX ? minX : std::min(std::max(x, minX), maxX);
+    const int y = anchorRect->y + frameThickness;
+    return Rect{x, y, w, h};
+  }
   virtual void fillPopupProgress(const GfxRenderer& renderer, const Rect& layout, const int progress) const;
   static void drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage, const int pageCount,
                             std::string title, const int paddingBottom = 0, const int textYOffset = 0,

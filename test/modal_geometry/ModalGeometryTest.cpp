@@ -4,6 +4,7 @@
 
 #include "GeometryTarget.h"
 #include "src/components/ModalTheme.h"
+#include "src/components/themes/BaseTheme.h"
 #include "src/util/ImageSettingsInput.h"
 
 namespace fui = freeink::ui;
@@ -281,4 +282,33 @@ TEST(ModalTheme, SameResolvedThemeAcrossModalPageTypes) {
   EXPECT_EQ(row.radius, theme.rowRadius);
   EXPECT_EQ(row.sidePadding, theme.sidePadding);
   EXPECT_TRUE(row.labelText.bold == theme.bodyStyle.bold);
+}
+
+// Anchored popups (the in-modal Done/Failed confirmations) lie ENTIRELY
+// inside their anchor: the outer frame ring included — the modal's repaint
+// covers exactly the anchor rect, so nothing may spill outside it.
+TEST(ModalPopup, AnchoredPopupLiesFullyInsideAnchor) {
+  // A modal-sized anchor; the metrics popup geometry (frame 2, margins).
+  const Rect anchor{100, 200, 300, 150};
+  constexpr int FRAME = 2;
+  const auto contained = [&](const Rect& content) {
+    EXPECT_GE(content.x - FRAME, anchor.x);                                  // outerLeft >= anchor.left
+    EXPECT_GE(content.y - FRAME, anchor.y);                                  // outerTop >= anchor.top
+    EXPECT_LE(content.x + content.width + FRAME, anchor.x + anchor.width);   // outerRight <= anchor.right
+    EXPECT_LE(content.y + content.height + FRAME, anchor.y + anchor.height);  // outerBottom <= anchor.bottom
+  };
+
+  // "Done" and the failure popup (content = text + margins) — both centered
+  // inside the anchor, frame inside it too.
+  const Rect done = BaseTheme::popupRectFor(480, 800, 60, 18, 24, 16, FRAME, 0.075f, &anchor);
+  contained(done);
+  EXPECT_EQ(done.x, anchor.x + (anchor.width - (60 + 48)) / 2);
+  EXPECT_EQ(done.y, anchor.y + FRAME);
+  const Rect failed = BaseTheme::popupRectFor(480, 800, 120, 18, 24, 16, FRAME, 0.075f, &anchor);
+  contained(failed);
+
+  // Unanchored popups keep the original screen-top placement.
+  const Rect top = BaseTheme::popupRectFor(480, 800, 60, 18, 24, 16, FRAME, 0.075f, nullptr);
+  EXPECT_EQ(top.x, (480 - (60 + 48)) / 2);
+  EXPECT_EQ(top.y, static_cast<int>(800 * 0.075f));
 }

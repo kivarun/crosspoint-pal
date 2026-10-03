@@ -250,6 +250,27 @@ TEST(ImageSettingsInput, ImageInfoDetailRouting) {
   EXPECT_EQ(imageSettingsInput::IMAGE_INFO_SELECTABLE_ROWS, 2);
 }
 
+// 1D modal-page routing (imageSettingsInput::modalInputActionFor — the exact
+// function handleModalInput dispatches on): Back routes on EVERY page,
+// including informational pages with no selectable rows whose only exit is
+// Back; Confirm and the row axes stay inert there.
+TEST(ImageSettingsInput, InfoDetailBackIsReachable) {
+  using imageSettingsInput::ModalPageAction;
+  // 0 selectable rows + Back => Back (the InfoDetail trap regression).
+  EXPECT_EQ(imageSettingsInput::modalInputActionFor(0, false, false, false, true), ModalPageAction::Back);
+  // 0 selectable rows: Confirm and the row axes inert.
+  EXPECT_EQ(imageSettingsInput::modalInputActionFor(0, true, true, true, false), ModalPageAction::None);
+  EXPECT_EQ(imageSettingsInput::modalInputActionFor(0, false, false, true, false), ModalPageAction::None);
+  EXPECT_EQ(imageSettingsInput::modalInputActionFor(0, true, false, false, false), ModalPageAction::None);
+  // Rows present: the original contract unchanged (Back still wins nothing —
+  // it is checked first, then the axes, then Confirm).
+  EXPECT_EQ(imageSettingsInput::modalInputActionFor(2, false, false, false, true), ModalPageAction::Back);
+  EXPECT_EQ(imageSettingsInput::modalInputActionFor(2, true, false, false, false), ModalPageAction::RowUp);
+  EXPECT_EQ(imageSettingsInput::modalInputActionFor(2, false, true, false, false), ModalPageAction::RowDown);
+  EXPECT_EQ(imageSettingsInput::modalInputActionFor(2, false, false, true, false), ModalPageAction::Activate);
+  EXPECT_EQ(imageSettingsInput::modalInputActionFor(2, false, false, false, false), ModalPageAction::None);
+}
+
 // DeleteConfirm page contract, over the PRODUCTION-owned routing
 // (imageSettingsInput::deleteConfirmActionForRow — the exact function
 // BmpViewerActivity::activateRow dispatches on): exactly two action rows,

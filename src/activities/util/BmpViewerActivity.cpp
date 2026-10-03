@@ -985,26 +985,34 @@ void BmpViewerActivity::handleModalInput() {
     return;
   }
 
+  // ONE 1D-page routing order (imageSettingsInput::modalInputActionFor): Back
+  // routes on EVERY page — including informational pages with no selectable
+  // rows (the Info detail view), whose only exit is Back; Confirm and the row
+  // axes stay inert there.
+  const auto action =
+      imageSettingsInput::modalInputActionFor(
+          pageSelectableCount(), mappedInput.wasPressed(MappedInputManager::Button::NavPrevious),
+          mappedInput.wasPressed(MappedInputManager::Button::NavNext),
+          mappedInput.wasReleased(MappedInputManager::Button::Confirm),
+          mappedInput.wasReleased(MappedInputManager::Button::Back));
   const int rows = pageSelectableCount();
-  if (rows <= 0) return;
-
-  if (mappedInput.wasPressed(MappedInputManager::Button::NavPrevious)) {
-    modalRow = (modalRow - 1 + rows) % rows;
-    repaintModal();  // modal-only repaint; the image is never re-rendered
-    return;
-  }
-  if (mappedInput.wasPressed(MappedInputManager::Button::NavNext)) {
-    modalRow = (modalRow + 1) % rows;
-    repaintModal();
-    return;
-  }
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    activateRow();
-    return;
-  }
-  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    modalBack();
-    return;
+  switch (action) {
+    case imageSettingsInput::ModalPageAction::Back:
+      modalBack();
+      return;
+    case imageSettingsInput::ModalPageAction::RowUp:
+      modalRow = (modalRow - 1 + rows) % rows;
+      repaintModal();  // modal-only repaint; the image is never re-rendered
+      return;
+    case imageSettingsInput::ModalPageAction::RowDown:
+      modalRow = (modalRow + 1) % rows;
+      repaintModal();
+      return;
+    case imageSettingsInput::ModalPageAction::Activate:
+      activateRow();
+      return;
+    default:
+      return;
   }
 }
 
