@@ -922,43 +922,41 @@ void SleepActivity::continueSlideshow() {
   // the APP_STATE/settings stores — per-frame sleeps perform no SD writes.
 
   // Battery cutoff first: the slideshow must not wake-loop a low battery.
-  if (!slideshow::allowedByBattery(powerManager.getBatteryPercentage(), gpio.isUsbConnected())) {
-    return endSlideshowToStaticSleep();
-  }
-
+  const bool batteryOk = slideshow::allowedByBattery(powerManager.getBatteryPercentage(),
+                                                     gpio.isUsbConnected());
   const slideshow::Order order = slideshow::orderClamped(SETTINGS.slideshowOrder);
   slideshow::RandomCycleState cycleOut;
-  const std::string next = imageonly::nextImageAfter(slideshow::getRetainedPath(), order,
-                                                     slideshow::getRetainedCycle(), esp_random(), cycleOut);
-  if (next.empty()) return endSlideshowToOrdinary();
+  const std::string next =
+      batteryOk ? imageonly::nextImageAfter(slideshow::getRetainedPath(), order,
+                                            slideshow::getRetainedCycle(), esp_random(), cycleOut)
+                : std::string();
 
-  sleepTone = toneLutFromProfile(SETTINGS.sleepRenderProfile);
-  buildToneLut(sleepTone);
-  if (!imageonly::renderImageFile(renderer, next, sleepTone) || !slideshow::arm(next, slideshow::Mode::Sleep)) {
-    return endSlideshowToOrdinary();
+  // Decode and re-arm only when a next frame exists; either failing (or an
+  // empty/missing source, or the battery cutoff) is one canonical termination.
+  bool frameOk = false;
+  if (!next.empty()) {
+    sleepTone = toneLutFromProfile(SETTINGS.sleepRenderProfile);
+    buildToneLut(sleepTone);
+    frameOk = imageonly::renderImageFile(renderer, next, sleepTone) &&
+              slideshow::arm(next, slideshow::Mode::Sleep);
+  }
+
+  if (slideshow::sleepSlideshowOutcome(batteryOk, !next.empty(), frameOk) !=
+      slideshow::ContinueOutcome::Continue) {
+    return endSlideshowToStaticSleep(batteryOk ? (next.empty() ? "no next image" : "frame failed")
+                                               : "battery cutoff");
   }
   // RTC-only cycle metadata update (no SD write); re-arming above preserves it.
   slideshow::setRetainedCycle(cycleOut);
   slideshow::requestSleep(slideshow::SleepRequest::Continue);
 }
 
-void SleepActivity::endSlideshowToOrdinary() {
-  // Fail closed: the sleep slideshow cannot continue — clear the retained
-  // state so no later timer can restart it, then route to the ordinary wake
-  // state. The panel still holds the last frame; a clean Home paint replaces
-  // it.
-  LOG_ERR("SLP", "Slideshow ended (broken source)");
-  slideshow::clearRetainedState();
-  activityManager.goHome(HomeMenuItem::NONE, /*cleanInitialRefresh=*/true);
-}
-
-void SleepActivity::endSlideshowToStaticSleep() {
-  // Battery cutoff mid-slideshow: the device was timer-woken, so it stays in
-  // the sleep lifecycle — clear the retained state (no next timer), repaint
-  // the ordinary static sleep screen once and hand the main loop a
-  // power-button-only sleep. No wake-loop, no Home UI in the middle of the
-  // night.
-  LOG_DBG("SLP", "Slideshow stopped by battery cutoff");
+void SleepActivity::endSlideshowToStaticSleep(const char* reason) {
+  // Canonical termination of a sleep slideshow that cannot continue: clear
+  // the retained state (no next timer), repaint the ordinary static sleep
+  // screen once and hand the main loop a power-button-only sleep. No
+  // wake-loop, no Home UI in the middle of the night.
+  LOG_DBG("SLP", "Sleep slideshow ended: %s", reason);
   slideshow::clearRetainedState();
   display.setInverted(false);
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);

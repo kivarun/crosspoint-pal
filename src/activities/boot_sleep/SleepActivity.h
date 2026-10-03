@@ -37,17 +37,16 @@ class SleepActivity final : public Activity {
   // the ordinary default sleep screen renders (no timer).
   void renderSlideshowSleepScreen() const;
   // Managed timer-wake continuation: battery cutoff check, then advance,
-  // re-arm, render, request the frame sleep. Fail closed on a broken source:
-  // clear the retained state and route to the ordinary wake state (no timer
-  // loop). The battery cutoff routes to the static-sleep fallback instead.
+  // re-arm, render, request the frame sleep. ANY inability to continue —
+  // battery cutoff, empty/missing source, undecodable frame or rejected
+  // re-arm — terminates through endSlideshowToStaticSleep() (canonical
+  // fail-closed contract, see slideshow::sleepSlideshowOutcome).
   void continueSlideshow();
-  // Fail-closed exit from a broken sleep slideshow: clear the retained state
-  // and route Home (clean refresh replaces the last frame).
-  void endSlideshowToOrdinary();
-  // Battery-cutoff exit mid-slideshow: clear the retained state, repaint the
-  // ordinary static sleep screen once and request a power-button-only sleep
-  // (no next timer wake — the slideshow must not wake-loop a low battery).
-  void endSlideshowToStaticSleep();
+  // Canonical termination of a sleep slideshow that cannot continue: clear
+  // the retained state (no later timer can restart it), repaint the ordinary
+  // static sleep screen once and request a power-button-only sleep — no next
+  // timer wake, no Home routing, no persistent writes.
+  void endSlideshowToStaticSleep(const char* reason);
 
   bool fromTimeout = false;
   bool slideshowContinue = false;

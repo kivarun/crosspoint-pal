@@ -48,6 +48,19 @@ inline constexpr bool allowedByBattery(const uint16_t percent, const bool extern
   return externalPowered || percent > BATTERY_CUTOFF_PERCENT;
 }
 
+// Canonical termination contract of a timer-driven sleep slideshow (pure,
+// host-tested): the slideshow may continue only when the battery allows it, a
+// next frame exists and that frame renders and re-arms. EVERY other
+// combination terminates through the static-sleep path — clear the retained
+// state, repaint the ordinary sleep screen, request a power-button-only sleep
+// (no next timer arm, no Home routing, no persistent writes).
+enum class ContinueOutcome : uint8_t { Continue = 0, EndStaticSleep = 1 };
+inline constexpr ContinueOutcome sleepSlideshowOutcome(const bool batteryAllowed, const bool hasNext,
+                                                       const bool frameOk) {
+  return batteryAllowed && hasNext && frameOk ? ContinueOutcome::Continue
+                                              : ContinueOutcome::EndStaticSleep;
+}
+
 // Which DISPLAY settings row is being judged (pure, host-tested). The
 // Slideshow sleep screen renders its frames through imageonly::renderImageFile()
 // and never consults the sleep-cover presentation settings, so those two rows

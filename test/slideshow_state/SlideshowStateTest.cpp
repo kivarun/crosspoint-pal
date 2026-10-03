@@ -119,6 +119,24 @@ TEST(SleepRequestTimerPolicy, FullContract) {
   EXPECT_FALSE(slideshow::sleepRequestArmsTimer(slideshow::SleepRequest::None));
 }
 
+// Canonical termination of a timer-driven sleep slideshow
+// (slideshow::sleepSlideshowOutcome): continuation requires the battery
+// cutoff to pass, a next frame to exist AND that frame to decode and re-arm
+// successfully; every other combination ends in the power-button-only static
+// sleep (retained state cleared, no next timer, no Home routing).
+TEST(SleepSlideshowContinuation, AnyInabilityEndsInStaticSleep) {
+  using O = slideshow::ContinueOutcome;
+  // Normal successful continuation.
+  EXPECT_EQ(slideshow::sleepSlideshowOutcome(true, true, true), O::Continue);
+  // Low-battery cutoff (dominates every other state).
+  EXPECT_EQ(slideshow::sleepSlideshowOutcome(false, true, true), O::EndStaticSleep);
+  EXPECT_EQ(slideshow::sleepSlideshowOutcome(false, false, false), O::EndStaticSleep);
+  // Missing/empty source during timer continuation.
+  EXPECT_EQ(slideshow::sleepSlideshowOutcome(true, false, false), O::EndStaticSleep);
+  // Render/decode failure or rejected re-arm.
+  EXPECT_EQ(slideshow::sleepSlideshowOutcome(true, true, false), O::EndStaticSleep);
+}
+
 // Schema v3 layout: the struct keeps its exact 512 B RTC budget and its
 // member offsets leave no padding surprises (magic 4 + cycle 6 + mode 1 +
 // path 501 = 512).
