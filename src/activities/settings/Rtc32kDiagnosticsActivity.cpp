@@ -282,8 +282,8 @@ void Rtc32kDiagnosticsActivity::buildScreen(UiScreen& screen) {
   // precedent), showing RAW measurements, never only the verdict.
   rowItems_[ITEM_RTC].label = "RTC";
   rowItems_[ITEM_CLKOUT].label = "CLKOUT";
-  rowItems_[ITEM_SAMPLES].label = "GPIO15 samples";
-  rowItems_[ITEM_ESTIMATE].label = "GPIO estimate";
+  rowItems_[ITEM_SAMPLES].label = "GPIO15 raw samples";
+  rowItems_[ITEM_ESTIMATE].label = "GPIO raw estimate";
   rowItems_[ITEM_CAL].label = "EXT_OSC cal";
   rowItems_[ITEM_RESULT].label = "Result";
   rowItems_[ITEM_RUN].label = "Run again";
@@ -294,11 +294,14 @@ void Rtc32kDiagnosticsActivity::buildScreen(UiScreen& screen) {
   rowItems_[ITEM_SAMPLES].value = samplesBuf_;
   rowItems_[ITEM_ESTIMATE].value = estimateBuf_;
   rowItems_[ITEM_CAL].value = calBuf_;
+  // PCNT = ordinary digital GPIO observation (the raw rows above stay
+  // informational); the EXT_OSC calibration is the actual acceptance test of
+  // the XTAL_32K_P input path, so EXT_OSC owns the verdict.
   rowItems_[ITEM_RESULT].value =
       !ran_ ? "..."
-            : verdict_ == rtc32k::Verdict::Pass ? "PASS — external 32 kHz present"
-            : verdict_ == rtc32k::Verdict::Partial ? "SIGNAL PRESENT — EXT_OSC calibration failed"
-            : rtcOk_ && clkoutOk_ ? "FAIL — no usable 32 kHz on GPIO15"
+            : verdict_ == rtc32k::Verdict::Pass ? "PASS — EXT_OSC accepts 32 kHz"
+            : verdict_ == rtc32k::Verdict::Partial ? "SIGNAL PRESENT — EXT_OSC rejected it"
+            : rtcOk_ && clkoutOk_ ? "FAIL — no usable 32 kHz at EXT_OSC"
                                   : "FAIL — RTC/CLKOUT unavailable";
   rowItems_[ITEM_RUN].value = "";
 

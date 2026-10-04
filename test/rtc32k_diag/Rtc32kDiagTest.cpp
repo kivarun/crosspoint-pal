@@ -33,17 +33,28 @@ TEST(Rtc32kMedian, MedianOfTenCounts) {
   EXPECT_EQ(rtc32k::medianOf10(symmetric), 5u);  // (5+6)/2
 }
 
-TEST(Rtc32kClassify, FullVerdictContract) {
-  // PASS: RTC + CLKOUT + raw in window + calibration accepted.
-  EXPECT_EQ(classify(true, true, 32770, 32766), Verdict::Pass);
-  // Partial: usable raw signal but the ext-osc calibration failed.
-  EXPECT_EQ(classify(true, true, 32770, 0), Verdict::Partial);
-  EXPECT_EQ(classify(true, true, 32000, 25000), Verdict::Partial);
-  // FAIL: no usable signal on the pin.
+TEST(Rtc32kClassify, ExtOscOwnsVerdict) {
+  // PCNT counts through the ordinary digital GPIO path (informational); the
+  // EXT_OSC calibration is the actual acceptance test of the XTAL_32K_P input
+  // path, so only EXT_OSC owns PASS. The ten cases pin the exact contract.
+  // 1: RTC unavailable -> FAIL whatever the readings say.
+  EXPECT_EQ(classify(false, true, 32768, 32768), Verdict::Fail);
+  // 2: CLKOUT control failed -> FAIL.
+  EXPECT_EQ(classify(true, false, 32768, 32768), Verdict::Fail);
+  // 3: both readings in window -> PASS.
+  EXPECT_EQ(classify(true, true, 32768, 32768), Verdict::Pass);
+  // 4 (KEY): digital GPIO sees nothing, EXT_OSC accepts -> PASS.
+  EXPECT_EQ(classify(true, true, 0, 32768), Verdict::Pass);
+  // 5: a few Hz of digital noise, EXT_OSC accepts -> PASS.
+  EXPECT_EQ(classify(true, true, 25, 32766), Verdict::Pass);
+  // 6: raw in window, calibration timed out (0) -> PARTIAL.
+  EXPECT_EQ(classify(true, true, 32768, 0), Verdict::Partial);
+  // 7: raw in window, calibration measured out of window -> PARTIAL.
+  EXPECT_EQ(classify(true, true, 32768, 25000), Verdict::Partial);
+  // 8: nothing anywhere -> FAIL.
   EXPECT_EQ(classify(true, true, 0, 0), Verdict::Fail);
+  // 9: digital noise only, no calibration -> FAIL.
   EXPECT_EQ(classify(true, true, 5, 0), Verdict::Fail);
-  // FAIL: RTC or CLKOUT unavailable (dominates any reading).
-  EXPECT_EQ(classify(false, true, 32770, 32766), Verdict::Fail);
-  EXPECT_EQ(classify(true, false, 32770, 32766), Verdict::Fail);
-  EXPECT_EQ(classify(false, false, 0, 0), Verdict::Fail);
+  // 10: both readings out of window -> FAIL.
+  EXPECT_EQ(classify(true, true, 25000, 29000), Verdict::Fail);
 }

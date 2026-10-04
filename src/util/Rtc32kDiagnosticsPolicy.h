@@ -9,7 +9,8 @@
 
 namespace rtc32k {
 
-// Wide raw-signal acceptance window (kHz-class clock, not a precision gate).
+// Wide acceptance window for a kHz-class 32 kHz reading (not a precision
+// gate). Shared by the raw digital observation and the EXT_OSC calibration.
 inline constexpr uint32_t RAW_WINDOW_MIN_HZ = 30000;
 inline constexpr uint32_t RAW_WINDOW_MAX_HZ = 35000;
 
@@ -36,20 +37,24 @@ inline uint32_t medianOf10(const uint32_t (&counts)[10]) {
   return (sorted[4] + sorted[5]) / 2;
 }
 
-// The verdict contract:
-//   Pass    — RTC reachable, CLKOUT control verified, raw signal inside the
-//             window AND the ext-osc calibration accepted the same signal;
-//   Partial — a usable ~32 kHz signal is present on the pin but the ESP32
-//             ext-osc calibration rejected it (calibration timeout/0 or out
-//             of window);
-//   Fail    — RTC/CLKOUT unavailable, or no ~32 kHz on the pin.
+// The verdict contract (EXT_OSC owns the acceptance):
+//   Pass    — RTC reachable, CLKOUT control verified, and the ESP32-S3
+//             EXT_OSC calibration measured a clock inside the window,
+//             regardless of what the ordinary digital GPIO observes;
+//   Partial — the EXT_OSC path rejected the signal, but the ordinary
+//             digital GPIO (PCNT) still sees a ~32 kHz clock on the pad;
+//   Fail    — RTC/CLKOUT unavailable, or no usable 32 kHz anywhere.
+//
+// PCNT counts through the ordinary digital GPIO path; the EXT_OSC calibration
+// is the actual acceptance test of the XTAL_32K_P input path — a signal
+// valid enough for that specialized path may not cross the digital GPIO
+// threshold reliably, so only EXT_OSC owns PASS.
 inline constexpr Verdict classify(const bool rtcOk, const bool clkoutOk, const uint32_t rawHz,
                                   const uint32_t calHz) {
   if (!rtcOk || !clkoutOk) return Verdict::Fail;
-  const bool rawOk = rawWindowOk(rawHz);
   const bool calOk = calHz != 0 && rawWindowOk(calHz);
-  if (rawOk && calOk) return Verdict::Pass;
-  if (rawOk) return Verdict::Partial;
+  if (calOk) return Verdict::Pass;
+  if (rawWindowOk(rawHz)) return Verdict::Partial;
   return Verdict::Fail;
 }
 
