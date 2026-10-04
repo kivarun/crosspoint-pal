@@ -28,8 +28,14 @@ class Rtc32kDiagnosticsActivity final : public UiListActivity {
   enum Row {
     ITEM_RTC = 0,
     ITEM_CLKOUT,
+    ITEM_LINK,
+    ITEM_LINK_COUNTS,
+    ITEM_ADC_LOW,
+    ITEM_ADC_HIGH,
+    ITEM_ADC_SWING,
     ITEM_SAMPLES,
     ITEM_ESTIMATE,
+    ITEM_CAL_NO_PULL,
     ITEM_CAL,
     ITEM_RESULT,
     ITEM_RUN,
@@ -37,14 +43,25 @@ class Rtc32kDiagnosticsActivity final : public UiListActivity {
   };
 
   void enableClkout();
+  bool setClkoutReg(uint8_t value);
   void runDiagnostics();
+  void runLinkProbe();
+  void runAdcProbe();
   bool runTestARawEdges();
-  bool runTestBExtOscCal();
+  uint32_t runTestBExtOscCal(bool pullUp);
 
   freeink::ui::ListItem rowItems_[ITEM_COUNT]{};
   char samplesBuf_[96];
   char estimateBuf_[24];
   char calBuf_[24];
+  char calNoPullBuf_[24];
+  char linkCountsBuf_[56];
+  char adcLowBuf_[16];
+  char adcHighBuf_[16];
+  char adcSwingBuf_[16];
+  // Scratch sample buffer (800 B) for the 1 Hz ADC probe: allocated once with
+  // the activity instead of per run, so repeated Runs churn no heap.
+  uint16_t adcSamples_[rtc32k::ADC_SAMPLE_COUNT] = {};
   rtc32k::RunState run_{};
   bool clkoutOriginalValid_ = false;
   uint8_t clkoutOriginal_ = 0;

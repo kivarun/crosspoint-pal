@@ -1,13 +1,18 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 
 #include "util/Rtc32kDiagnosticsPolicy.h"
 
 using rtc32k::classify;
+using rtc32k::LinkCounts;
+using rtc32k::LinkProbeResult;
+using rtc32k::percentileFromSorted;
 using rtc32k::rawEstimateHz;
 using rtc32k::rawWindowOk;
 using rtc32k::RunState;
+using rtc32k::swingMv;
 using rtc32k::Verdict;
 
 TEST(Rtc32kRawWindow, WideAcceptanceWindow) {
@@ -87,7 +92,7 @@ TEST(Rtc32kRunLifecycle, FailedRunNeverShowsStaleMeasurements) {
 
   // Run again -> RTC/I2C failure on this pass: reset() zeroes everything
   // first, the failure leaves both flags down, and classify FAILs with no
-  // stale samples or calibration anywhere in the state.
+  // stale samples, calibration, link counts or link verdict anywhere.
   run.reset();
   EXPECT_FALSE(run.rtcOk);
   EXPECT_FALSE(run.clkoutOk);
@@ -95,6 +100,13 @@ TEST(Rtc32kRunLifecycle, FailedRunNeverShowsStaleMeasurements) {
     EXPECT_EQ(c, 0u);
   }
   EXPECT_EQ(run.calHz, 0u);
+  EXPECT_EQ(run.calNoPullHz, 0u);
+  EXPECT_EQ(run.link.off1, 0u);
+  EXPECT_EQ(run.link.hz32, 0u);
+  EXPECT_EQ(run.link.hz1024, 0u);
+  EXPECT_EQ(run.link.hz32768, 0u);
+  EXPECT_EQ(run.link.off2, 0u);
+  EXPECT_EQ(run.linkResult, LinkProbeResult::Unavailable);
   rawHz = rtc32k::rawEstimateHz(rtc32k::medianOf10(run.edgeCounts));
   EXPECT_EQ(classify(run.rtcOk, run.clkoutOk, rawHz, run.calHz), Verdict::Fail);
 
@@ -105,12 +117,57 @@ TEST(Rtc32kRunLifecycle, FailedRunNeverShowsStaleMeasurements) {
   EXPECT_EQ(classify(run.rtcOk, run.clkoutOk, 0u, 0u), Verdict::Fail);
 }
 
+TEST(Rtc32kLinkProbe, NominalSequenceFollowed) {
+  // Nominal follow with realistic imperfections and tolerated OFF noise.
+  LinkCounts c;
+  c.off1 = 0;
+  c.hz32 = 31;
+  c.hz1024 = 1026;
+  c.hz32768 = 3275;
+  c.off2 = 2;
+  EXPECT_EQ(rtc32k::linkFollows(c), LinkProbeResult::Followed);
+  // OFF noise exactly at the tolerated ceiling still follows.
+  c.off1 = 16;
+  c.off2 = 16;
+  EXPECT_EQ(rtc32k::linkFollows(c), LinkProbeResult::Followed);
+}
+
+TEST(Rtc32kLinkProbe, NotFollowedCases) {
+  // All-zero counts (the reset/unavailable state) can never be Followed.
+  EXPECT_EQ(rtc32k::linkFollows(LinkCounts{}), LinkProbeResult::NotFollowed);
+  // Floating-pin noise: no commanded frequency reproduced.
+  LinkCounts floating{2, 3, 5, 4, 1};
+  EXPECT_EQ(rtc32k::linkFollows(floating), LinkProbeResult::NotFollowed);
+  // Only one random frequency point matches -> not a link.
+  LinkCounts single{0, 0, 1020, 0, 0};
+  EXPECT_EQ(rtc32k::linkFollows(single), LinkProbeResult::NotFollowed);
+  // Wrong frequency mapping (32 Hz reading at the 1024 Hz stage).
+  LinkCounts crossed{0, 1026, 31, 3275, 0};
+  EXPECT_EQ(rtc32k::linkFollows(crossed), LinkProbeResult::NotFollowed);
+  // 32 kHz stage counting at full rate (out of band above).
+  LinkCounts fullRate{0, 31, 1024, 32770, 0};
+  EXPECT_EQ(rtc32k::linkFollows(fullRate), LinkProbeResult::NotFollowed);
+  // Sustained front stream during an OFF phase.
+  LinkCounts noisy{17, 31, 1026, 3275, 0};
+  EXPECT_EQ(rtc32k::linkFollows(noisy), LinkProbeResult::NotFollowed);
+  // In-band upper edges stay Followed.
+  LinkCounts bandEdges{0, 64, 2048, 6554, 0};
+  EXPECT_EQ(rtc32k::linkFollows(bandEdges), LinkProbeResult::Followed);
+}
+
 TEST(Rtc32kRunState, ResetClearsEveryPerRunValue) {
   RunState run;
   run.rtcOk = true;
   run.clkoutOk = true;
   for (int i = 0; i < 10; i++) run.edgeCounts[i] = 3277u;
   run.calHz = 32766u;
+  run.calNoPullHz = 32760u;
+  run.link = {2, 31, 1026, 3275, 1};
+  run.linkResult = LinkProbeResult::Followed;
+  run.adcAvailable = true;
+  run.adcLowMv = 42;
+  run.adcHighMv = 2760;
+  run.adcSwingMv = 2718;
   run.reset();
   EXPECT_FALSE(run.rtcOk);
   EXPECT_FALSE(run.clkoutOk);
@@ -118,4 +175,93 @@ TEST(Rtc32kRunState, ResetClearsEveryPerRunValue) {
     EXPECT_EQ(run.edgeCounts[i], 0u);
   }
   EXPECT_EQ(run.calHz, 0u);
+  EXPECT_EQ(run.calNoPullHz, 0u);
+  EXPECT_EQ(run.link.off1, 0u);
+  EXPECT_EQ(run.link.hz32, 0u);
+  EXPECT_EQ(run.link.hz1024, 0u);
+  EXPECT_EQ(run.link.hz32768, 0u);
+  EXPECT_EQ(run.link.off2, 0u);
+  EXPECT_EQ(run.linkResult, LinkProbeResult::Unavailable);
+  EXPECT_FALSE(run.adcAvailable);
+  EXPECT_EQ(run.adcLowMv, 0u);
+  EXPECT_EQ(run.adcHighMv, 0u);
+  EXPECT_EQ(run.adcSwingMv, 0u);
+}
+
+// Synthetic 1 Hz probe: 400 samples at ~10 ms over 4 s (four full periods) —
+// clean square wave, ~200 samples per plateau.
+TEST(Rtc32kLevels, Synthetic1HzPlateaus) {
+  uint16_t samples[400];
+  for (int i = 0; i < 400; i++) samples[i] = (i % 2 == 0) ? 400 : 2800;
+  std::sort(samples, samples + 400);
+  const uint16_t low = percentileFromSorted(samples, 400, rtc32k::LOW_PERCENTILE);
+  const uint16_t high = percentileFromSorted(samples, 400, rtc32k::HIGH_PERCENTILE);
+  EXPECT_EQ(low, 400);
+  EXPECT_EQ(high, 2800);
+  EXPECT_EQ(swingMv(low, high), 2400);
+}
+
+// Transition samples and rare outliers must not move the P10/P90 levels:
+// the nearest-rank percentile sits well inside each plateau.
+TEST(Rtc32kLevels, TransitionsAndOutliersDoNotMoveLevels) {
+  uint16_t samples[400];
+  int idx = 0;
+  for (int i = 0; i < 3; i++) samples[idx++] = 0;        // glitch spikes
+  for (int i = 0; i < 196; i++) samples[idx++] = 400;    // low plateau
+  for (int i = 0; i < 4; i++) samples[idx++] = 1500;     // transitions
+  for (int i = 0; i < 196; i++) samples[idx++] = 2800;   // high plateau
+  samples[idx++] = 4095;                                 // spike above swing
+  std::sort(samples, samples + 400);
+  const uint16_t low = percentileFromSorted(samples, 400, rtc32k::LOW_PERCENTILE);
+  const uint16_t high = percentileFromSorted(samples, 400, rtc32k::HIGH_PERCENTILE);
+  EXPECT_EQ(low, 400);
+  EXPECT_EQ(high, 2800);
+  EXPECT_EQ(swingMv(low, high), 2400);
+
+  // Nearest-rank index policy: k = ceil(pct*n/100), 1-indexed -> k-1.
+  uint16_t ten[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+  EXPECT_EQ(percentileFromSorted(ten, 10, 10), 1);   // k=1 -> idx 0
+  EXPECT_EQ(percentileFromSorted(ten, 10, 50), 5);   // k=5 -> idx 4
+  EXPECT_EQ(percentileFromSorted(ten, 10, 90), 9);   // k=9 -> idx 8
+  EXPECT_EQ(percentileFromSorted(ten, 10, 100), 10); // k=10 -> idx 9
+  uint16_t one[1] = {77};
+  EXPECT_EQ(percentileFromSorted(one, 1, 10), 77);
+  EXPECT_EQ(percentileFromSorted(one, 1, 90), 77);
+
+  // Degenerate reading clamps to a non-negative swing.
+  EXPECT_EQ(swingMv(2800, 400), 0);
+}
+
+// Run 1 succeeds with ADC levels; run 2 has the ADC unavailable. Every
+// voltage field must be cleared by reset() (screen shows N/A), while the
+// PCNT/EXT_OSC measurements of the new run keep working on their own.
+TEST(Rtc32kRunLifecycle, AdcFailureLeavesNoStaleVoltage) {
+  RunState run;
+
+  // Run 1: full success including ADC levels.
+  run.reset();
+  run.rtcOk = true;
+  run.clkoutOk = true;
+  for (auto& c : run.edgeCounts) c = 3277u;
+  run.calHz = 32766u;
+  run.adcAvailable = true;
+  run.adcLowMv = 42;
+  run.adcHighMv = 2760;
+  run.adcSwingMv = 2718;
+  uint32_t rawHz = rtc32k::rawEstimateHz(rtc32k::medianOf10(run.edgeCounts));
+  EXPECT_EQ(classify(run.rtcOk, run.clkoutOk, rawHz, run.calHz), Verdict::Pass);
+
+  // Run 2: ADC unavailable. The reset clears every voltage field; the new
+  // run's PCNT/EXT_OSC measurements (filled again below) still classify.
+  run.reset();
+  EXPECT_FALSE(run.adcAvailable);
+  EXPECT_EQ(run.adcLowMv, 0u);
+  EXPECT_EQ(run.adcHighMv, 0u);
+  EXPECT_EQ(run.adcSwingMv, 0u);
+  run.rtcOk = true;
+  run.clkoutOk = true;
+  for (auto& c : run.edgeCounts) c = 3277u;
+  run.calHz = 32768u;
+  rawHz = rtc32k::rawEstimateHz(rtc32k::medianOf10(run.edgeCounts));
+  EXPECT_EQ(classify(run.rtcOk, run.clkoutOk, rawHz, run.calHz), Verdict::Pass);
 }

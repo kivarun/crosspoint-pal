@@ -4,6 +4,9 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <esp_adc/adc_cali.h>
+#include <esp_adc/adc_cali_scheme.h>
+#include <esp_adc/adc_oneshot.h>
 #include <driver/gpio.h>
 #include <driver/pulse_cnt.h>
 #include <soc/rtc.h>
@@ -11,6 +14,8 @@
 #include <FreeRTOS.h>
 #include <task.h>
 #include <Wire.h>
+
+#include <algorithm>
 
 #include "components/UITheme.h"
 #include "util/Rtc32kDiagnosticsPolicy.h"
@@ -28,8 +33,17 @@ namespace fui = freeink::ui;
 namespace {
 
 constexpr uint8_t PCF8563_REG_CLKOUT = 0x0D;
-// FE=1 (output enabled), FD=00 (32768 Hz).
-constexpr uint8_t PCF8563_CLKOUT_32768HZ = 0x80;
+// CLKOUT control (BM8563/PCF8563-compatible): bit7 FE enables the output,
+// bits1:0 FD select the frequency (00=32768 Hz, 01=1024 Hz, 10=32 Hz, 11=1 Hz).
+// CLKOUT is an OPEN-DRAIN output (BM8563 datasheet): it drives LOW actively
+// and floats when high — the level observed at GPIO15 depends on whatever
+// pull-up/load the board provides, and no pull-up is assumed anywhere in
+// this code.
+constexpr uint8_t PCF8563_CLKOUT_OFF = 0x00;      // FE=0 -> high-impedance
+constexpr uint8_t PCF8563_CLKOUT_32768HZ = 0x80;  // FE=1, FD=00
+constexpr uint8_t PCF8563_CLKOUT_1024HZ = 0x81;   // FE=1, FD=01
+constexpr uint8_t PCF8563_CLKOUT_32HZ = 0x82;     // FE=1, FD=10
+constexpr uint8_t PCF8563_CLKOUT_1HZ = 0x83;      // FE=1, FD=11
 
 TwoWire& diagWire() {
 #if SOC_I2C_NUM > 1
@@ -59,18 +73,83 @@ bool diagWriteReg(const uint8_t reg, const uint8_t value) {
   return wire.endTransmission() == 0;
 }
 
-// XTAL_32K_P pad (GPIO15 on ESP32-S3): plain input, NO pulls, before the PCNT
-// channel attaches (and re-asserted after attach in case the driver touched
-// the pad config).
-void configGpio15PlainInput() {
+// Explicit GPIO15 pad configuration — NEVER inherit the state left behind by
+// gpio_reset_pin() (installed IDF 5.5.5: selects gpio function, ENABLES the
+// pull-up and DISABLES input). Every sub-test states its own condition.
+void configureGpio15(const bool pullUp) {
   gpio_config_t cfg = {};
   cfg.pin_bit_mask = 1ULL << GPIO_NUM_15;
   cfg.mode = GPIO_MODE_INPUT;
-  cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+  cfg.pull_up_en = pullUp ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE;
   cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
   cfg.intr_type = GPIO_INTR_DISABLE;
   gpio_config(&cfg);
 }
+
+// Single owner for all PCNT rising-edge counting: unit, 1 us glitch filter,
+// channel, rising=INCREASE/falling=HOLD, enable/start, per-window clear/read
+// and the fail-closed unwind. The pad configuration is explicit per session
+// (pull mode), and end() always leaves the pin to be reconfigured by the
+// next stage.
+struct PcntSession {
+  pcnt_unit_handle_t unit = nullptr;
+  pcnt_channel_handle_t chan = nullptr;
+  bool started = false;
+  bool enabled = false;
+  bool channelAttached = false;
+  bool unitCreated = false;
+
+  bool begin(const bool pullUp) {
+    configureGpio15(pullUp);
+    pcnt_unit_config_t ucfg = {
+        .low_limit = -32768,
+        .high_limit = 32767,
+        .intr_priority = 0,
+        .flags = {.accum_count = 1},
+    };
+    if (pcnt_new_unit(&ucfg, &unit) != ESP_OK || !unit) return false;
+    unitCreated = true;
+    pcnt_glitch_filter_config_t fcfg = {.max_glitch_ns = 1000};
+    if (pcnt_unit_set_glitch_filter(unit, &fcfg) != ESP_OK) return false;
+    pcnt_chan_config_t ccfg = {
+        .edge_gpio_num = GPIO_NUM_15,
+        .level_gpio_num = -1,
+        .flags = {},
+    };
+    esp_err_t rc = pcnt_new_channel(unit, &ccfg, &chan);
+    channelAttached = (rc == ESP_OK && chan != nullptr);
+    if (!channelAttached) return false;
+    // Counting contract: ONLY rising edges (posedge -> INCREASE, negedge ->
+    // HOLD); counting both edges would double every estimate.
+    if (pcnt_channel_set_edge_action(chan, PCNT_CHANNEL_EDGE_ACTION_INCREASE,
+                                     PCNT_CHANNEL_EDGE_ACTION_HOLD) != ESP_OK) {
+      return false;
+    }
+    // Re-assert the explicit pad configuration after the channel attach.
+    configureGpio15(pullUp);
+    if (pcnt_unit_enable(unit) != ESP_OK) return false;
+    enabled = true;
+    if (pcnt_unit_start(unit) != ESP_OK) return false;
+    started = true;
+    return true;
+  }
+
+  uint32_t window(const uint32_t durationMs) {
+    pcnt_unit_clear_count(unit);
+    vTaskDelay(pdMS_TO_TICKS(durationMs));
+    int v = 0;
+    pcnt_unit_get_count(unit, &v);
+    return v > 0 ? static_cast<uint32_t>(v) : 0;
+  }
+
+  void end() {
+    if (started) pcnt_unit_stop(unit);
+    if (enabled) pcnt_unit_disable(unit);
+    if (channelAttached) pcnt_del_channel(chan);
+    if (unitCreated) pcnt_del_unit(unit);
+    gpio_reset_pin(GPIO_NUM_15);
+  }
+};
 
 }  // namespace
 
@@ -96,35 +175,37 @@ void Rtc32kDiagnosticsActivity::onExit() {
   UiListActivity::onExit();
 }
 
-void Rtc32kDiagnosticsActivity::enableClkout() {
-  // Read the ORIGINAL register once per activity lifetime: it is restored
-  // verbatim on exit, so re-runs never overwrite it with the enabled value.
-  if (clkoutOriginalValid_) {
-    // Already captured earlier in this session; just re-enable the output.
-    // A successful write ACKs the RTC, proving it is still reachable this
-    // run (rtcOk), independent of the readback verdict below.
-    if (diagWriteReg(PCF8563_REG_CLKOUT, PCF8563_CLKOUT_32768HZ)) {
-      run_.rtcOk = true;
-      uint8_t readback = 0;
-      if (diagReadReg(PCF8563_REG_CLKOUT, readback) && readback == PCF8563_CLKOUT_32768HZ) {
-        run_.clkoutOk = true;
-        return;
-      }
-    }
-    LOG_ERR("RTC32K", "CLKOUT re-enable failed");
-    return;
-  }
-  uint8_t original = 0;
-  uint8_t readback = 0;
-  if (!diagReadReg(PCF8563_REG_CLKOUT, original)) {
-    LOG_ERR("RTC32K", "RTC/CLKOUT not readable");
-    return;
+// Switch CLKOUT to `value` and verify by readback; returns true only when the
+// readback confirms. A successful write still ACKs the RTC, so rtcOk is set
+// independently of the readback result.
+bool Rtc32kDiagnosticsActivity::setClkoutReg(const uint8_t value) {
+  if (!diagWriteReg(PCF8563_REG_CLKOUT, value)) {
+    LOG_ERR("RTC32K", "CLKOUT write failed (reg 0x0D)");
+    return false;
   }
   run_.rtcOk = true;
-  clkoutOriginal_ = original;
-  clkoutOriginalValid_ = true;
-  if (!diagWriteReg(PCF8563_REG_CLKOUT, PCF8563_CLKOUT_32768HZ) ||
-      !diagReadReg(PCF8563_REG_CLKOUT, readback) || readback != PCF8563_CLKOUT_32768HZ) {
+  uint8_t readback = 0;
+  if (diagReadReg(PCF8563_REG_CLKOUT, readback) && readback == value) {
+    return true;
+  }
+  LOG_ERR("RTC32K", "CLKOUT readback failed (reg 0x0D)");
+  return false;
+}
+
+void Rtc32kDiagnosticsActivity::enableClkout() {
+  // Read the ORIGINAL register once per activity lifetime: it is restored
+  // verbatim on exit, so re-runs never overwrite it with an enabled value.
+  if (!clkoutOriginalValid_) {
+    uint8_t original = 0;
+    if (!diagReadReg(PCF8563_REG_CLKOUT, original)) {
+      LOG_ERR("RTC32K", "RTC/CLKOUT not readable");
+      return;
+    }
+    run_.rtcOk = true;
+    clkoutOriginal_ = original;
+    clkoutOriginalValid_ = true;
+  }
+  if (!setClkoutReg(PCF8563_CLKOUT_32768HZ)) {
     LOG_ERR("RTC32K", "CLKOUT 32 kHz enable failed");
     return;
   }
@@ -143,8 +224,25 @@ void Rtc32kDiagnosticsActivity::runDiagnostics() {
   if (BoardConfig::isX4Classic() && BoardConfig::ACTIVE.sensors.rtcAddr != 0) {
     enableClkout();
     if (run_.clkoutOk) {
-      runTestARawEdges();
-      runTestBExtOscCal();
+      // 1) Controlled pull-up link probe (OFF 32 1024 32768 OFF) — ends with
+      //    the PCNT released and the pad at gpio_reset_pin state.
+      runLinkProbe();
+      // 2) 1 Hz ADC electrical probe (informational): 1 Hz -> ADC -> 32768.
+      if (setClkoutReg(PCF8563_CLKOUT_1HZ)) {
+        runAdcProbe();
+      }
+      // 3..5) No-pull raw PCNT, then the two EXT_OSC calibrations under
+      // EXPLICIT pull conditions (no-pull informational, pull-up verdict).
+      // A failed 32768 restore makes every later reading untrustworthy ->
+      // fail closed: no tests, no stale data.
+      if (!setClkoutReg(PCF8563_CLKOUT_32768HZ)) {
+        LOG_ERR("RTC32K", "CLKOUT restore failed; PCNT/EXT_OSC skipped");
+        run_.clkoutOk = false;
+      } else {
+        runTestARawEdges();
+        run_.calNoPullHz = runTestBExtOscCal(false);
+        run_.calHz = runTestBExtOscCal(true);
+      }
     }
   }
 
@@ -154,124 +252,187 @@ void Rtc32kDiagnosticsActivity::runDiagnostics() {
            run_.edgeCounts[7], run_.edgeCounts[8], run_.edgeCounts[9]);
   snprintf(estimateBuf_, sizeof(estimateBuf_), "%u Hz", static_cast<unsigned>(rawHz));
   snprintf(calBuf_, sizeof(calBuf_), "%u Hz", static_cast<unsigned>(run_.calHz));
+  snprintf(calNoPullBuf_, sizeof(calNoPullBuf_), "%u Hz", static_cast<unsigned>(run_.calNoPullHz));
+  snprintf(linkCountsBuf_, sizeof(linkCountsBuf_), "%u / %u / %u / %u / %u", static_cast<unsigned>(run_.link.off1),
+           static_cast<unsigned>(run_.link.hz32), static_cast<unsigned>(run_.link.hz1024),
+           static_cast<unsigned>(run_.link.hz32768), static_cast<unsigned>(run_.link.off2));
+  if (run_.adcAvailable) {
+    snprintf(adcLowBuf_, sizeof(adcLowBuf_), "%u mV", static_cast<unsigned>(run_.adcLowMv));
+    snprintf(adcHighBuf_, sizeof(adcHighBuf_), "%u mV", static_cast<unsigned>(run_.adcHighMv));
+    snprintf(adcSwingBuf_, sizeof(adcSwingBuf_), "%u mV", static_cast<unsigned>(run_.adcSwingMv));
+  }
   verdict_ = rtc32k::classify(run_.rtcOk, run_.clkoutOk, rawHz, run_.calHz);
   ran_ = true;
   requestUpdate();
 }
 
-bool Rtc32kDiagnosticsActivity::runTestARawEdges() {
-  // Per-run measurements were reset by runDiagnostics(); this test only fills
-  // the edge-count windows.
-  configGpio15PlainInput();
+// Controlled pull-up continuity probe: one PCNT session (explicit input +
+// internal pull-up pad configuration) watches the open-drain CLKOUT while
+// the BM8563 is commanded OFF -> 32 Hz -> 1024 Hz -> 32768 Hz -> OFF, each
+// command verified by register readback, each stage measured in its own
+// window. A failed command means no frequency-following conclusion
+// (Unavailable, no partial counts).
+void Rtc32kDiagnosticsActivity::runLinkProbe() {
+  PcntSession pcnt;
+  if (!pcnt.begin(true)) {
+    LOG_ERR("RTC32K", "Link probe PCNT unavailable");
+    pcnt.end();
+    return;
+  }
 
-  pcnt_unit_handle_t unit = nullptr;
-  pcnt_channel_handle_t chan = nullptr;
-  bool started = false, enabled = false, channelAttached = false;
+  struct Stage {
+    uint8_t reg;
+    uint32_t windowMs;
+  };
+  constexpr Stage stages[] = {
+      {PCF8563_CLKOUT_OFF, 1000},
+      {PCF8563_CLKOUT_32HZ, 1000},
+      {PCF8563_CLKOUT_1024HZ, 1000},
+      {PCF8563_CLKOUT_32768HZ, 100},
+      {PCF8563_CLKOUT_OFF, 1000},
+  };
+  uint32_t* slots[] = {&run_.link.off1, &run_.link.hz32, &run_.link.hz1024, &run_.link.hz32768, &run_.link.off2};
+  bool commandsVerified = true;
+  for (size_t i = 0; i < 5; i++) {
+    if (!setClkoutReg(stages[i].reg)) {
+      commandsVerified = false;
+      break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(rtc32k::LINK_SETTLE_MS));
+    *slots[i] = pcnt.window(stages[i].windowMs);
+  }
+  pcnt.end();
 
-  // One fail-closed cleanup path: unwind whatever reached its setup step
-  // (started -> enabled -> channel -> unit -> pin), on every error and on
-  // normal completion.
+  if (!commandsVerified) {
+    run_.link = {};
+    return;
+  }
+  run_.linkResult = rtc32k::linkFollows(run_.link);
+}
+
+// One-shot ADC2 reading of the CLKOUT 1 Hz level at GPIO15 (ADC2_CH4): 400
+// calibrated-mV samples at ~10 ms (4 s, four full periods), P10/P90 levels.
+// Informational only — the result never feeds the verdict.
+void Rtc32kDiagnosticsActivity::runAdcProbe() {
+  adc_oneshot_unit_handle_t unit = nullptr;
+  adc_cali_handle_t cali = nullptr;
+  bool unitCreated = false;
+  bool caliCreated = false;
+
+  // Single fail-closed cleanup path: unwind whatever reached its setup step
+  // (calibration handle -> oneshot unit -> pad state), on every error and on
+  // normal completion. gpio_reset_pin leaves GPIO15 digital-clean before the
+  // PCNT test re-attaches.
   struct Cleanup {
-    pcnt_unit_handle_t unit;
-    pcnt_channel_handle_t& chan;
-    bool& started;
-    bool& enabled;
-    bool& channelAttached;
+    adc_oneshot_unit_handle_t& unit;
+    adc_cali_handle_t& cali;
+    bool& unitCreated;
+    bool& caliCreated;
     void run() {
-      if (started) pcnt_unit_stop(unit);
-      if (enabled) pcnt_unit_disable(unit);
-      if (channelAttached) pcnt_del_channel(chan);
-      if (unit) pcnt_del_unit(unit);
+      if (caliCreated) adc_cali_delete_scheme_curve_fitting(cali);
+      if (unitCreated) adc_oneshot_del_unit(unit);
       gpio_reset_pin(GPIO_NUM_15);
     }
-  } cleanup{unit, chan, started, enabled, channelAttached};
+  } cleanup{unit, cali, unitCreated, caliCreated};
 
-  pcnt_unit_config_t ucfg = {
-      .low_limit = -32768,
-      .high_limit = 32767,
-      .intr_priority = 0,
-      .flags = {.accum_count = 1},
+  adc_oneshot_unit_init_cfg_t initCfg = {
+      .unit_id = ADC_UNIT_2,
+      .clk_src = ADC_RTC_CLK_SRC_DEFAULT,
+      .ulp_mode = ADC_ULP_MODE_DISABLE,
   };
-  esp_err_t rc = pcnt_new_unit(&ucfg, &unit);
-  cleanup.unit = unit;
-  if (rc != ESP_OK || !unit) {
-    LOG_ERR("RTC32K", "PCNT unit unavailable");
+  if (adc_oneshot_new_unit(&initCfg, &unit) != ESP_OK || !unit) {
+    LOG_ERR("RTC32K", "ADC2 oneshot unit unavailable");
     cleanup.run();
-    return false;
+    return;
   }
-  pcnt_glitch_filter_config_t fcfg = {.max_glitch_ns = 1000};
-  if (pcnt_unit_set_glitch_filter(unit, &fcfg) != ESP_OK) {
-    LOG_ERR("RTC32K", "PCNT glitch filter failed");
-    cleanup.run();
-    return false;
-  }
-  pcnt_chan_config_t ccfg = {
-      .edge_gpio_num = GPIO_NUM_15,
-      .level_gpio_num = -1,
-      .flags = {},
+  unitCreated = true;
+
+  adc_oneshot_chan_cfg_t chanCfg = {
+      .atten = ADC_ATTEN_DB_12,
+      .bitwidth = ADC_BITWIDTH_DEFAULT,
   };
-  rc = pcnt_new_channel(unit, &ccfg, &chan);
-  cleanup.channelAttached = (rc == ESP_OK && chan != nullptr);
-  if (rc != ESP_OK || !chan) {
-    LOG_ERR("RTC32K", "PCNT channel failed");
+  if (adc_oneshot_config_channel(unit, ADC_CHANNEL_4, &chanCfg) != ESP_OK) {
+    LOG_ERR("RTC32K", "ADC2 channel config failed");
     cleanup.run();
-    return false;
-  }
-  // Counting contract: count ONLY rising edges (posedge -> INCREASE, negedge
-  // -> HOLD). At 32.768 kHz a 100 ms window then holds 32768 * 0.100 ~= 3277
-  // counts; counting both edges would double the raw estimate.
-  if (pcnt_channel_set_edge_action(chan, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_HOLD) != ESP_OK) {
-    LOG_ERR("RTC32K", "PCNT edge action failed");
-    cleanup.run();
-    return false;
-  }
-  // Re-assert the no-pull plain input after the channel attach.
-  configGpio15PlainInput();
-
-  if (pcnt_unit_enable(unit) != ESP_OK) {
-    LOG_ERR("RTC32K", "PCNT enable failed");
-    cleanup.run();
-    return false;
-  }
-  enabled = true;
-  if (pcnt_unit_start(unit) != ESP_OK) {
-    LOG_ERR("RTC32K", "PCNT start failed");
-    cleanup.run();
-    return false;
-  }
-  started = true;
-
-  for (int i = 0; i < 10; i++) {
-    pcnt_unit_clear_count(unit);
-    vTaskDelay(pdMS_TO_TICKS(rtc32k::EDGE_WINDOW_MS));
-    int v = 0;
-    pcnt_unit_get_count(unit, &v);
-    run_.edgeCounts[i] = v > 0 ? static_cast<uint32_t>(v) : 0;
+    return;
   }
 
-  // Free the counter and pin completely before the ext-osc test takes the pad.
+  adc_cali_curve_fitting_config_t caliCfg = {
+      .unit_id = ADC_UNIT_2,
+      .chan = ADC_CHANNEL_4,
+      .atten = ADC_ATTEN_DB_12,
+      .bitwidth = ADC_BITWIDTH_DEFAULT,
+  };
+  if (adc_cali_create_scheme_curve_fitting(&caliCfg, &cali) != ESP_OK || !cali) {
+    LOG_ERR("RTC32K", "ADC calibration scheme unavailable");
+    cleanup.run();
+    return;
+  }
+  caliCreated = true;
+
+  int raw = 0;
+  int mv = 0;
+  for (size_t i = 0; i < rtc32k::ADC_SAMPLE_COUNT; i++) {
+    if (adc_oneshot_read(unit, ADC_CHANNEL_4, &raw) != ESP_OK ||
+        adc_cali_raw_to_voltage(cali, raw, &mv) != ESP_OK) {
+      LOG_ERR("RTC32K", "ADC2 read failed");
+      cleanup.run();
+      return;
+    }
+    adcSamples_[i] = static_cast<uint16_t>(mv);
+    vTaskDelay(pdMS_TO_TICKS(rtc32k::ADC_SAMPLE_INTERVAL_MS));
+  }
+
+  std::sort(adcSamples_, adcSamples_ + rtc32k::ADC_SAMPLE_COUNT);
+  const uint16_t low = rtc32k::percentileFromSorted(adcSamples_, rtc32k::ADC_SAMPLE_COUNT, rtc32k::LOW_PERCENTILE);
+  const uint16_t high = rtc32k::percentileFromSorted(adcSamples_, rtc32k::ADC_SAMPLE_COUNT, rtc32k::HIGH_PERCENTILE);
+  run_.adcAvailable = true;
+  run_.adcLowMv = low;
+  run_.adcHighMv = high;
+  run_.adcSwingMv = rtc32k::swingMv(low, high);
   cleanup.run();
+}
+
+bool Rtc32kDiagnosticsActivity::runTestARawEdges() {
+  // Baseline raw observation: explicit NO-pull pad configuration, ten 100 ms
+  // windows through the shared PCNT owner. With the open-drain CLKOUT and no
+  // pull-up, fronts are only expected if the board provides its own path.
+  // Per-run measurements were reset by runDiagnostics().
+  PcntSession pcnt;
+  if (!pcnt.begin(false)) {
+    LOG_ERR("RTC32K", "Raw PCNT unavailable");
+    pcnt.end();
+    return false;
+  }
+  for (int i = 0; i < 10; i++) {
+    run_.edgeCounts[i] = pcnt.window(rtc32k::EDGE_WINDOW_MS);
+  }
+  pcnt.end();
   return true;
 }
 
-bool Rtc32kDiagnosticsActivity::runTestBExtOscCal() {
+uint32_t Rtc32kDiagnosticsActivity::runTestBExtOscCal(const bool pullUp) {
   // The ESP32-S3 external-32k oscillator path: the pad pair GPIO15/16
-  // (XTAL_32K_P/N) feeds the 32k oscillator block. The one-shot RTC
-  // calibration peripheral measures the ext-osc source without switching the
-  // firmware's slow clock over; rtc_clk_cal times out and returns 0 on its own
-  // (bounded), so no infinite waits are possible.
+  // (XTAL_32K_P/N) feeds the 32k oscillator block. The test condition is set
+  // EXPLICITLY (pull-up or no-pull) before rtc_clk_32k_enable_external(),
+  // which enables the GPIO15 input buffer without touching the pull bits.
+  // The one-shot RTC calibration peripheral measures the ext-osc source
+  // without switching the firmware's slow clock over; rtc_clk_cal times out
+  // and returns 0 on its own (bounded), so no infinite waits are possible.
+  configureGpio15(pullUp);
   rtc_clk_32k_enable_external();
   vTaskDelay(pdMS_TO_TICKS(20));
   const uint32_t period = rtc_clk_cal(RTC_CAL_32K_XTAL, 1024);  // ~31 ms + 2x timeout bound
-  run_.calHz = period ? static_cast<uint32_t>(1000000ULL * (1ULL << RTC_CLK_CAL_FRACT) / period) : 0;
-  if (run_.calHz == 0) {
-    LOG_DBG("RTC32K", "EXT_OSC calibration timed out (period=0)");
+  const uint32_t calHz = period ? static_cast<uint32_t>(1000000ULL * (1ULL << RTC_CLK_CAL_FRACT) / period) : 0;
+  if (calHz == 0) {
+    LOG_DBG("RTC32K", "EXT_OSC calibration timed out (period=0, pullUp=%d)", pullUp ? 1 : 0);
   }
-  // Back to the original pad/clock state.
+  // Back to the original pad/clock state; the next stage reconfigures the pad
+  // explicitly.
   rtc_clk_32k_disable_external();
   gpio_reset_pin(GPIO_NUM_15);
   gpio_reset_pin(GPIO_NUM_16);
-  return run_.calHz != 0;
+  return calHz;
 }
 
 int Rtc32kDiagnosticsActivity::listCount() const { return ITEM_COUNT; }
@@ -292,24 +453,42 @@ void Rtc32kDiagnosticsActivity::buildScreen(UiScreen& screen) {
   // precedent), showing RAW measurements, never only the verdict.
   rowItems_[ITEM_RTC].label = "RTC";
   rowItems_[ITEM_CLKOUT].label = "CLKOUT";
+  rowItems_[ITEM_LINK].label = "Pull-up link probe";
+  rowItems_[ITEM_LINK_COUNTS].label = "PU counts off/32/1k/32k/off";
+  rowItems_[ITEM_ADC_LOW].label = "GPIO15 @1Hz low";
+  rowItems_[ITEM_ADC_HIGH].label = "GPIO15 @1Hz high";
+  rowItems_[ITEM_ADC_SWING].label = "GPIO15 @1Hz swing";
   rowItems_[ITEM_SAMPLES].label = "GPIO15 raw samples";
   rowItems_[ITEM_ESTIMATE].label = "GPIO raw estimate";
-  rowItems_[ITEM_CAL].label = "EXT_OSC cal";
+  rowItems_[ITEM_CAL_NO_PULL].label = "EXT_OSC no-pull";
+  rowItems_[ITEM_CAL].label = "EXT_OSC pull-up";
   rowItems_[ITEM_RESULT].label = "Result";
   rowItems_[ITEM_RUN].label = "Run again";
 
   rowItems_[ITEM_RTC].value = !ran_ ? "..." : run_.rtcOk ? "OK" : "FAIL";
   rowItems_[ITEM_CLKOUT].value =
       !ran_ ? "..." : run_.clkoutOk ? "ON / 32768 Hz" : "FAIL (reg 0x0D)";
+  rowItems_[ITEM_LINK].value =
+      !ran_ ? "..."
+            : run_.linkResult == rtc32k::LinkProbeResult::Followed ? "FOLLOWED"
+            : run_.linkResult == rtc32k::LinkProbeResult::NotFollowed ? "NOT SEEN"
+                                                                      : "UNAVAILABLE";
+  rowItems_[ITEM_LINK_COUNTS].value = !ran_ ? "..." : linkCountsBuf_;
+  rowItems_[ITEM_ADC_LOW].value = !ran_ ? "..." : run_.adcAvailable ? adcLowBuf_ : "N/A";
+  rowItems_[ITEM_ADC_HIGH].value = !ran_ ? "..." : run_.adcAvailable ? adcHighBuf_ : "N/A";
+  rowItems_[ITEM_ADC_SWING].value = !ran_ ? "..." : run_.adcAvailable ? adcSwingBuf_ : "N/A";
   rowItems_[ITEM_SAMPLES].value = samplesBuf_;
   rowItems_[ITEM_ESTIMATE].value = estimateBuf_;
-  rowItems_[ITEM_CAL].value = calBuf_;
+  rowItems_[ITEM_CAL_NO_PULL].value = !ran_ ? "..." : calNoPullBuf_;
+  rowItems_[ITEM_CAL].value = !ran_ ? "..." : calBuf_;
   // PCNT = ordinary digital GPIO observation (the raw rows above stay
-  // informational); the EXT_OSC calibration is the actual acceptance test of
-  // the XTAL_32K_P input path, so EXT_OSC owns the verdict. PASS claims only
-  // that the ESP32-S3 external-clock path accepted and calibrated the clock
-  // in this firmware configuration — never electrical compliance or sleep
-  // source suitability.
+  // informational); the EXT_OSC PULL-UP calibration is the verdict input —
+  // the explicit reported test condition (internal pull-up enabled, awake),
+  // since the open-drain CLKOUT cannot reach high without a pull-up. The
+  // no-pull calibration row is informational. PASS claims only that the
+  // ESP32-S3 external-clock path accepted and calibrated the clock in this
+  // firmware configuration — never electrical compliance or sleep source
+  // suitability.
   rowItems_[ITEM_RESULT].value =
       !ran_ ? "..."
             : verdict_ == rtc32k::Verdict::Pass ? "PASS — EXT_OSC accepted 32 kHz"
