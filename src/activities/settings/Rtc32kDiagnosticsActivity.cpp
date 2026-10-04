@@ -156,20 +156,43 @@ bool Rtc32kDiagnosticsActivity::runTestARawEdges() {
 
   pcnt_unit_handle_t unit = nullptr;
   pcnt_channel_handle_t chan = nullptr;
+  bool started = false, enabled = false, channelAttached = false;
+
+  // One fail-closed cleanup path: unwind whatever reached its setup step
+  // (started -> enabled -> channel -> unit -> pin), on every error and on
+  // normal completion.
+  struct Cleanup {
+    pcnt_unit_handle_t unit;
+    pcnt_channel_handle_t& chan;
+    bool& started;
+    bool& enabled;
+    bool& channelAttached;
+    void run() {
+      if (started) pcnt_unit_stop(unit);
+      if (enabled) pcnt_unit_disable(unit);
+      if (channelAttached) pcnt_del_channel(chan);
+      if (unit) pcnt_del_unit(unit);
+      gpio_reset_pin(GPIO_NUM_15);
+    }
+  } cleanup{unit, chan, started, enabled, channelAttached};
+
   pcnt_unit_config_t ucfg = {
       .low_limit = -32768,
       .high_limit = 32767,
       .intr_priority = 0,
       .flags = {.accum_count = 1},
   };
-  if (pcnt_new_unit(&ucfg, &unit) != ESP_OK || !unit) {
+  esp_err_t rc = pcnt_new_unit(&ucfg, &unit);
+  cleanup.unit = unit;
+  if (rc != ESP_OK || !unit) {
     LOG_ERR("RTC32K", "PCNT unit unavailable");
+    cleanup.run();
     return false;
   }
   pcnt_glitch_filter_config_t fcfg = {.max_glitch_ns = 1000};
   if (pcnt_unit_set_glitch_filter(unit, &fcfg) != ESP_OK) {
     LOG_ERR("RTC32K", "PCNT glitch filter failed");
-    pcnt_del_unit(unit);
+    cleanup.run();
     return false;
   }
   pcnt_chan_config_t ccfg = {
@@ -177,20 +200,36 @@ bool Rtc32kDiagnosticsActivity::runTestARawEdges() {
       .level_gpio_num = -1,
       .flags = {},
   };
-  if (pcnt_new_channel(unit, &ccfg, &chan) != ESP_OK || !chan) {
+  rc = pcnt_new_channel(unit, &ccfg, &chan);
+  cleanup.channelAttached = (rc == ESP_OK && chan != nullptr);
+  if (rc != ESP_OK || !chan) {
     LOG_ERR("RTC32K", "PCNT channel failed");
-    pcnt_del_unit(unit);
+    cleanup.run();
+    return false;
+  }
+  // Counting contract: count ONLY rising edges (posedge -> INCREASE, negedge
+  // -> HOLD). At 32.768 kHz a 100 ms window then holds 32768 * 0.100 ~= 3277
+  // counts; counting both edges would double the raw estimate.
+  if (pcnt_channel_set_edge_action(chan, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_HOLD) != ESP_OK) {
+    LOG_ERR("RTC32K", "PCNT edge action failed");
+    cleanup.run();
     return false;
   }
   // Re-assert the no-pull plain input after the channel attach.
   configGpio15PlainInput();
 
-  if (pcnt_unit_enable(unit) != ESP_OK || pcnt_unit_start(unit) != ESP_OK) {
-    LOG_ERR("RTC32K", "PCNT start failed");
-    pcnt_del_channel(chan);
-    pcnt_del_unit(unit);
+  if (pcnt_unit_enable(unit) != ESP_OK) {
+    LOG_ERR("RTC32K", "PCNT enable failed");
+    cleanup.run();
     return false;
   }
+  enabled = true;
+  if (pcnt_unit_start(unit) != ESP_OK) {
+    LOG_ERR("RTC32K", "PCNT start failed");
+    cleanup.run();
+    return false;
+  }
+  started = true;
 
   for (int i = 0; i < 10; i++) {
     pcnt_unit_clear_count(unit);
@@ -201,11 +240,7 @@ bool Rtc32kDiagnosticsActivity::runTestARawEdges() {
   }
 
   // Free the counter and pin completely before the ext-osc test takes the pad.
-  pcnt_unit_stop(unit);
-  pcnt_unit_disable(unit);
-  pcnt_del_channel(chan);
-  pcnt_del_unit(unit);
-  gpio_reset_pin(GPIO_NUM_15);
+  cleanup.run();
   return true;
 }
 
