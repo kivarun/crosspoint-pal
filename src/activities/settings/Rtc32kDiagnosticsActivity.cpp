@@ -101,57 +101,67 @@ void Rtc32kDiagnosticsActivity::enableClkout() {
   // verbatim on exit, so re-runs never overwrite it with the enabled value.
   if (clkoutOriginalValid_) {
     // Already captured earlier in this session; just re-enable the output.
-    if (diagWriteReg(PCF8563_REG_CLKOUT, PCF8563_CLKOUT_32768HZ) &&
-        diagReadReg(PCF8563_REG_CLKOUT, clkoutReadback_) && clkoutReadback_ == PCF8563_CLKOUT_32768HZ) {
-      clkoutOk_ = true;
+    // A successful write ACKs the RTC, proving it is still reachable this
+    // run (rtcOk), independent of the readback verdict below.
+    if (diagWriteReg(PCF8563_REG_CLKOUT, PCF8563_CLKOUT_32768HZ)) {
+      run_.rtcOk = true;
+      uint8_t readback = 0;
+      if (diagReadReg(PCF8563_REG_CLKOUT, readback) && readback == PCF8563_CLKOUT_32768HZ) {
+        run_.clkoutOk = true;
+        return;
+      }
     }
+    LOG_ERR("RTC32K", "CLKOUT re-enable failed");
     return;
   }
   uint8_t original = 0;
+  uint8_t readback = 0;
   if (!diagReadReg(PCF8563_REG_CLKOUT, original)) {
     LOG_ERR("RTC32K", "RTC/CLKOUT not readable");
-    rtcOk_ = false;
     return;
   }
-  rtcOk_ = true;
+  run_.rtcOk = true;
   clkoutOriginal_ = original;
   clkoutOriginalValid_ = true;
   if (!diagWriteReg(PCF8563_REG_CLKOUT, PCF8563_CLKOUT_32768HZ) ||
-      !diagReadReg(PCF8563_REG_CLKOUT, clkoutReadback_) || clkoutReadback_ != PCF8563_CLKOUT_32768HZ) {
+      !diagReadReg(PCF8563_REG_CLKOUT, readback) || readback != PCF8563_CLKOUT_32768HZ) {
     LOG_ERR("RTC32K", "CLKOUT 32 kHz enable failed");
     return;
   }
-  clkoutOk_ = true;
+  run_.clkoutOk = true;
   // CLKOUT stays ON for as long as the activity is open so the technician can
   // also probe the RTC pin directly with a meter.
 }
 
 void Rtc32kDiagnosticsActivity::runDiagnostics() {
-  rtcOk_ = false;
-  clkoutOk_ = false;
+  // Fresh per-run state BEFORE any transaction: a run that fails at its very
+  // first I2C operation must display THIS run's empty measurements, never
+  // the previous run's samples/calibration. The captured original CLKOUT
+  // register value is session state and survives across runs.
+  run_.reset();
+
   if (BoardConfig::isX4Classic() && BoardConfig::ACTIVE.sensors.rtcAddr != 0) {
     enableClkout();
-    if (clkoutOk_) {
+    if (run_.clkoutOk) {
       runTestARawEdges();
       runTestBExtOscCal();
     }
   }
 
-  const uint32_t rawHz = rtc32k::rawEstimateHz(rtc32k::medianOf10(edgeCounts_));
-  snprintf(samplesBuf_, sizeof(samplesBuf_), "%u %u %u %u %u %u %u %u %u %u", edgeCounts_[0], edgeCounts_[1],
-           edgeCounts_[2], edgeCounts_[3], edgeCounts_[4], edgeCounts_[5], edgeCounts_[6], edgeCounts_[7],
-           edgeCounts_[8], edgeCounts_[9]);
+  const uint32_t rawHz = rtc32k::rawEstimateHz(rtc32k::medianOf10(run_.edgeCounts));
+  snprintf(samplesBuf_, sizeof(samplesBuf_), "%u %u %u %u %u %u %u %u %u %u", run_.edgeCounts[0], run_.edgeCounts[1],
+           run_.edgeCounts[2], run_.edgeCounts[3], run_.edgeCounts[4], run_.edgeCounts[5], run_.edgeCounts[6],
+           run_.edgeCounts[7], run_.edgeCounts[8], run_.edgeCounts[9]);
   snprintf(estimateBuf_, sizeof(estimateBuf_), "%u Hz", static_cast<unsigned>(rawHz));
-  snprintf(calBuf_, sizeof(calBuf_), "%u Hz", static_cast<unsigned>(calHz_));
-  verdict_ = rtc32k::classify(rtcOk_, clkoutOk_, rawHz, calHz_);
+  snprintf(calBuf_, sizeof(calBuf_), "%u Hz", static_cast<unsigned>(run_.calHz));
+  verdict_ = rtc32k::classify(run_.rtcOk, run_.clkoutOk, rawHz, run_.calHz);
   ran_ = true;
   requestUpdate();
 }
 
 bool Rtc32kDiagnosticsActivity::runTestARawEdges() {
-  for (int i = 0; i < 10; i++) edgeCounts_[i] = 0;
-  calHz_ = 0;
-
+  // Per-run measurements were reset by runDiagnostics(); this test only fills
+  // the edge-count windows.
   configGpio15PlainInput();
 
   pcnt_unit_handle_t unit = nullptr;
@@ -236,7 +246,7 @@ bool Rtc32kDiagnosticsActivity::runTestARawEdges() {
     vTaskDelay(pdMS_TO_TICKS(rtc32k::EDGE_WINDOW_MS));
     int v = 0;
     pcnt_unit_get_count(unit, &v);
-    edgeCounts_[i] = v > 0 ? static_cast<uint32_t>(v) : 0;
+    run_.edgeCounts[i] = v > 0 ? static_cast<uint32_t>(v) : 0;
   }
 
   // Free the counter and pin completely before the ext-osc test takes the pad.
@@ -253,15 +263,15 @@ bool Rtc32kDiagnosticsActivity::runTestBExtOscCal() {
   rtc_clk_32k_enable_external();
   vTaskDelay(pdMS_TO_TICKS(20));
   const uint32_t period = rtc_clk_cal(RTC_CAL_32K_XTAL, 1024);  // ~31 ms + 2x timeout bound
-  calHz_ = period ? static_cast<uint32_t>(1000000ULL * (1ULL << RTC_CLK_CAL_FRACT) / period) : 0;
-  if (calHz_ == 0) {
+  run_.calHz = period ? static_cast<uint32_t>(1000000ULL * (1ULL << RTC_CLK_CAL_FRACT) / period) : 0;
+  if (run_.calHz == 0) {
     LOG_DBG("RTC32K", "EXT_OSC calibration timed out (period=0)");
   }
   // Back to the original pad/clock state.
   rtc_clk_32k_disable_external();
   gpio_reset_pin(GPIO_NUM_15);
   gpio_reset_pin(GPIO_NUM_16);
-  return calHz_ != 0;
+  return run_.calHz != 0;
 }
 
 int Rtc32kDiagnosticsActivity::listCount() const { return ITEM_COUNT; }
@@ -288,21 +298,24 @@ void Rtc32kDiagnosticsActivity::buildScreen(UiScreen& screen) {
   rowItems_[ITEM_RESULT].label = "Result";
   rowItems_[ITEM_RUN].label = "Run again";
 
-  rowItems_[ITEM_RTC].value = !ran_ ? "..." : rtcOk_ ? "OK" : "FAIL";
-  rowItems_[ITEM_CLKOUT].value = !ran_ ? "..."
-      : clkoutOk_ ? "ON / 32768 Hz" : "FAIL (reg 0x0D)";
+  rowItems_[ITEM_RTC].value = !ran_ ? "..." : run_.rtcOk ? "OK" : "FAIL";
+  rowItems_[ITEM_CLKOUT].value =
+      !ran_ ? "..." : run_.clkoutOk ? "ON / 32768 Hz" : "FAIL (reg 0x0D)";
   rowItems_[ITEM_SAMPLES].value = samplesBuf_;
   rowItems_[ITEM_ESTIMATE].value = estimateBuf_;
   rowItems_[ITEM_CAL].value = calBuf_;
   // PCNT = ordinary digital GPIO observation (the raw rows above stay
   // informational); the EXT_OSC calibration is the actual acceptance test of
-  // the XTAL_32K_P input path, so EXT_OSC owns the verdict.
+  // the XTAL_32K_P input path, so EXT_OSC owns the verdict. PASS claims only
+  // that the ESP32-S3 external-clock path accepted and calibrated the clock
+  // in this firmware configuration — never electrical compliance or sleep
+  // source suitability.
   rowItems_[ITEM_RESULT].value =
       !ran_ ? "..."
-            : verdict_ == rtc32k::Verdict::Pass ? "PASS — EXT_OSC accepts 32 kHz"
-            : verdict_ == rtc32k::Verdict::Partial ? "SIGNAL PRESENT — EXT_OSC rejected it"
-            : rtcOk_ && clkoutOk_ ? "FAIL — no usable 32 kHz at EXT_OSC"
-                                  : "FAIL — RTC/CLKOUT unavailable";
+            : verdict_ == rtc32k::Verdict::Pass ? "PASS — EXT_OSC accepted 32 kHz"
+            : verdict_ == rtc32k::Verdict::Partial ? "RAW CLOCK SEEN — EXT_OSC rejected"
+            : run_.rtcOk && run_.clkoutOk ? "FAIL — EXT_OSC did not accept 32 kHz"
+                                          : "FAIL — RTC/CLKOUT unavailable";
   rowItems_[ITEM_RUN].value = "";
 
   fui::ListProps props;

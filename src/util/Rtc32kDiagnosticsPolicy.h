@@ -40,7 +40,12 @@ inline uint32_t medianOf10(const uint32_t (&counts)[10]) {
 // The verdict contract (EXT_OSC owns the acceptance):
 //   Pass    — RTC reachable, CLKOUT control verified, and the ESP32-S3
 //             EXT_OSC calibration measured a clock inside the window,
-//             regardless of what the ordinary digital GPIO observes;
+//             regardless of what the ordinary digital GPIO observes. PASS
+//             claims only that the external-clock path accepted and
+//             calibrated the signal in this firmware configuration — never
+//             electrical compliance, waveform/common-mode conformance,
+//             long-term safety, or that the RTC_SLOW_CLK was switched over
+//             (deep sleep still runs off the configured slow-clock source);
 //   Partial — the EXT_OSC path rejected the signal, but the ordinary
 //             digital GPIO (PCNT) still sees a ~32 kHz clock on the pad;
 //   Fail    — RTC/CLKOUT unavailable, or no usable 32 kHz anywhere.
@@ -57,5 +62,23 @@ inline constexpr Verdict classify(const bool rtcOk, const bool clkoutOk, const u
   if (rawWindowOk(rawHz)) return Verdict::Partial;
   return Verdict::Fail;
 }
+
+// Per-run measurement bundle. Every diagnostic pass begins with reset() so a
+// run that fails at its first transaction classifies and displays THIS run's
+// empty state, never the previous run's readings. The captured original
+// CLKOUT register value is session state and is intentionally NOT here.
+struct RunState {
+  bool rtcOk = false;
+  bool clkoutOk = false;
+  uint32_t edgeCounts[10] = {};
+  uint32_t calHz = 0;
+
+  void reset() {
+    rtcOk = false;
+    clkoutOk = false;
+    for (int i = 0; i < 10; i++) edgeCounts[i] = 0;
+    calHz = 0;
+  }
+};
 
 }  // namespace rtc32k

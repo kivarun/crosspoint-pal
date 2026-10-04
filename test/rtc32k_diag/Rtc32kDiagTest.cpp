@@ -7,6 +7,7 @@
 using rtc32k::classify;
 using rtc32k::rawEstimateHz;
 using rtc32k::rawWindowOk;
+using rtc32k::RunState;
 using rtc32k::Verdict;
 
 TEST(Rtc32kRawWindow, WideAcceptanceWindow) {
@@ -57,4 +58,64 @@ TEST(Rtc32kClassify, ExtOscOwnsVerdict) {
   EXPECT_EQ(classify(true, true, 5, 0), Verdict::Fail);
   // 10: both readings out of window -> FAIL.
   EXPECT_EQ(classify(true, true, 25000, 29000), Verdict::Fail);
+}
+
+// Mirrors the device wiring of runDiagnostics(): every pass starts with
+// RunState::reset() before any transaction, so a run that fails at its first
+// I2C operation classifies from an empty state and can never display the
+// previous run's samples or calibration.
+TEST(Rtc32kRunLifecycle, FailedRunNeverShowsStaleMeasurements) {
+  RunState run;
+
+  // Fresh success: enable ok, ten full-count windows, calibration accepted.
+  run.reset();
+  run.rtcOk = true;
+  run.clkoutOk = true;
+  for (auto& c : run.edgeCounts) c = 3277u;
+  run.calHz = 32766u;
+  uint32_t rawHz = rtc32k::rawEstimateHz(rtc32k::medianOf10(run.edgeCounts));
+  EXPECT_EQ(classify(run.rtcOk, run.clkoutOk, rawHz, run.calHz), Verdict::Pass);
+
+  // Run again -> success again: reset must not prevent a repeat PASS.
+  run.reset();
+  run.rtcOk = true;
+  run.clkoutOk = true;
+  for (auto& c : run.edgeCounts) c = 3276u;
+  run.calHz = 32768u;
+  rawHz = rtc32k::rawEstimateHz(rtc32k::medianOf10(run.edgeCounts));
+  EXPECT_EQ(classify(run.rtcOk, run.clkoutOk, rawHz, run.calHz), Verdict::Pass);
+
+  // Run again -> RTC/I2C failure on this pass: reset() zeroes everything
+  // first, the failure leaves both flags down, and classify FAILs with no
+  // stale samples or calibration anywhere in the state.
+  run.reset();
+  EXPECT_FALSE(run.rtcOk);
+  EXPECT_FALSE(run.clkoutOk);
+  for (const auto& c : run.edgeCounts) {
+    EXPECT_EQ(c, 0u);
+  }
+  EXPECT_EQ(run.calHz, 0u);
+  rawHz = rtc32k::rawEstimateHz(rtc32k::medianOf10(run.edgeCounts));
+  EXPECT_EQ(classify(run.rtcOk, run.clkoutOk, rawHz, run.calHz), Verdict::Fail);
+
+  // Run again -> CLKOUT control failure: RTC still answers (flag up), output
+  // cannot be re-enabled (flag down), measurements stay empty -> FAIL.
+  run.reset();
+  run.rtcOk = true;
+  EXPECT_EQ(classify(run.rtcOk, run.clkoutOk, 0u, 0u), Verdict::Fail);
+}
+
+TEST(Rtc32kRunState, ResetClearsEveryPerRunValue) {
+  RunState run;
+  run.rtcOk = true;
+  run.clkoutOk = true;
+  for (int i = 0; i < 10; i++) run.edgeCounts[i] = 3277u;
+  run.calHz = 32766u;
+  run.reset();
+  EXPECT_FALSE(run.rtcOk);
+  EXPECT_FALSE(run.clkoutOk);
+  for (int i = 0; i < 10; i++) {
+    EXPECT_EQ(run.edgeCounts[i], 0u);
+  }
+  EXPECT_EQ(run.calHz, 0u);
 }

@@ -45,13 +45,9 @@ class Rtc32kDiagnosticsActivity final : public UiListActivity {
   char samplesBuf_[96];
   char estimateBuf_[24];
   char calBuf_[24];
-  uint32_t edgeCounts_[10] = {};
-  uint32_t calHz_ = 0;
-  bool rtcOk_ = false;
-  bool clkoutOk_ = false;
+  rtc32k::RunState run_{};
   bool clkoutOriginalValid_ = false;
   uint8_t clkoutOriginal_ = 0;
-  uint8_t clkoutReadback_ = 0;
   rtc32k::Verdict verdict_ = rtc32k::Verdict::Fail;
   bool ran_ = false;
 };
