@@ -20,6 +20,7 @@ class Rtc32kDiagnosticsActivity final : public UiListActivity {
   int listCount() const override;
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
+  bool handleButtons() override;
   void drawFooter() override;
   const char* headerTitle() const override;
 

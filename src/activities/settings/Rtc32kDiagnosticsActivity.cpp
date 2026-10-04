@@ -320,6 +320,23 @@ void Rtc32kDiagnosticsActivity::activateIndex(const int index) {
   runDiagnostics();
 }
 
+bool Rtc32kDiagnosticsActivity::handleButtons() {
+  // Footer says Back | Run again, so Confirm must run the pass from EVERY
+  // row, not only from the selected one (the default list activation would
+  // require navigating to the Run row first). Up/Down keep the base list
+  // navigation.
+  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    onBackButton();
+    return true;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    app.clearTapFlash();
+    runDiagnostics();
+    return true;
+  }
+  return false;
+}
+
 void Rtc32kDiagnosticsActivity::drawFooter() {
   const auto hint = mappedInput.mapLabels(tr(STR_BACK), "Run again", "", "");
   GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4);
