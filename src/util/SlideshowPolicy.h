@@ -57,8 +57,7 @@ inline constexpr bool allowedByBattery(const uint16_t percent, const bool extern
 enum class ContinueOutcome : uint8_t { Continue = 0, EndStaticSleep = 1 };
 inline constexpr ContinueOutcome sleepSlideshowOutcome(const bool batteryAllowed, const bool hasNext,
                                                        const bool frameOk) {
-  return batteryAllowed && hasNext && frameOk ? ContinueOutcome::Continue
-                                              : ContinueOutcome::EndStaticSleep;
+  return batteryAllowed && hasNext && frameOk ? ContinueOutcome::Continue : ContinueOutcome::EndStaticSleep;
 }
 
 // Which DISPLAY settings row is being judged (pure, host-tested). The
@@ -84,9 +83,7 @@ enum class Order : uint8_t { Forward = 0, Reverse = 1, Random = 2 };
 inline constexpr uint8_t orderIndexClamped(const uint8_t stored) {
   return stored < ORDER_COUNT ? stored : ORDER_DEFAULT_INDEX;
 }
-inline constexpr Order orderClamped(const uint8_t stored) {
-  return static_cast<Order>(orderIndexClamped(stored));
-}
+inline constexpr Order orderClamped(const uint8_t stored) { return static_cast<Order>(orderIndexClamped(stored)); }
 // Cyclic order step (wrap in both directions), starting from the clamped
 // stored value.
 inline constexpr uint8_t orderIndexStepped(const uint8_t current, const int delta) {
@@ -106,8 +103,7 @@ inline constexpr uint8_t orderIndexStepped(const uint8_t current, const int delt
 // more than one candidate, the immediate repeat is EXCLUDED from the
 // candidate set (uniform over count-1 indices); with none, any index. No
 // shuffle history between frames.
-inline int indexAfterAdvance(const int currentIndex, const int count, const Order order,
-                             const uint32_t randomValue) {
+inline int indexAfterAdvance(const int currentIndex, const int count, const Order order, const uint32_t randomValue) {
   if (count <= 0) return -1;  // nothing usable; the caller fails closed
   if (count == 1) return 0;   // the only frame
   const bool haveCurrent = currentIndex >= 0 && currentIndex < count;
@@ -205,8 +201,8 @@ inline constexpr bool randomCycleValid(const RandomCycleState& cycle, const int 
 }
 
 struct RandomCycleStep {
-  int index;              // next image index (-1: no usable frame)
-  RandomCycleState state; // updated retained metadata
+  int index;               // next image index (-1: no usable frame)
+  RandomCycleState state;  // updated retained metadata
 };
 
 // Pure next-frame policy of the Random order. randomValue feeds a NEW
@@ -217,8 +213,8 @@ struct RandomCycleStep {
 // a missing current never rides a formally valid old cycle. The supported
 // image count is 1..UINT16_MAX; anything beyond fails closed (-1) instead
 // of building a cycle the uint16 metadata cannot represent.
-inline RandomCycleStep randomCycleNext(const int currentIndex, const int count,
-                                       const RandomCycleState& cycle, const uint32_t randomValue) {
+inline RandomCycleStep randomCycleNext(const int currentIndex, const int count, const RandomCycleState& cycle,
+                                       const uint32_t randomValue) {
   RandomCycleStep step{};
   step.index = -1;
   // No frames, or beyond the uint16 metadata range: the caller fails closed.
@@ -351,8 +347,8 @@ inline PageRowAction pageRowTapAction(const int row) {
 // (drawButtonHints skips empty slots by design — other callers rely on that;
 // the opt-in erase is modal-repaint-only).
 struct PageHintSlots {
-  bool confirmStart;   // Confirm slot shows Start
-  bool stepperSlots;   // Left/Right slots carry "-"/"+"
+  bool confirmStart;  // Confirm slot shows Start
+  bool stepperSlots;  // Left/Right slots carry "-"/"+"
 };
 inline constexpr PageHintSlots pageHintSlots(const int row) {
   return {pageRowAction(row) == PageRowAction::Start, row == INTERVAL_PAGE_ROW || row == ORDER_PAGE_ROW};

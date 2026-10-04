@@ -296,8 +296,8 @@ class BaseTheme {
   // horizontally centered inside the anchor, clamped so the outer box (the
   // content plus frameThickness on every side) lies within the anchor.
   static Rect popupRectFor(const int screenWidth, const int screenHeight, const int textWidth, const int textHeight,
-                           const int marginX, const int marginY, const int frameThickness,
-                           const float topOffsetRatio, const Rect* anchorRect = nullptr) {
+                           const int marginX, const int marginY, const int frameThickness, const float topOffsetRatio,
+                           const Rect* anchorRect = nullptr) {
     const int w = textWidth + marginX * 2;
     const int h = textHeight + marginY * 2;
     if (!anchorRect) {

@@ -293,9 +293,9 @@ TEST(ModalPopup, AnchoredPopupLiesFullyInsideAnchor) {
   const Rect anchor{100, 200, 300, 150};
   constexpr int FRAME = 2;
   const auto contained = [&](const Rect& content) {
-    EXPECT_GE(content.x - FRAME, anchor.x);                                  // outerLeft >= anchor.left
-    EXPECT_GE(content.y - FRAME, anchor.y);                                  // outerTop >= anchor.top
-    EXPECT_LE(content.x + content.width + FRAME, anchor.x + anchor.width);   // outerRight <= anchor.right
+    EXPECT_GE(content.x - FRAME, anchor.x);                                   // outerLeft >= anchor.left
+    EXPECT_GE(content.y - FRAME, anchor.y);                                   // outerTop >= anchor.top
+    EXPECT_LE(content.x + content.width + FRAME, anchor.x + anchor.width);    // outerRight <= anchor.right
     EXPECT_LE(content.y + content.height + FRAME, anchor.y + anchor.height);  // outerBottom <= anchor.bottom
   };
 
@@ -404,8 +404,8 @@ TEST(DisabledFocus, SelectedDisabledRowIsInert) {
   const Routed r = routeTap(interactions, device, buildFragment, BODY_Y, BODY_X + 10, disabledY);
   EXPECT_FALSE(r.routed);
   // The enabled rows around it still route to their own rows.
-  const Routed first = routeTap(interactions, device, buildFragment, BODY_Y, BODY_X + 10,
-                                static_cast<int16_t>(BODY_Y + ROW_H / 2));
+  const Routed first =
+      routeTap(interactions, device, buildFragment, BODY_Y, BODY_X + 10, static_cast<int16_t>(BODY_Y + ROW_H / 2));
   EXPECT_TRUE(first.routed);
   EXPECT_EQ(first.value, 0);
   const Routed last =

@@ -52,9 +52,8 @@ inline ModalListTheme resolve(const fui::ThemeTokens& tokens, const bool touchCa
     case fui::SelectionStyle::Underline:
     case fui::SelectionStyle::Triangle:
       theme.rowStyles.selected = theme.rowStyles.normal;  // the marker shows the selection
-      theme.marker = tokens.listSelectionStyle == fui::SelectionStyle::Underline
-                         ? fui::SelectionMarker::Underline
-                         : fui::SelectionMarker::Triangle;
+      theme.marker = tokens.listSelectionStyle == fui::SelectionStyle::Underline ? fui::SelectionMarker::Underline
+                                                                                 : fui::SelectionMarker::Triangle;
       break;
     case fui::SelectionStyle::InvertFill:
     default:

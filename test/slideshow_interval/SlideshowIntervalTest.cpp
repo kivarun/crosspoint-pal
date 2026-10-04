@@ -124,7 +124,7 @@ TEST(SlideshowOrder, TableAndClamping) {
   EXPECT_EQ(slideshow::ORDER_DEFAULT_INDEX, 0);  // Forward
   EXPECT_EQ(slideshow::orderIndexClamped(0), 0);
   EXPECT_EQ(slideshow::orderIndexClamped(2), 2);
-  EXPECT_EQ(slideshow::orderIndexClamped(3), slideshow::ORDER_DEFAULT_INDEX);   // out of range -> Forward
+  EXPECT_EQ(slideshow::orderIndexClamped(3), slideshow::ORDER_DEFAULT_INDEX);    // out of range -> Forward
   EXPECT_EQ(slideshow::orderIndexClamped(255), slideshow::ORDER_DEFAULT_INDEX);  // corrupt -> Forward
   EXPECT_EQ(slideshow::orderClamped(1), slideshow::Order::Reverse);
   EXPECT_EQ(slideshow::orderClamped(9), slideshow::Order::Forward);
@@ -145,9 +145,9 @@ TEST(SlideshowOrder, StepsCycleInBothDirections) {
 TEST(SlideshowOrderAdvance, Forward) {
   EXPECT_EQ(slideshow::indexAfterAdvance(0, 3, slideshow::Order::Forward, 0), 1);
   EXPECT_EQ(slideshow::indexAfterAdvance(1, 3, slideshow::Order::Forward, 0), 2);
-  EXPECT_EQ(slideshow::indexAfterAdvance(2, 3, slideshow::Order::Forward, 0), 0);  // wrap
+  EXPECT_EQ(slideshow::indexAfterAdvance(2, 3, slideshow::Order::Forward, 0), 0);   // wrap
   EXPECT_EQ(slideshow::indexAfterAdvance(-1, 3, slideshow::Order::Forward, 7), 0);  // missing -> first
-  EXPECT_EQ(slideshow::indexAfterAdvance(0, 1, slideshow::Order::Forward, 5), 0);  // single item
+  EXPECT_EQ(slideshow::indexAfterAdvance(0, 1, slideshow::Order::Forward, 5), 0);   // single item
   EXPECT_EQ(slideshow::indexAfterAdvance(0, 0, slideshow::Order::Forward, 5), -1);  // empty -> fail closed
 }
 
@@ -321,8 +321,7 @@ TEST(RandomCycle, ExhaustsEveryIndexExactlyOnce) {
 // exactly once. Anything above the cap fails closed (-1) instead of
 // building a cycle the uint16 metadata cannot represent.
 TEST(RandomCycle, SupportedCountBounds) {
-  for (const auto& [count, increment] :
-       {std::pair<int, uint16_t>{32768, 1}, {32769, 3}, {65535, 65535}}) {
+  for (const auto& [count, increment] : {std::pair<int, uint16_t>{32768, 1}, {32769, 3}, {65535, 65535}}) {
     const auto seen = runCycle(count, increment, 0);
     for (int idx = 0; idx < count; ++idx) {
       ASSERT_EQ(seen[idx], 1) << "count=" << count << " increment=" << increment << " idx=" << idx;

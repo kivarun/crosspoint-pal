@@ -35,10 +35,10 @@
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/plugins/PluginCatalogActivity.h"
 #include "activities/util/IntervalSelectionActivity.h"
+#include "components/ListRowPresentation.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
-#include "components/ListRowPresentation.h"
 #include "fontIds.h"
 #include "util/SlideshowPolicy.h"
 
@@ -628,9 +628,8 @@ void SettingsActivity::buildScreen(UiScreen& screen) {
   const int selectedRow = ringPos() - 1;
   const bool selectedDisabled =
       selectedRow >= 0 && selectedRow < settingsCount && !settingsRowEnabled(settings[selectedRow]);
-  props.selectionMarker = selectedDisabled
-                              ? rowPresentation::disabledRowCursor(screen.theme().listSelectionStyle)
-                              : fui::SelectionMarker::None;
+  props.selectionMarker = selectedDisabled ? rowPresentation::disabledRowCursor(screen.theme().listSelectionStyle)
+                                           : fui::SelectionMarker::None;
 
   syncTabListViewport(screen, props);
   screen.list(props);
@@ -656,7 +655,7 @@ void SettingsActivity::drawFooter() {
   } else {
     const auto& setting = (*currentSettings)[ring - 1];
     // A disabled row promises no Toggle: Confirm is a no-op there.
-    confirmLabel = !settingsRowEnabled(setting) ? ""
+    confirmLabel = !settingsRowEnabled(setting)                 ? ""
                    : setting.nameId == StrId::STR_TIME_TO_SLEEP ? tr(STR_SELECT)
                                                                 : tr(STR_TOGGLE);
   }

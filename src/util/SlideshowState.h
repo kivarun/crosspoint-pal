@@ -42,9 +42,9 @@ inline constexpr bool sleepRequestArmsTimer(const SleepRequest request) {
 // magic was bumped so a retained state written under the v1 layout
 // (0x534C4944 'SLID', path-only) can never validate.
 struct SlideshowState {
-  uint32_t magic;                 // SLIDESHOW_MAGIC, written LAST
+  uint32_t magic;                     // SLIDESHOW_MAGIC, written LAST
   slideshow::RandomCycleState cycle;  // randomized exhaustive cycle metadata
-  uint8_t mode;                   // Mode, validated by stateValid
+  uint8_t mode;                       // Mode, validated by stateValid
   char path[501];
 };
 static_assert(sizeof(SlideshowState) == 512, "retained slideshow state must stay within its RTC budget");

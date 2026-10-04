@@ -253,10 +253,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         // (slideshow::orderClamped() is the only conversion). Append-safe:
         // the generic enum clamp folds a corrupt/out-of-range byte back to
         // the Forward default.
-        SettingInfo::Enum(StrId::STR_SLIDESHOW_ORDER, &CrossPointSettings::slideshowOrder,
-                          {StrId::STR_SLIDESHOW_ORDER_FORWARD, StrId::STR_SLIDESHOW_ORDER_REVERSE,
-                           StrId::STR_SLIDESHOW_ORDER_RANDOM},
-                          "slideshowOrder", StrId::STR_CAT_DISPLAY),
+        SettingInfo::Enum(
+            StrId::STR_SLIDESHOW_ORDER, &CrossPointSettings::slideshowOrder,
+            {StrId::STR_SLIDESHOW_ORDER_FORWARD, StrId::STR_SLIDESHOW_ORDER_REVERSE, StrId::STR_SLIDESHOW_ORDER_RANDOM},
+            "slideshowOrder", StrId::STR_CAT_DISPLAY),
         SettingInfo::Enum(StrId::STR_SLEEP_COVER_MODE, &CrossPointSettings::sleepScreenCoverMode,
                           {StrId::STR_FIT, StrId::STR_CROP}, "sleepScreenCoverMode", StrId::STR_CAT_DISPLAY),
         SettingInfo::Enum(StrId::STR_SLEEP_COVER_FILTER, &CrossPointSettings::sleepScreenCoverFilter,

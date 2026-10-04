@@ -922,14 +922,12 @@ void SleepActivity::continueSlideshow() {
   // the APP_STATE/settings stores — per-frame sleeps perform no SD writes.
 
   // Battery cutoff first: the slideshow must not wake-loop a low battery.
-  const bool batteryOk = slideshow::allowedByBattery(powerManager.getBatteryPercentage(),
-                                                     gpio.isUsbConnected());
+  const bool batteryOk = slideshow::allowedByBattery(powerManager.getBatteryPercentage(), gpio.isUsbConnected());
   const slideshow::Order order = slideshow::orderClamped(SETTINGS.slideshowOrder);
   slideshow::RandomCycleState cycleOut;
-  const std::string next =
-      batteryOk ? imageonly::nextImageAfter(slideshow::getRetainedPath(), order,
-                                            slideshow::getRetainedCycle(), esp_random(), cycleOut)
-                : std::string();
+  const std::string next = batteryOk ? imageonly::nextImageAfter(slideshow::getRetainedPath(), order,
+                                                                 slideshow::getRetainedCycle(), esp_random(), cycleOut)
+                                     : std::string();
 
   // Decode and re-arm only when a next frame exists; either failing (or an
   // empty/missing source, or the battery cutoff) is one canonical termination.
@@ -937,14 +935,11 @@ void SleepActivity::continueSlideshow() {
   if (!next.empty()) {
     sleepTone = toneLutFromProfile(SETTINGS.sleepRenderProfile);
     buildToneLut(sleepTone);
-    frameOk = imageonly::renderImageFile(renderer, next, sleepTone) &&
-              slideshow::arm(next, slideshow::Mode::Sleep);
+    frameOk = imageonly::renderImageFile(renderer, next, sleepTone) && slideshow::arm(next, slideshow::Mode::Sleep);
   }
 
-  if (slideshow::sleepSlideshowOutcome(batteryOk, !next.empty(), frameOk) !=
-      slideshow::ContinueOutcome::Continue) {
-    return endSlideshowToStaticSleep(batteryOk ? (next.empty() ? "no next image" : "frame failed")
-                                               : "battery cutoff");
+  if (slideshow::sleepSlideshowOutcome(batteryOk, !next.empty(), frameOk) != slideshow::ContinueOutcome::Continue) {
+    return endSlideshowToStaticSleep(batteryOk ? (next.empty() ? "no next image" : "frame failed") : "battery cutoff");
   }
   // RTC-only cycle metadata update (no SD write); re-arming above preserves it.
   slideshow::setRetainedCycle(cycleOut);

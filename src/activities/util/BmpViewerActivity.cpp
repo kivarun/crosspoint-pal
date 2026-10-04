@@ -128,7 +128,7 @@ void BmpViewerActivity::computeModalRect() {
   const int height =
       std::min<int>(screenH, imageSettingsInput::modalBodyHeight(modalHeaderHeight(target), modalRowH, modalRowGap,
                                                                  static_cast<int>(ToneParam::Count)) +
-                                   border * 2 + 8);
+                                 border * 2 + 8);
 
   modalRect = fui::Rect{static_cast<int16_t>((screenW - width) / 2), static_cast<int16_t>((screenH - height) / 2),
                         static_cast<int16_t>(width), static_cast<int16_t>(height)};
@@ -181,10 +181,10 @@ void BmpViewerActivity::measureSlideshowExtents(const fui::DrawTarget& target, c
     maxLabelWidth = std::max<int16_t>(maxLabelWidth, target.measureText(labelStyle.font, label, labelStyle).width);
   }
   maxValueWidth = 0;
-  for (const char* value : {tr(STR_SLIDESHOW_INTERVAL_1_MIN), tr(STR_SLIDESHOW_INTERVAL_5_MIN),
-                            tr(STR_SLIDESHOW_INTERVAL_10_MIN), tr(STR_SLIDESHOW_INTERVAL_30_MIN),
-                            tr(STR_SLIDESHOW_ORDER_FORWARD), tr(STR_SLIDESHOW_ORDER_REVERSE),
-                            tr(STR_SLIDESHOW_ORDER_RANDOM)}) {
+  for (const char* value :
+       {tr(STR_SLIDESHOW_INTERVAL_1_MIN), tr(STR_SLIDESHOW_INTERVAL_5_MIN), tr(STR_SLIDESHOW_INTERVAL_10_MIN),
+        tr(STR_SLIDESHOW_INTERVAL_30_MIN), tr(STR_SLIDESHOW_ORDER_FORWARD), tr(STR_SLIDESHOW_ORDER_REVERSE),
+        tr(STR_SLIDESHOW_ORDER_RANDOM)}) {
     maxValueWidth = std::max<int16_t>(maxValueWidth, target.measureText(valueStyle.font, value, valueStyle).width);
   }
 }
@@ -291,9 +291,8 @@ void BmpViewerActivity::renderModal() {
     GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4);
   } else if (viewerPage == ViewerPage::Slideshow) {
     const auto slots = slideshow::pageHintSlots(modalRow);
-    const auto hint =
-        mappedInput.mapLabels(tr(STR_BACK), slots.confirmStart ? tr(STR_START) : "+", slots.stepperSlots ? "-" : "",
-                              slots.stepperSlots ? "+" : "");
+    const auto hint = mappedInput.mapLabels(tr(STR_BACK), slots.confirmStart ? tr(STR_START) : "+",
+                                            slots.stepperSlots ? "-" : "", slots.stepperSlots ? "+" : "");
     GUI.drawButtonHints(renderer, hint.btn1, hint.btn2, hint.btn3, hint.btn4, /*eraseUnused=*/true);
   } else if (viewerPage == ViewerPage::ImageInfo) {
     // Confirm SHOWS the selected row's detail.
@@ -991,12 +990,11 @@ void BmpViewerActivity::handleModalInput() {
   // routes on EVERY page — including informational pages with no selectable
   // rows (the Info detail view), whose only exit is Back; Confirm and the row
   // axes stay inert there.
-  const auto action =
-      imageSettingsInput::modalInputActionFor(
-          pageSelectableCount(), mappedInput.wasPressed(MappedInputManager::Button::NavPrevious),
-          mappedInput.wasPressed(MappedInputManager::Button::NavNext),
-          mappedInput.wasReleased(MappedInputManager::Button::Confirm),
-          mappedInput.wasReleased(MappedInputManager::Button::Back));
+  const auto action = imageSettingsInput::modalInputActionFor(
+      pageSelectableCount(), mappedInput.wasPressed(MappedInputManager::Button::NavPrevious),
+      mappedInput.wasPressed(MappedInputManager::Button::NavNext),
+      mappedInput.wasReleased(MappedInputManager::Button::Confirm),
+      mappedInput.wasReleased(MappedInputManager::Button::Back));
   const int rows = pageSelectableCount();
   switch (action) {
     case imageSettingsInput::ModalPageAction::Back:
@@ -1346,8 +1344,8 @@ void BmpViewerActivity::advanceSlideshowFrame() {
   // Nothing usable means the slideshow ends, fail closed.
   const slideshow::Order order = slideshow::orderClamped(SETTINGS.slideshowOrder);
   slideshow::RandomCycleState cycleOut;
-  const std::string next = imageonly::nextImageAfter(filePath, order, slideshow::getRetainedCycle(), esp_random(),
-                                                     cycleOut);
+  const std::string next =
+      imageonly::nextImageAfter(filePath, order, slideshow::getRetainedCycle(), esp_random(), cycleOut);
   if (next.empty()) {
     endViewerSlideshowToHome();
     return;

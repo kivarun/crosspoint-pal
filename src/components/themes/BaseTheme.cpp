@@ -739,9 +739,8 @@ Rect BaseTheme::drawPopup(const GfxRenderer& renderer, const char* message, cons
   const EpdFontFamily::Style popupFontFamily = metrics.popupTextBold ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR;
   const int textWidth = renderer.getTextWidth(UI_12_FONT_ID, message, popupFontFamily);
   const int textHeight = renderer.getLineHeight(UI_12_FONT_ID);
-  const Rect content =
-      popupRectFor(renderer.getScreenWidth(), renderer.getScreenHeight(), textWidth, textHeight, marginX, marginY,
-                   frameThickness, metrics.popupTopOffsetRatio, anchorRect);
+  const Rect content = popupRectFor(renderer.getScreenWidth(), renderer.getScreenHeight(), textWidth, textHeight,
+                                    marginX, marginY, frameThickness, metrics.popupTopOffsetRatio, anchorRect);
   const int x = content.x;
   const int y = content.y;
   const int w = content.width;

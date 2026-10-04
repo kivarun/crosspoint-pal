@@ -149,9 +149,7 @@ inline int modalBodyHeight(const int headerHeight, const int rowHeight, const in
 // There is no back/Done action here: Back is the physical Back key's page
 // route, and the historical hardware "Done" ghost traced to a screen-top
 // confirmation popup outside the modal rect, never to this dispatch.
-inline int infoDetailRowFor(const int row, const int infoRowCount) {
-  return row >= 0 && row < infoRowCount ? row : -1;
-}
+inline int infoDetailRowFor(const int row, const int infoRowCount) { return row >= 0 && row < infoRowCount ? row : -1; }
 
 // Modal row cadence (pure policy, host-tested): on touch-capable targets the
 // visual row height must be at least the device's touch minimum, so
@@ -269,8 +267,8 @@ inline DeleteAction deleteConfirmActionForRow(const int row) {
 // swallow it and trap the user on the detail view. Confirm and the row axes
 // stay inert when the page has no selectable rows.
 enum class ModalPageAction : uint8_t { None = 0, Back, RowUp, RowDown, Activate };
-inline ModalPageAction modalInputActionFor(const int selectableRows, const bool navPrevious,
-                                           const bool navNext, const bool confirm, const bool back) {
+inline ModalPageAction modalInputActionFor(const int selectableRows, const bool navPrevious, const bool navNext,
+                                           const bool confirm, const bool back) {
   if (back) return ModalPageAction::Back;
   if (selectableRows <= 0) return ModalPageAction::None;
   if (navPrevious) return ModalPageAction::RowUp;

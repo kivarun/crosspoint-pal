@@ -6,12 +6,11 @@
 #include <HalDisplay.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <esp_random.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-
-#include <esp_random.h>
 
 namespace imageonly {
 
@@ -219,8 +218,7 @@ std::string nextImageAfter(const std::string& currentPath, const slideshow::Orde
       // The CALLER's random value feeds a new cycle's increment (device RNG
       // ownership stays with the activity layer; the seam stays
       // deterministic/testable). Mid-cycle the pure policy ignores it.
-      const auto step =
-          slideshow::randomCycleNext(currentIndex, static_cast<int>(images.size()), cycle, randomValue);
+      const auto step = slideshow::randomCycleNext(currentIndex, static_cast<int>(images.size()), cycle, randomValue);
       if (step.index < 0) return {};
       cycleOut = step.state;
       nextIndex = step.index;

@@ -829,9 +829,8 @@ void loop() {
     // host-tested): Start/Continue RUN the slideshow and arm the persisted
     // interval; StaticSleep (battery cutoff) re-rendered the ordinary static
     // sleep screen — power-button only, no next timer wake.
-    enterHardwareDeepSleep(slideshow::sleepRequestArmsTimer(slideshowRequest)
-                               ? slideshow::intervalMicros(SETTINGS.slideshowInterval)
-                               : 0);
+    enterHardwareDeepSleep(
+        slideshow::sleepRequestArmsTimer(slideshowRequest) ? slideshow::intervalMicros(SETTINGS.slideshowInterval) : 0);
     return;
   }
 
