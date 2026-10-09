@@ -70,23 +70,27 @@ rtc32k::SlowClkSource mapSlowSource(const soc_rtc_slow_clk_src_t src) {
 // ---------------------------------------------------------------------------
 
 void Rtc32kDiagnosticsActivity::onEnter() {
-  // Session starts clean: the generator is OFF and nothing is owed to the
-  // firmware clock state. The read-only probes run before the first render so
-  // the opening frame already shows real values.
-  state_.reset();
+  // Entry snapshot: the REAL hardware enable state (rtc_clk_32k_enabled)
+  // seeds the screen, and ownership starts empty no matter what it reports —
+  // this activity never owns a generator it did not start. The slow-clock
+  // source is recorded for the read-only row; both are logged for the record.
+  state_ = rtc32k::DiagState::initial(rtc_clk_32k_enabled());
   probeRtc();
   slowSrc_ = mapSlowSource(rtc_clk_slow_src_get());
+  LOG_INF("RTC32K", "Entry: XTAL32K %s, slow clock %s", rtc32k::stateLabel(state_.xtalEnabled),
+          rtc32k::slowClockSourceName(slowSrc_));
   UiListActivity::onEnter();
 }
 
 void Rtc32kDiagnosticsActivity::onExit() {
-  // Undo ONLY what this activity did: if it enabled the generator, turn it
-  // off again. No persistent settings, no slow-clock changes, no pad work —
-  // GPIO15/16 belong to the XTAL32K oscillator and are never reconfigured.
-  if (rtc32k::shouldDisableOnExit(state_)) {
+  // Undo ONLY what this activity owns, and only if the slow clock has not
+  // meanwhile moved to XTAL32K: the source is re-checked LIVE here (same
+  // fail-safe as the Disable action), never trusted from the entry snapshot.
+  // No persistent settings, no pad work — GPIO15/16 belong to the XTAL32K
+  // oscillator and are never reconfigured.
+  if (rtc32k::shouldDisableOnExit(state_, rtc_clk_slow_src_get() == SOC_RTC_SLOW_CLK_SRC_XTAL32K)) {
     rtc_clk_32k_enable(false);
-    state_.markDisabled();
-    LOG_INF("RTC32K", "XTAL32K disabled on exit");
+    LOG_INF("RTC32K", "Exit: XTAL32K disabled (readback %s)", rtc_clk_32k_enabled() ? "ENABLED" : "DISABLED");
   }
   UiListActivity::onExit();
 }
@@ -110,24 +114,27 @@ void Rtc32kDiagnosticsActivity::probeRtc() {
 // Crystal mode enable: the pad pair is routed to the internal oscillator
 // (RTC_IO_X32P/X32N_MUX_SEL) and the oscillator core is powered up. This is
 // the stock ESP-IDF path (rtc_clk_32k_enable), NOT the single-ended
-// external-clock input mode (rtc_clk_32k_enable_external). The generator
-// stays on until Disable or exit so the technician can probe the crystal.
+// external-clock input mode (rtc_clk_32k_enable_external). Idempotent: an
+// already-enabled generator (whatever enabled it) is left untouched and stays
+// unowned. The displayed state is the hardware readback, not the request.
 void Rtc32kDiagnosticsActivity::doEnable() {
-  if (state_.xtalOn) {
-    LOG_DBG("RTC32K", "XTAL32K already on");
+  if (!state_.needsEnable()) {
+    LOG_DBG("RTC32K", "Enable no-op: rtc_clk_32k_enabled()=true");
     return;
   }
   rtc_clk_32k_enable(true);
-  state_.markEnabled();
-  LOG_INF("RTC32K", "XTAL32K enabled (crystal mode)");
+  const bool hwEnabled = rtc_clk_32k_enabled();
+  state_.applyEnableResult(hwEnabled);
+  LOG_INF("RTC32K", "XTAL32K enable (crystal mode): readback %s", hwEnabled ? "ENABLED" : "DISABLED");
   requestUpdate();
 }
 
 // Five independent RTC-calibration measurements of the XTAL32K clock. The
 // calibration peripheral times the 32k clock against the main crystal without
 // switching the system's RTC_SLOW_CLK source; every sample is stored, the
-// median and per-sample values are shown, and a dead oscillator times out
-// (period 0) instead of reporting a bogus frequency.
+// median and per-sample values are shown, and a sample without a valid
+// reading (hardware timeout OR the IDF ±0.05% validity gate) is recorded as
+// FAIL (period 0) instead of a bogus frequency.
 void Rtc32kDiagnosticsActivity::doCalibrate() {
   app.clearTapFlash();
   // Fresh per-run state BEFORE measuring: the screen shows THIS run's empty
@@ -135,13 +142,13 @@ void Rtc32kDiagnosticsActivity::doCalibrate() {
   state_.cal.beginRun();
   requestUpdate();
 
-  if (state_.xtalOn) {
+  if (state_.xtalEnabled) {
     // Let a freshly enabled crystal settle before the first measurement.
     vTaskDelay(pdMS_TO_TICKS(rtc32k::XTAL_STARTUP_SETTLE_MS));
   } else {
-    // Oscillator off: every sample will time out — an honest result, shown as
-    // such. The calibration never touches the oscillator state.
-    LOG_INF("RTC32K", "Calibrate with oscillator off: TIMEOUT expected");
+    // Oscillator disabled: every sample will fail — an honest result, shown
+    // as such. The calibration never touches the oscillator state.
+    LOG_INF("RTC32K", "Calibrate with oscillator disabled: FAIL expected");
   }
   for (size_t i = 0; i < rtc32k::CAL_SAMPLE_COUNT; i++) {
     const uint32_t period = rtc_clk_cal(RTC_CAL_32K_XTAL, rtc32k::CAL_CYCLES);
@@ -154,13 +161,26 @@ void Rtc32kDiagnosticsActivity::doCalibrate() {
   requestUpdate();
 }
 
-// Standard disable path (rtc_clk_32k_enable(false)): powers the oscillator
-// core down. The screen refreshes immediately; the pad pair stays in its
-// crystal-mux state — no GPIO reconfiguration.
+// Standard disable path (rtc_clk_32k_enable(false)). Fail-safe, re-checked
+// LIVE immediately before the hardware call: a generator feeding the system's
+// RTC_SLOW_CLK must never be powered down here. The displayed state is the
+// hardware readback, not the request; the pad pair stays in its crystal-mux
+// state — no GPIO reconfiguration.
 void Rtc32kDiagnosticsActivity::doDisable() {
+  if (rtc_clk_slow_src_get() == SOC_RTC_SLOW_CLK_SRC_XTAL32K) {
+    LOG_ERR("RTC32K", "Disable rejected: RTC_SLOW_CLK is XTAL32K (system-owned)");
+    requestUpdate();
+    return;
+  }
+  if (!state_.xtalEnabled) {
+    LOG_DBG("RTC32K", "Disable no-op: rtc_clk_32k_enabled()=false");
+    requestUpdate();
+    return;
+  }
   rtc_clk_32k_enable(false);
-  state_.markDisabled();
-  LOG_INF("RTC32K", "XTAL32K disabled");
+  const bool hwEnabled = rtc_clk_32k_enabled();
+  state_.applyDisableResult(hwEnabled);
+  LOG_INF("RTC32K", "XTAL32K disable: readback %s", hwEnabled ? "ENABLED" : "DISABLED");
   requestUpdate();
 }
 
@@ -181,7 +201,7 @@ void Rtc32kDiagnosticsActivity::buildScreen(UiScreen& screen) {
   // Diagnostic labels/values are support text — hardcoded English (About
   // precedent), showing RAW measurements, never only the verdict.
   rowItems_[ITEM_RTC].label = "RTC";
-  rowItems_[ITEM_STATE].label = "XTAL32K state";
+  rowItems_[ITEM_STATE].label = "XTAL32K enable state";
   rowItems_[ITEM_SRC].label = "RTC slow clock";
   rowItems_[ITEM_ENABLE].label = "XTAL32K enable";
   rowItems_[ITEM_CALIBRATE].label = "XTAL32K calibrate";
@@ -195,11 +215,15 @@ void Rtc32kDiagnosticsActivity::buildScreen(UiScreen& screen) {
   rowItems_[ITEM_CAL5].label = "Cal #5";
 
   rowItems_[ITEM_RTC].value = !rtcProbed_ ? "..." : rtcPresent_ ? "detected" : "not detected";
-  rowItems_[ITEM_STATE].value = rtc32k::stateLabel(state_.xtalOn);
+  // Enable state only (hardware readback): says nothing about a clock
+  // actually running — the Cal # rows carry that evidence.
+  rowItems_[ITEM_STATE].value = rtc32k::stateLabel(state_.xtalEnabled);
   rowItems_[ITEM_SRC].value = rtc32k::slowClockSourceName(slowSrc_);
   rowItems_[ITEM_ENABLE].value = "";
   rowItems_[ITEM_CALIBRATE].value = "";
-  rowItems_[ITEM_DISABLE].value = "";
+  // Fail-safe visibility: the Disable action is a no-op while the system's
+  // RTC_SLOW_CLK runs from XTAL32K (live re-check guards the actual call).
+  rowItems_[ITEM_DISABLE].value = slowSrc_ == rtc32k::SlowClkSource::Xtal32k ? "N/A - SYSTEM CLOCK" : "";
   rtc32k::formatCalMedian(calMedianBuf_, sizeof(calMedianBuf_), state_.cal);
   rowItems_[ITEM_CAL].value = calMedianBuf_;
   rowItems_[ITEM_RESULT].value = rtc32k::resultLabel(state_.cal);

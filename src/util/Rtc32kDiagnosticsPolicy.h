@@ -50,8 +50,8 @@ inline constexpr uint32_t XTAL_STARTUP_SETTLE_MS = 500;
 // metrology (a healthy 32.768 kHz crystal spreads ~1–2 Hz over five runs).
 inline constexpr uint32_t STABLE_SPREAD_HZ = 8;
 
-enum class CalStatus : uint8_t { NotRun = 0, Timeout = 1, Done = 2 };
-enum class CalQuality : uint8_t { Unknown = 0, Stable = 1, Unstable = 2, OutOfRange = 3 };
+enum class CalStatus : uint8_t { NotRun = 0, NoValid = 1, Done = 2 };
+enum class CalQuality : uint8_t { Unknown = 0, Stable = 1, Unstable = 2, OutOfRange = 3, Partial = 4 };
 
 // Result of one Calibrate action: up to CAL_SAMPLE_COUNT independent
 // measurements of the XTAL32K clock, each stored individually.
@@ -91,21 +91,22 @@ inline uint32_t calMedianHz(const CalRun& run) {
   std::sort(sorted, sorted + n);
   return n % 2 == 1 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
 }
-
-// NotRun — no measurements attempted; Timeout — attempted but none succeeded
-// (oscillator not running, hardware timeout, or failed validity check);
-// Done — at least one sample measured.
+// NotRun — no measurements attempted; NoValid — attempted but none succeeded
+// (oscillator not running, hardware timeout, or the IDF ±0.05% validity gate
+// rejected the reading — rtc_clk_cal() does not distinguish these, so the
+// display must not claim "no clock" or "timeout" specifically); Done — at
+// least one sample measured.
 inline constexpr CalStatus calStatus(const CalRun& run) {
   if (run.count == 0) return CalStatus::NotRun;
-  return run.okCount() > 0 ? CalStatus::Done : CalStatus::Timeout;
+  return run.okCount() > 0 ? CalStatus::Done : CalStatus::NoValid;
 }
 
-// Honest quality classification of a Done run (never a PASS claim):
-//   Stable     — median inside the window and the samples agree;
-//   Unstable   — median inside the window but the samples wander;
-//   OutOfRange — median outside the window.
+// Honest quality classification (never a PASS claim). Fail-closed: STABLE
+// requires ALL samples valid, a median inside the window, and agreement —
+// any failed sample caps the result at Partial, never Stable.
 inline CalQuality calQuality(const CalRun& run) {
   if (calStatus(run) != CalStatus::Done) return CalQuality::Unknown;
+  if (run.okCount() < CAL_SAMPLE_COUNT) return CalQuality::Partial;
   const uint32_t median = calMedianHz(run);
   if (!rawWindowOk(median)) return CalQuality::OutOfRange;
   uint32_t lo = UINT32_MAX;
@@ -124,30 +125,53 @@ inline CalQuality calQuality(const CalRun& run) {
 // calls the hardware API exactly where these transitions are invoked; the
 // transitions themselves are the host-tested contract.
 struct DiagState {
-  bool xtalOn = false;                 // generator state shown on screen
-  bool enabledByThisActivity = false;  // exit cleanup owns the undo
+  bool xtalEnabled = false;      // last rtc_clk_32k_enabled() readback
+  bool ownedByActivity = false;  // this activity started a previously-OFF generator
   CalRun cal{};
 
-  void reset() { *this = DiagState{}; }
-
-  void markEnabled() {
-    xtalOn = true;
-    enabledByThisActivity = true;
+  // Entry snapshot: ownership starts empty no matter what the hardware
+  // reports — an activity never owns a generator it did not start.
+  static DiagState initial(const bool hwEnabled) {
+    DiagState s;
+    s.xtalEnabled = hwEnabled;
+    return s;
   }
 
-  void markDisabled() {
-    xtalOn = false;
-    enabledByThisActivity = false;
+  // Enable is a no-op while the hardware reports the generator enabled
+  // (whether this activity or anything else enabled it).
+  bool needsEnable() const { return !xtalEnabled; }
+
+  // Apply the rtc_clk_32k_enabled() readback after an enable requested from
+  // the OFF state: only a confirmed start claims ownership.
+  void applyEnableResult(const bool hwEnabled) {
+    xtalEnabled = hwEnabled;
+    ownedByActivity = hwEnabled;
+  }
+
+  // Apply the readback after a disable request: ownership persists until the
+  // hardware confirms OFF (a failed disable is retried at exit).
+  void applyDisableResult(const bool hwEnabled) {
+    xtalEnabled = hwEnabled;
+    if (!hwEnabled) ownedByActivity = false;
   }
 };
 
-// Exit-cleanup contract: undo the oscillator enable only when THIS activity
-// enabled it — never touch a generator the rest of the firmware runs.
-inline constexpr bool shouldDisableOnExit(const DiagState& state) { return state.enabledByThisActivity; }
+// Fail-safe guard for ANY disable (button or exit): `slowSrcIsXtal32kNow`
+// comes from a LIVE rtc_clk_slow_src_get() re-checked immediately before the
+// hardware call — a generator feeding the system's RTC_SLOW_CLK must never be
+// powered down by the diagnostics screen.
+inline constexpr bool mayDisable(const bool slowSrcIsXtal32kNow) { return !slowSrcIsXtal32kNow; }
 
+// Exit cleanup: undo only an activity-owned enable, and never when the slow
+// clock source is now XTAL32K (live re-check at exit, same guard as Disable).
+inline constexpr bool shouldDisableOnExit(const DiagState& state, const bool slowSrcIsXtal32kNow) {
+  return state.ownedByActivity && mayDisable(slowSrcIsXtal32kNow);
+}
 // --- display formatting ------------------------------------------------------
 
-inline const char* stateLabel(const bool on) { return on ? "ON" : "OFF"; }
+// Enable state only: "ENABLED"/"DISABLED" deliberately says nothing about a
+// clock actually running — only calibration can demonstrate oscillation.
+inline const char* stateLabel(const bool enabled) { return enabled ? "ENABLED" : "DISABLED"; }
 
 // RTC slow clock source (read-only display). Numeric values mirror
 // soc_rtc_slow_clk_src_t on the S3.
@@ -166,28 +190,30 @@ inline const char* slowClockSourceName(const SlowClkSource src) {
   }
 }
 
-// Per-sample row value: "-" before that sample, "TIMEOUT" when the
-// calibration produced no measurement, "<n> Hz" otherwise.
+// Per-sample row value: "-" before that sample, "FAIL" when the calibration
+// produced no measurement (rtc_clk_cal() does not distinguish a hardware
+// timeout from a validity-gate rejection, so the sample text must not either),
+// "<n> Hz" otherwise.
 inline void formatCalSample(char* buf, const size_t n, const CalRun& run, const size_t index) {
   if (index >= run.count) {
     snprintf(buf, n, "-");
     return;
   }
   if (!run.ok[index]) {
-    snprintf(buf, n, "TIMEOUT");
+    snprintf(buf, n, "FAIL");
     return;
   }
   snprintf(buf, n, "%lu Hz", static_cast<unsigned long>(run.hz[index]));
 }
 
-// Median line: "NOT RUN" / "TIMEOUT" / "<n> Hz" — never "0 Hz".
+// Median line: "NOT RUN" / "NO VALID 32K" / "<n> Hz" — never "0 Hz".
 inline void formatCalMedian(char* buf, const size_t n, const CalRun& run) {
   switch (calStatus(run)) {
     case CalStatus::NotRun:
       snprintf(buf, n, "NOT RUN");
       break;
-    case CalStatus::Timeout:
-      snprintf(buf, n, "TIMEOUT");
+    case CalStatus::NoValid:
+      snprintf(buf, n, "NO VALID 32K");
       break;
     case CalStatus::Done:
       snprintf(buf, n, "%lu Hz", static_cast<unsigned long>(calMedianHz(run)));
@@ -201,8 +227,8 @@ inline const char* resultLabel(const CalRun& run) {
   switch (calStatus(run)) {
     case CalStatus::NotRun:
       return "NOT RUN";
-    case CalStatus::Timeout:
-      return "TIMEOUT - NO CLOCK";
+    case CalStatus::NoValid:
+      return "NO VALID 32K";
     case CalStatus::Done:
       break;
   }
@@ -211,8 +237,10 @@ inline const char* resultLabel(const CalRun& run) {
       return "STABLE";
     case CalQuality::Unstable:
       return "UNSTABLE";
-    default:
+    case CalQuality::OutOfRange:
       return "OUT OF RANGE";
+    default:
+      return "PARTIAL";
   }
 }
 
