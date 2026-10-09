@@ -114,12 +114,17 @@ void Rtc32kDiagnosticsActivity::probeRtc() {
 // Crystal mode enable: the pad pair is routed to the internal oscillator
 // (RTC_IO_X32P/X32N_MUX_SEL) and the oscillator core is powered up. This is
 // the stock ESP-IDF path (rtc_clk_32k_enable), NOT the single-ended
-// external-clock input mode (rtc_clk_32k_enable_external). Idempotent: an
-// already-enabled generator (whatever enabled it) is left untouched and stays
-// unowned. The displayed state is the hardware readback, not the request.
+// external-clock input mode (rtc_clk_32k_enable_external). The LIVE
+// rtc_clk_32k_enabled() readback taken immediately before the request closes
+// the stale-state window between onEnter() and this press: an already-enabled
+// generator is adopted without ownership and the hardware call is skipped.
+// Ownership is claimed only for a confirmed start from the OFF state; the
+// displayed state is always a hardware readback, never the request.
 void Rtc32kDiagnosticsActivity::doEnable() {
-  if (!state_.needsEnable()) {
-    LOG_DBG("RTC32K", "Enable no-op: rtc_clk_32k_enabled()=true");
+  if (rtc_clk_32k_enabled()) {
+    state_.observeEnabled(true);
+    LOG_INF("RTC32K", "Enable no-op: hardware already ENABLED (no ownership change)");
+    requestUpdate();
     return;
   }
   rtc_clk_32k_enable(true);
@@ -161,14 +166,17 @@ void Rtc32kDiagnosticsActivity::doCalibrate() {
   requestUpdate();
 }
 
-// Standard disable path (rtc_clk_32k_enable(false)). Fail-safe, re-checked
-// LIVE immediately before the hardware call: a generator feeding the system's
-// RTC_SLOW_CLK must never be powered down here. The displayed state is the
-// hardware readback, not the request; the pad pair stays in its crystal-mux
-// state — no GPIO reconfiguration.
+// Standard disable path (rtc_clk_32k_enable(false)). BOTH guard conditions
+// are evaluated against live hardware state immediately before the call: the
+// generator must be owned by this activity (a pre-enabled one is never powered
+// down here) and must not feed the system's RTC_SLOW_CLK. The displayed state
+// is the hardware readback, not the request; the pad pair stays in its
+// crystal-mux state — no GPIO reconfiguration.
 void Rtc32kDiagnosticsActivity::doDisable() {
-  if (rtc_clk_slow_src_get() == SOC_RTC_SLOW_CLK_SRC_XTAL32K) {
-    LOG_ERR("RTC32K", "Disable rejected: RTC_SLOW_CLK is XTAL32K (system-owned)");
+  const bool slowSrcIsXtal32k = rtc_clk_slow_src_get() == SOC_RTC_SLOW_CLK_SRC_XTAL32K;
+  if (!rtc32k::mayDisable(state_, slowSrcIsXtal32k)) {
+    LOG_INF("RTC32K", "Disable rejected: %s",
+            slowSrcIsXtal32k ? "RTC_SLOW_CLK is XTAL32K (system-owned)" : "generator was not enabled by this activity");
     requestUpdate();
     return;
   }
@@ -213,17 +221,19 @@ void Rtc32kDiagnosticsActivity::buildScreen(UiScreen& screen) {
   rowItems_[ITEM_CAL3].label = "Cal #3";
   rowItems_[ITEM_CAL4].label = "Cal #4";
   rowItems_[ITEM_CAL5].label = "Cal #5";
-
   rowItems_[ITEM_RTC].value = !rtcProbed_ ? "..." : rtcPresent_ ? "detected" : "not detected";
   // Enable state only (hardware readback): says nothing about a clock
   // actually running — the Cal # rows carry that evidence.
   rowItems_[ITEM_STATE].value = rtc32k::stateLabel(state_.xtalEnabled);
+  // Live slow-clock source — the same read the hardware guards use, so the
+  // display and the guards can never disagree.
+  slowSrc_ = mapSlowSource(rtc_clk_slow_src_get());
   rowItems_[ITEM_SRC].value = rtc32k::slowClockSourceName(slowSrc_);
   rowItems_[ITEM_ENABLE].value = "";
   rowItems_[ITEM_CALIBRATE].value = "";
-  // Fail-safe visibility: the Disable action is a no-op while the system's
-  // RTC_SLOW_CLK runs from XTAL32K (live re-check guards the actual call).
-  rowItems_[ITEM_DISABLE].value = slowSrc_ == rtc32k::SlowClkSource::Xtal32k ? "N/A - SYSTEM CLOCK" : "";
+  // Disable hint mirrors the guard: system clock wins, then a generator this
+  // activity does not own (pre-enabled at entry or observed enabled later).
+  rowItems_[ITEM_DISABLE].value = rtc32k::disableRowValue(state_, slowSrc_ == rtc32k::SlowClkSource::Xtal32k);
   rtc32k::formatCalMedian(calMedianBuf_, sizeof(calMedianBuf_), state_.cal);
   rowItems_[ITEM_CAL].value = calMedianBuf_;
   rowItems_[ITEM_RESULT].value = rtc32k::resultLabel(state_.cal);

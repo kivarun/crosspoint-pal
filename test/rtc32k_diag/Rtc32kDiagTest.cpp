@@ -47,11 +47,54 @@ TEST(Xtal32kPeriod, Nominal32768PeriodConvertsExactly) {
 
 // --- ownership: entry state, Enable, Disable, exit (cases A, B, C, D, I) -----
 
-// A. Initial hardware OFF -> Enable -> owned -> exit requires disable.
+// A (corrective). Initial hardware ON, not owned, slow source RC: Disable must
+// not touch the hardware, and the exit path owes nothing.
+TEST(Xtal32kOwnership, InitialOnDisableIsBlockedAndExitDoesNothing) {
+  DiagState s = DiagState::initial(true);
+  EXPECT_FALSE(s.ownedByActivity);
+  EXPECT_FALSE(rtc32k::mayDisable(s, false));
+  EXPECT_STREQ(rtc32k::disableRowValue(s, false), "N/A - PRE-ENABLED");
+  EXPECT_FALSE(rtc32k::shouldDisableOnExit(s, false));
+}
+
+// B (corrective). Initial OFF, activity enables with confirmed readback,
+// slow source RC: Disable is allowed.
+TEST(Xtal32kOwnership, OwnedEnableAllowsDisable) {
+  DiagState s = DiagState::initial(false);
+  s.applyEnableResult(true);
+  EXPECT_TRUE(s.ownedByActivity);
+  EXPECT_TRUE(rtc32k::mayDisable(s, false));
+  EXPECT_STREQ(rtc32k::disableRowValue(s, false), "");
+}
+
+// C (corrective). Owned enable, but the slow clock source is (or moved to)
+// XTAL32K: Disable must not touch the hardware.
+TEST(Xtal32kOwnership, OwnedEnableStillBlockedBySystemSlowClock) {
+  DiagState s = DiagState::initial(false);
+  s.applyEnableResult(true);
+  EXPECT_TRUE(s.ownedByActivity);
+  EXPECT_FALSE(rtc32k::mayDisable(s, true));
+  EXPECT_STREQ(rtc32k::disableRowValue(s, true), "N/A - SYSTEM CLOCK");
+  EXPECT_FALSE(rtc32k::shouldDisableOnExit(s, true));
+}
+
+// D (corrective). Entry snapshot OFF, but the live readback taken before the
+// Enable request is already ON: no enable hardware call happens, the observed
+// state is adopted, and ownership stays empty.
+TEST(Xtal32kOwnership, LiveReadbackOnBeforeEnableAdoptsWithoutOwnership) {
+  DiagState s = DiagState::initial(false);
+  s.observeEnabled(true);  // what doEnable() does instead of the hardware call
+  EXPECT_TRUE(s.xtalEnabled);
+  EXPECT_FALSE(s.ownedByActivity);
+  EXPECT_FALSE(rtc32k::mayDisable(s, false));
+  EXPECT_STREQ(rtc32k::disableRowValue(s, false), "N/A - PRE-ENABLED");
+  EXPECT_FALSE(rtc32k::shouldDisableOnExit(s, false));
+}
+
+// Initial OFF -> Enable -> owned -> exit requires disable.
 TEST(Xtal32kOwnership, InitialOffEnableClaimsOwnershipAndExitUndoes) {
   DiagState s = DiagState::initial(false);
   EXPECT_FALSE(s.xtalEnabled);
-  EXPECT_TRUE(s.needsEnable());
   // Enable action: hardware call, then the rtc_clk_32k_enabled() readback.
   s.applyEnableResult(true);
   EXPECT_TRUE(s.xtalEnabled);
@@ -62,30 +105,30 @@ TEST(Xtal32kOwnership, InitialOffEnableClaimsOwnershipAndExitUndoes) {
   EXPECT_TRUE(rtc32k::shouldDisableOnExit(s, false));
 }
 
-// B. Initial hardware ON -> Enable is a no-op and claims NOTHING; exit must
-// not disable.
+// Initial hardware ON -> Enable is a no-op and claims NOTHING; exit must not
+// disable.
 TEST(Xtal32kOwnership, InitialOnEnableIsNoOpAndNeverOwned) {
   DiagState s = DiagState::initial(true);
   EXPECT_TRUE(s.xtalEnabled);
-  EXPECT_FALSE(s.needsEnable());  // Enable action stops here: no hardware call
-  // No applyEnableResult call can have happened, so ownership stays unclaimed
-  // and the exit path owes nothing.
+  // The live readback before the action reports ENABLED: the request stops
+  // there, the state is re-adopted, ownership stays unclaimed.
+  s.observeEnabled(true);
+  EXPECT_TRUE(s.xtalEnabled);
   EXPECT_FALSE(s.ownedByActivity);
+  EXPECT_FALSE(rtc32k::mayDisable(s, false));
   EXPECT_FALSE(rtc32k::shouldDisableOnExit(s, false));
 }
 
-// C. Initial slow source XTAL32K -> Disable rejected, exit must not disable.
+// Generator feeding the system slow clock: no disable may run, neither from
+// the button nor from the exit path — ownership alone is not sufficient.
 TEST(Xtal32kOwnership, SystemSlowClockBlocksDisableAndExit) {
   DiagState s = DiagState::initial(true);  // generator feeds the system slow clock
-  // The live rtc_clk_slow_src_get() result says XTAL32K: no disable may run,
-  // neither from the button nor from the exit path.
-  EXPECT_FALSE(rtc32k::mayDisable(true));
+  EXPECT_FALSE(rtc32k::mayDisable(s, true));
   EXPECT_FALSE(rtc32k::shouldDisableOnExit(s, true));
-  // The same generator with a non-XTAL32K slow clock stays disableable.
-  EXPECT_TRUE(rtc32k::mayDisable(false));
+  EXPECT_STREQ(rtc32k::disableRowValue(s, true), "N/A - SYSTEM CLOCK");
 }
 
-// D. Slow source changed to XTAL32K after an owned enable -> exit must not
+// Slow source changed to XTAL32K after an owned enable -> exit must not
 // disable (live re-check, not the entry snapshot).
 TEST(Xtal32kOwnership, SlowClockMovedToXtal32kBeforeExitBlocksDisable) {
   DiagState s = DiagState::initial(false);
@@ -125,6 +168,17 @@ TEST(Xtal32kOwnership, DisableNeverStripsOwnershipWhileHardwareStillEnabled) {
   s.applyEnableResult(true);
   s.applyDisableResult(true);  // hardware kept running
   EXPECT_TRUE(rtc32k::shouldDisableOnExit(s, false));
+}
+
+// An observation of DISABLED (whatever caused it) also releases ownership:
+// there is nothing left to undo.
+TEST(Xtal32kOwnership, ObservedDisabledReleasesOwnership) {
+  DiagState s = DiagState::initial(false);
+  s.applyEnableResult(true);
+  s.observeEnabled(false);
+  EXPECT_FALSE(s.xtalEnabled);
+  EXPECT_FALSE(s.ownedByActivity);
+  EXPECT_FALSE(rtc32k::shouldDisableOnExit(s, false));
 }
 
 // --- calibration runs --------------------------------------------------------

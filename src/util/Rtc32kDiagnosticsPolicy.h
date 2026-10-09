@@ -137,9 +137,15 @@ struct DiagState {
     return s;
   }
 
-  // Enable is a no-op while the hardware reports the generator enabled
-  // (whether this activity or anything else enabled it).
-  bool needsEnable() const { return !xtalEnabled; }
+  // Adopt a hardware-observed enable state WITHOUT claiming ownership: the
+  // live readback (taken before an enable request) showed the generator
+  // already enabled — it was started by something else, or the entry snapshot
+  // went stale. An observed DISABLED also drops any ownership claim: there is
+  // nothing left to undo.
+  void observeEnabled(const bool hwEnabled) {
+    xtalEnabled = hwEnabled;
+    if (!hwEnabled) ownedByActivity = false;
+  }
 
   // Apply the rtc_clk_32k_enabled() readback after an enable requested from
   // the OFF state: only a confirmed start claims ownership.
@@ -156,17 +162,30 @@ struct DiagState {
   }
 };
 
-// Fail-safe guard for ANY disable (button or exit): `slowSrcIsXtal32kNow`
-// comes from a LIVE rtc_clk_slow_src_get() re-checked immediately before the
-// hardware call — a generator feeding the system's RTC_SLOW_CLK must never be
-// powered down by the diagnostics screen.
-inline constexpr bool mayDisable(const bool slowSrcIsXtal32kNow) { return !slowSrcIsXtal32kNow; }
-
-// Exit cleanup: undo only an activity-owned enable, and never when the slow
-// clock source is now XTAL32K (live re-check at exit, same guard as Disable).
-inline constexpr bool shouldDisableOnExit(const DiagState& state, const bool slowSrcIsXtal32kNow) {
-  return state.ownedByActivity && mayDisable(slowSrcIsXtal32kNow);
+// Fail-safe + ownership guard for ANY disable (button or exit). BOTH conditions
+// must hold, with `slowSrcIsXtal32kNow` taken from a LIVE
+// rtc_clk_slow_src_get() re-checked immediately before the hardware call:
+//   - this activity started the generator (ownedByActivity) — a generator
+//     that was already enabled at entry or was observed enabled mid-session
+//     is never powered down here;
+//   - the generator does not feed the system's RTC_SLOW_CLK.
+inline constexpr bool mayDisable(const DiagState& state, const bool slowSrcIsXtal32kNow) {
+  return state.ownedByActivity && !slowSrcIsXtal32kNow;
 }
+
+// Exit cleanup: the same contract as the Disable action.
+inline constexpr bool shouldDisableOnExit(const DiagState& state, const bool slowSrcIsXtal32kNow) {
+  return mayDisable(state, slowSrcIsXtal32kNow);
+}
+
+// Disable row hint: actionable only for an activity-owned generator with a
+// non-XTAL32K system slow clock; otherwise the row explains why it no-ops.
+inline const char* disableRowValue(const DiagState& state, const bool slowSrcIsXtal32kNow) {
+  if (slowSrcIsXtal32kNow) return "N/A - SYSTEM CLOCK";
+  if (state.xtalEnabled && !state.ownedByActivity) return "N/A - PRE-ENABLED";
+  return "";
+}
+
 // --- display formatting ------------------------------------------------------
 
 // Enable state only: "ENABLED"/"DISABLED" deliberately says nothing about a

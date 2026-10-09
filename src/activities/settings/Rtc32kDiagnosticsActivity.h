@@ -54,7 +54,7 @@ class Rtc32kDiagnosticsActivity final : public UiListActivity {
   char calMedianBuf_[24];
   char calSampleBuf_[rtc32k::CAL_SAMPLE_COUNT][20];
   rtc32k::DiagState state_{};
-  rtc32k::SlowClkSource slowSrc_ = rtc32k::SlowClkSource::Invalid;
+  rtc32k::SlowClkSource slowSrc_ = rtc32k::SlowClkSource::Invalid;  // live, refreshed per build
   bool rtcProbed_ = false;
   bool rtcPresent_ = false;
 };
