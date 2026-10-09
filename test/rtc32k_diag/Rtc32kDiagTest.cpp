@@ -1,267 +1,228 @@
 #include <gtest/gtest.h>
 
-#include <algorithm>
 #include <cstdint>
 
 #include "util/Rtc32kDiagnosticsPolicy.h"
 
-using rtc32k::classify;
-using rtc32k::LinkCounts;
-using rtc32k::LinkProbeResult;
-using rtc32k::percentileFromSorted;
-using rtc32k::rawEstimateHz;
-using rtc32k::rawWindowOk;
-using rtc32k::RunState;
-using rtc32k::swingMv;
-using rtc32k::Verdict;
+using rtc32k::CalQuality;
+using rtc32k::CalRun;
+using rtc32k::CalStatus;
+using rtc32k::DiagState;
+using rtc32k::SlowClkSource;
 
-TEST(Rtc32kRawWindow, WideAcceptanceWindow) {
-  EXPECT_FALSE(rawWindowOk(0));
-  EXPECT_FALSE(rawWindowOk(29999));
-  EXPECT_TRUE(rawWindowOk(30000));
-  EXPECT_TRUE(rawWindowOk(32768));
-  EXPECT_TRUE(rawWindowOk(35000));
-  EXPECT_FALSE(rawWindowOk(35001));
+namespace {
+
+CalRun allOk(const uint32_t (&hz)[rtc32k::CAL_SAMPLE_COUNT]) {
+  CalRun run;
+  for (size_t i = 0; i < rtc32k::CAL_SAMPLE_COUNT; i++) run.record(true, hz[i]);
+  return run;
 }
 
-TEST(Rtc32kRawEstimate, WindowCountScalesToHz) {
-  EXPECT_EQ(rawEstimateHz(0), 0u);
-  EXPECT_EQ(rawEstimateHz(3277), 32770u);
-  EXPECT_EQ(rawEstimateHz(100), 1000u);
+CalRun allTimeout() {
+  CalRun run;
+  for (size_t i = 0; i < rtc32k::CAL_SAMPLE_COUNT; i++) run.record(false, 0);
+  return run;
 }
 
-TEST(Rtc32kMedian, MedianOfTenCounts) {
-  uint32_t nominal[10] = {3275, 3278, 3276, 3277, 3279, 3276, 3278, 3277, 3275, 3278};
-  EXPECT_EQ(rtc32k::medianOf10(nominal), 3277u);  // (3277+3277)/2
-  uint32_t dropout[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 3};
-  EXPECT_EQ(rtc32k::medianOf10(dropout), 0u);  // old unsoldered trace: units of edges
-  uint32_t symmetric[10] = {5, 4, 3, 2, 1, 10, 9, 8, 7, 6};
-  EXPECT_EQ(rtc32k::medianOf10(symmetric), 5u);  // (5+6)/2
+}  // namespace
+
+// --- period conversion -------------------------------------------------------
+
+TEST(Xtal32kPeriod, ZeroPeriodStaysZero) {
+  // rtc_clk_cal() returns 0 on hardware timeout / failed validity check; that
+  // sentinel must never turn into a plausible-looking frequency.
+  EXPECT_EQ(rtc32k::periodToHz(0), 0u);
 }
 
-TEST(Rtc32kClassify, ExtOscOwnsVerdict) {
-  // PCNT counts through the ordinary digital GPIO path (informational); the
-  // EXT_OSC calibration is the actual acceptance test of the XTAL_32K_P input
-  // path, so only EXT_OSC owns PASS. The ten cases pin the exact contract.
-  // 1: RTC unavailable -> FAIL whatever the readings say.
-  EXPECT_EQ(classify(false, true, 32768, 32768), Verdict::Fail);
-  // 2: CLKOUT control failed -> FAIL.
-  EXPECT_EQ(classify(true, false, 32768, 32768), Verdict::Fail);
-  // 3: both readings in window -> PASS.
-  EXPECT_EQ(classify(true, true, 32768, 32768), Verdict::Pass);
-  // 4 (KEY): digital GPIO sees nothing, EXT_OSC accepts -> PASS.
-  EXPECT_EQ(classify(true, true, 0, 32768), Verdict::Pass);
-  // 5: a few Hz of digital noise, EXT_OSC accepts -> PASS.
-  EXPECT_EQ(classify(true, true, 25, 32766), Verdict::Pass);
-  // 6: raw in window, calibration timed out (0) -> PARTIAL.
-  EXPECT_EQ(classify(true, true, 32768, 0), Verdict::Partial);
-  // 7: raw in window, calibration measured out of window -> PARTIAL.
-  EXPECT_EQ(classify(true, true, 32768, 25000), Verdict::Partial);
-  // 8: nothing anywhere -> FAIL.
-  EXPECT_EQ(classify(true, true, 0, 0), Verdict::Fail);
-  // 9: digital noise only, no calibration -> FAIL.
-  EXPECT_EQ(classify(true, true, 5, 0), Verdict::Fail);
-  // 10: both readings out of window -> FAIL.
-  EXPECT_EQ(classify(true, true, 25000, 29000), Verdict::Fail);
+TEST(Xtal32kPeriod, Nominal32768PeriodConvertsExactly) {
+  // Q19.13 period of 1/32768 s = 30.517578125 us -> 16000000 counts.
+  EXPECT_EQ(rtc32k::periodToHz(16000000), 32768u);
+  EXPECT_EQ(rtc32k::periodToHz(32000000), 16384u);
+  // A few hardware steps (~12.8 period-counts per 40 MHz XTAL cycle at 1024
+  // slow-clock cycles) land on the neighbouring integer Hz readings.
+  EXPECT_EQ(rtc32k::periodToHz(15999500), 32769u);
+  EXPECT_EQ(rtc32k::periodToHz(16000500), 32766u);
 }
 
-// Mirrors the device wiring of runDiagnostics(): every pass starts with
-// RunState::reset() before any transaction, so a run that fails at its first
-// I2C operation classifies from an empty state and can never display the
-// previous run's samples or calibration.
-TEST(Rtc32kRunLifecycle, FailedRunNeverShowsStaleMeasurements) {
-  RunState run;
+// --- session state -----------------------------------------------------------
 
-  // Fresh success: enable ok, ten full-count windows, calibration accepted.
-  run.reset();
-  run.rtcOk = true;
-  run.clkoutOk = true;
-  for (auto& c : run.edgeCounts) c = 3277u;
-  run.calHz = 32766u;
-  uint32_t rawHz = rtc32k::rawEstimateHz(rtc32k::medianOf10(run.edgeCounts));
-  EXPECT_EQ(classify(run.rtcOk, run.clkoutOk, rawHz, run.calHz), Verdict::Pass);
-
-  // Run again -> success again: reset must not prevent a repeat PASS.
-  run.reset();
-  run.rtcOk = true;
-  run.clkoutOk = true;
-  for (auto& c : run.edgeCounts) c = 3276u;
-  run.calHz = 32768u;
-  rawHz = rtc32k::rawEstimateHz(rtc32k::medianOf10(run.edgeCounts));
-  EXPECT_EQ(classify(run.rtcOk, run.clkoutOk, rawHz, run.calHz), Verdict::Pass);
-
-  // Run again -> RTC/I2C failure on this pass: reset() zeroes everything
-  // first, the failure leaves both flags down, and classify FAILs with no
-  // stale samples, calibration, link counts or link verdict anywhere.
-  run.reset();
-  EXPECT_FALSE(run.rtcOk);
-  EXPECT_FALSE(run.clkoutOk);
-  for (const auto& c : run.edgeCounts) {
-    EXPECT_EQ(c, 0u);
-  }
-  EXPECT_EQ(run.calHz, 0u);
-  EXPECT_EQ(run.calNoPullHz, 0u);
-  EXPECT_EQ(run.link.off1, 0u);
-  EXPECT_EQ(run.link.hz32, 0u);
-  EXPECT_EQ(run.link.hz1024, 0u);
-  EXPECT_EQ(run.link.hz32768, 0u);
-  EXPECT_EQ(run.link.off2, 0u);
-  EXPECT_EQ(run.linkResult, LinkProbeResult::Unavailable);
-  rawHz = rtc32k::rawEstimateHz(rtc32k::medianOf10(run.edgeCounts));
-  EXPECT_EQ(classify(run.rtcOk, run.clkoutOk, rawHz, run.calHz), Verdict::Fail);
-
-  // Run again -> CLKOUT control failure: RTC still answers (flag up), output
-  // cannot be re-enabled (flag down), measurements stay empty -> FAIL.
-  run.reset();
-  run.rtcOk = true;
-  EXPECT_EQ(classify(run.rtcOk, run.clkoutOk, 0u, 0u), Verdict::Fail);
+TEST(Xtal32kSession, InitialStateIsOffAndUntouched) {
+  DiagState s;
+  EXPECT_FALSE(s.xtalOn);
+  EXPECT_FALSE(s.enabledByThisActivity);
+  EXPECT_EQ(calStatus(s.cal), CalStatus::NotRun);
+  EXPECT_EQ(calQuality(s.cal), CalQuality::Unknown);
+  EXPECT_EQ(calMedianHz(s.cal), 0u);
+  EXPECT_FALSE(rtc32k::shouldDisableOnExit(s));
 }
 
-TEST(Rtc32kLinkProbe, NominalSequenceFollowed) {
-  // Nominal follow with realistic imperfections and tolerated OFF noise.
-  LinkCounts c;
-  c.off1 = 0;
-  c.hz32 = 31;
-  c.hz1024 = 1026;
-  c.hz32768 = 3275;
-  c.off2 = 2;
-  EXPECT_EQ(rtc32k::linkFollows(c), LinkProbeResult::Followed);
-  // OFF noise exactly at the tolerated ceiling still follows.
-  c.off1 = 16;
-  c.off2 = 16;
-  EXPECT_EQ(rtc32k::linkFollows(c), LinkProbeResult::Followed);
+TEST(Xtal32kSession, EnableMarksStateAndExitOwnership) {
+  DiagState s;
+  s.markEnabled();
+  EXPECT_TRUE(s.xtalOn);
+  EXPECT_TRUE(s.enabledByThisActivity);
+  EXPECT_TRUE(rtc32k::shouldDisableOnExit(s));
+  // Repeated enable is idempotent at the state level.
+  s.markEnabled();
+  EXPECT_TRUE(s.xtalOn);
+  EXPECT_TRUE(rtc32k::shouldDisableOnExit(s));
 }
 
-TEST(Rtc32kLinkProbe, NotFollowedCases) {
-  // All-zero counts (the reset/unavailable state) can never be Followed.
-  EXPECT_EQ(rtc32k::linkFollows(LinkCounts{}), LinkProbeResult::NotFollowed);
-  // Floating-pin noise: no commanded frequency reproduced.
-  LinkCounts floating{2, 3, 5, 4, 1};
-  EXPECT_EQ(rtc32k::linkFollows(floating), LinkProbeResult::NotFollowed);
-  // Only one random frequency point matches -> not a link.
-  LinkCounts single{0, 0, 1020, 0, 0};
-  EXPECT_EQ(rtc32k::linkFollows(single), LinkProbeResult::NotFollowed);
-  // Wrong frequency mapping (32 Hz reading at the 1024 Hz stage).
-  LinkCounts crossed{0, 1026, 31, 3275, 0};
-  EXPECT_EQ(rtc32k::linkFollows(crossed), LinkProbeResult::NotFollowed);
-  // 32 kHz stage counting at full rate (out of band above).
-  LinkCounts fullRate{0, 31, 1024, 32770, 0};
-  EXPECT_EQ(rtc32k::linkFollows(fullRate), LinkProbeResult::NotFollowed);
-  // Sustained front stream during an OFF phase.
-  LinkCounts noisy{17, 31, 1026, 3275, 0};
-  EXPECT_EQ(rtc32k::linkFollows(noisy), LinkProbeResult::NotFollowed);
-  // In-band upper edges stay Followed.
-  LinkCounts bandEdges{0, 64, 2048, 6554, 0};
-  EXPECT_EQ(rtc32k::linkFollows(bandEdges), LinkProbeResult::Followed);
+TEST(Xtal32kSession, DisableClearsStateAndExitOwnership) {
+  DiagState s;
+  s.markEnabled();
+  s.markDisabled();
+  EXPECT_FALSE(s.xtalOn);
+  EXPECT_FALSE(s.enabledByThisActivity);
+  EXPECT_FALSE(rtc32k::shouldDisableOnExit(s));
 }
 
-TEST(Rtc32kRunState, ResetClearsEveryPerRunValue) {
-  RunState run;
-  run.rtcOk = true;
-  run.clkoutOk = true;
-  for (int i = 0; i < 10; i++) run.edgeCounts[i] = 3277u;
-  run.calHz = 32766u;
-  run.calNoPullHz = 32760u;
-  run.link = {2, 31, 1026, 3275, 1};
-  run.linkResult = LinkProbeResult::Followed;
-  run.adcAvailable = true;
-  run.adcLowMv = 42;
-  run.adcHighMv = 2760;
-  run.adcSwingMv = 2718;
-  run.reset();
-  EXPECT_FALSE(run.rtcOk);
-  EXPECT_FALSE(run.clkoutOk);
-  for (int i = 0; i < 10; i++) {
-    EXPECT_EQ(run.edgeCounts[i], 0u);
-  }
-  EXPECT_EQ(run.calHz, 0u);
-  EXPECT_EQ(run.calNoPullHz, 0u);
-  EXPECT_EQ(run.link.off1, 0u);
-  EXPECT_EQ(run.link.hz32, 0u);
-  EXPECT_EQ(run.link.hz1024, 0u);
-  EXPECT_EQ(run.link.hz32768, 0u);
-  EXPECT_EQ(run.link.off2, 0u);
-  EXPECT_EQ(run.linkResult, LinkProbeResult::Unavailable);
-  EXPECT_FALSE(run.adcAvailable);
-  EXPECT_EQ(run.adcLowMv, 0u);
-  EXPECT_EQ(run.adcHighMv, 0u);
-  EXPECT_EQ(run.adcSwingMv, 0u);
+TEST(Xtal32kSession, ExitNeverTouchesAGeneratorThisActivityDidNotEnable) {
+  // Entered and left without any action: the exit path must not run
+  // rtc_clk_32k_enable(false) — the state change belongs to nobody.
+  DiagState s;
+  EXPECT_FALSE(rtc32k::shouldDisableOnExit(s));
 }
 
-// Synthetic 1 Hz probe: 400 samples at ~10 ms over 4 s (four full periods) —
-// clean square wave, ~200 samples per plateau.
-TEST(Rtc32kLevels, Synthetic1HzPlateaus) {
-  uint16_t samples[400];
-  for (int i = 0; i < 400; i++) samples[i] = (i % 2 == 0) ? 400 : 2800;
-  std::sort(samples, samples + 400);
-  const uint16_t low = percentileFromSorted(samples, 400, rtc32k::LOW_PERCENTILE);
-  const uint16_t high = percentileFromSorted(samples, 400, rtc32k::HIGH_PERCENTILE);
-  EXPECT_EQ(low, 400);
-  EXPECT_EQ(high, 2800);
-  EXPECT_EQ(swingMv(low, high), 2400);
+TEST(Xtal32kSession, CalibrationHistorySurvivesDisable) {
+  // Disable changes the oscillator state only; the last calibration stays
+  // on screen until the next Calibrate action resets the run.
+  DiagState s;
+  s.markEnabled();
+  s.cal.record(true, 32768);
+  s.markDisabled();
+  EXPECT_EQ(calStatus(s.cal), CalStatus::Done);
 }
 
-// Transition samples and rare outliers must not move the P10/P90 levels:
-// the nearest-rank percentile sits well inside each plateau.
-TEST(Rtc32kLevels, TransitionsAndOutliersDoNotMoveLevels) {
-  uint16_t samples[400];
-  int idx = 0;
-  for (int i = 0; i < 3; i++) samples[idx++] = 0;        // glitch spikes
-  for (int i = 0; i < 196; i++) samples[idx++] = 400;    // low plateau
-  for (int i = 0; i < 4; i++) samples[idx++] = 1500;     // transitions
-  for (int i = 0; i < 196; i++) samples[idx++] = 2800;   // high plateau
-  samples[idx++] = 4095;                                 // spike above swing
-  std::sort(samples, samples + 400);
-  const uint16_t low = percentileFromSorted(samples, 400, rtc32k::LOW_PERCENTILE);
-  const uint16_t high = percentileFromSorted(samples, 400, rtc32k::HIGH_PERCENTILE);
-  EXPECT_EQ(low, 400);
-  EXPECT_EQ(high, 2800);
-  EXPECT_EQ(swingMv(low, high), 2400);
-
-  // Nearest-rank index policy: k = ceil(pct*n/100), 1-indexed -> k-1.
-  uint16_t ten[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
-  EXPECT_EQ(percentileFromSorted(ten, 10, 10), 1);   // k=1 -> idx 0
-  EXPECT_EQ(percentileFromSorted(ten, 10, 50), 5);   // k=5 -> idx 4
-  EXPECT_EQ(percentileFromSorted(ten, 10, 90), 9);   // k=9 -> idx 8
-  EXPECT_EQ(percentileFromSorted(ten, 10, 100), 10); // k=10 -> idx 9
-  uint16_t one[1] = {77};
-  EXPECT_EQ(percentileFromSorted(one, 1, 10), 77);
-  EXPECT_EQ(percentileFromSorted(one, 1, 90), 77);
-
-  // Degenerate reading clamps to a non-negative swing.
-  EXPECT_EQ(swingMv(2800, 400), 0);
+TEST(Xtal32kSession, FreshCalibrationRunClearsPreviousSamples) {
+  DiagState s;
+  s.cal.record(true, 32768);
+  s.cal.record(true, 32768);
+  s.cal.beginRun();
+  EXPECT_EQ(s.cal.count, 0u);
+  EXPECT_EQ(calStatus(s.cal), CalStatus::NotRun);
 }
 
-// Run 1 succeeds with ADC levels; run 2 has the ADC unavailable. Every
-// voltage field must be cleared by reset() (screen shows N/A), while the
-// PCNT/EXT_OSC measurements of the new run keep working on their own.
-TEST(Rtc32kRunLifecycle, AdcFailureLeavesNoStaleVoltage) {
-  RunState run;
+// --- calibration runs --------------------------------------------------------
 
-  // Run 1: full success including ADC levels.
-  run.reset();
-  run.rtcOk = true;
-  run.clkoutOk = true;
-  for (auto& c : run.edgeCounts) c = 3277u;
-  run.calHz = 32766u;
-  run.adcAvailable = true;
-  run.adcLowMv = 42;
-  run.adcHighMv = 2760;
-  run.adcSwingMv = 2718;
-  uint32_t rawHz = rtc32k::rawEstimateHz(rtc32k::medianOf10(run.edgeCounts));
-  EXPECT_EQ(classify(run.rtcOk, run.clkoutOk, rawHz, run.calHz), Verdict::Pass);
+TEST(Xtal32kCalibration, SuccessfulRunRecordsEverySample) {
+  const uint32_t nominal[rtc32k::CAL_SAMPLE_COUNT] = {32768, 32767, 32768, 32769, 32768};
+  const CalRun run = allOk(nominal);
+  EXPECT_TRUE(run.complete());
+  EXPECT_EQ(run.okCount(), 5u);
+  EXPECT_EQ(calStatus(run), CalStatus::Done);
+  EXPECT_EQ(calMedianHz(run), 32768u);
+  EXPECT_EQ(calQuality(run), CalQuality::Stable);
+}
 
-  // Run 2: ADC unavailable. The reset clears every voltage field; the new
-  // run's PCNT/EXT_OSC measurements (filled again below) still classify.
-  run.reset();
-  EXPECT_FALSE(run.adcAvailable);
-  EXPECT_EQ(run.adcLowMv, 0u);
-  EXPECT_EQ(run.adcHighMv, 0u);
-  EXPECT_EQ(run.adcSwingMv, 0u);
-  run.rtcOk = true;
-  run.clkoutOk = true;
-  for (auto& c : run.edgeCounts) c = 3277u;
-  run.calHz = 32768u;
-  rawHz = rtc32k::rawEstimateHz(rtc32k::medianOf10(run.edgeCounts));
-  EXPECT_EQ(classify(run.rtcOk, run.clkoutOk, rawHz, run.calHz), Verdict::Pass);
+TEST(Xtal32kCalibration, RecordPastCapacityIsIgnored) {
+  CalRun run;
+  for (size_t i = 0; i < rtc32k::CAL_SAMPLE_COUNT; i++) run.record(true, 32768);
+  run.record(true, 1);
+  EXPECT_EQ(run.count, 5u);
+}
+
+TEST(Xtal32kCalibration, TimeoutRunShowsTimeoutNotZeroHz) {
+  const CalRun run = allTimeout();
+  EXPECT_TRUE(run.complete());
+  EXPECT_EQ(run.okCount(), 0u);
+  EXPECT_EQ(calStatus(run), CalStatus::Timeout);
+  EXPECT_EQ(calQuality(run), CalQuality::Unknown);
+  EXPECT_EQ(calMedianHz(run), 0u);
+}
+
+TEST(Xtal32kCalibration, PartialRunMediansTheGoodSamples) {
+  CalRun run;
+  run.record(true, 32768);
+  run.record(false, 0);
+  run.record(true, 32770);
+  run.record(true, 32767);
+  run.record(false, 0);
+  EXPECT_EQ(calStatus(run), CalStatus::Done);
+  EXPECT_EQ(run.okCount(), 3u);
+  EXPECT_EQ(calMedianHz(run), 32768u);
+  EXPECT_EQ(calQuality(run), CalQuality::Stable);
+}
+
+TEST(Xtal32kCalibration, WanderingSamplesAreUnstable) {
+  // All samples pass the hardware validity gate (so this is a realistic
+  // device-side pattern), but the readings wander far beyond crystal
+  // tolerance -> the policy refuses the STABLE label.
+  const uint32_t wandering[rtc32k::CAL_SAMPLE_COUNT] = {32752, 32784, 32768, 32768, 32768};
+  const CalRun run = allOk(wandering);
+  EXPECT_EQ(calStatus(run), CalStatus::Done);
+  EXPECT_EQ(calMedianHz(run), 32768u);
+  EXPECT_EQ(calQuality(run), CalQuality::Unstable);
+}
+
+TEST(Xtal32kCalibration, OutOfWindowMedianIsOutOfRange) {
+  // Defense in depth: the RTC peripheral already rejects wild readings, but
+  // the policy still refuses to bless a median outside the window.
+  const uint32_t slow[rtc32k::CAL_SAMPLE_COUNT] = {25000, 25000, 25000, 25000, 25000};
+  const CalRun run = allOk(slow);
+  EXPECT_EQ(calStatus(run), CalStatus::Done);
+  EXPECT_EQ(calQuality(run), CalQuality::OutOfRange);
+}
+
+// --- formatting --------------------------------------------------------------
+
+TEST(Xtal32kFormatting, SampleRowsPerIndex) {
+  CalRun run;
+  run.record(true, 32768);
+  run.record(false, 0);
+  char buf[20];
+  rtc32k::formatCalSample(buf, sizeof(buf), run, 0);
+  EXPECT_STREQ(buf, "32768 Hz");
+  rtc32k::formatCalSample(buf, sizeof(buf), run, 1);
+  EXPECT_STREQ(buf, "TIMEOUT");
+  rtc32k::formatCalSample(buf, sizeof(buf), run, 2);
+  EXPECT_STREQ(buf, "-");
+  rtc32k::formatCalSample(buf, sizeof(buf), run, 99);
+  EXPECT_STREQ(buf, "-");
+}
+
+TEST(Xtal32kFormatting, MedianLineCoversAllStates) {
+  char buf[24];
+  rtc32k::formatCalMedian(buf, sizeof(buf), CalRun{});
+  EXPECT_STREQ(buf, "NOT RUN");
+  rtc32k::formatCalMedian(buf, sizeof(buf), allTimeout());
+  EXPECT_STREQ(buf, "TIMEOUT");
+  const uint32_t nominal[rtc32k::CAL_SAMPLE_COUNT] = {32768, 32767, 32768, 32769, 32768};
+  rtc32k::formatCalMedian(buf, sizeof(buf), allOk(nominal));
+  EXPECT_STREQ(buf, "32768 Hz");
+}
+
+TEST(Xtal32kFormatting, ResultLabelsNeverClaimAPassOnFailure) {
+  EXPECT_STREQ(rtc32k::resultLabel(CalRun{}), "NOT RUN");
+  EXPECT_STREQ(rtc32k::resultLabel(allTimeout()), "TIMEOUT - NO CLOCK");
+  const uint32_t nominal[rtc32k::CAL_SAMPLE_COUNT] = {32768, 32768, 32768, 32768, 32768};
+  EXPECT_STREQ(rtc32k::resultLabel(allOk(nominal)), "STABLE");
+  const uint32_t wandering[rtc32k::CAL_SAMPLE_COUNT] = {32752, 32784, 32768, 32768, 32768};
+  EXPECT_STREQ(rtc32k::resultLabel(allOk(wandering)), "UNSTABLE");
+}
+
+TEST(Xtal32kFormatting, StateAndSourceLabels) {
+  EXPECT_STREQ(rtc32k::stateLabel(true), "ON");
+  EXPECT_STREQ(rtc32k::stateLabel(false), "OFF");
+  EXPECT_STREQ(rtc32k::slowClockSourceName(SlowClkSource::RcSlow), "RC SLOW");
+  EXPECT_STREQ(rtc32k::slowClockSourceName(SlowClkSource::Xtal32k), "XTAL32K");
+  EXPECT_STREQ(rtc32k::slowClockSourceName(SlowClkSource::RcFastD256), "RC FAST D256");
+  EXPECT_STREQ(rtc32k::slowClockSourceName(SlowClkSource::Invalid), "UNKNOWN");
+}
+
+// --- expected technician flow ------------------------------------------------
+
+TEST(Xtal32kSession, TechnicianFlowEndsClean) {
+  DiagState s;
+  // Enable -> the generator runs and the exit path owns the undo.
+  s.markEnabled();
+  EXPECT_TRUE(rtc32k::shouldDisableOnExit(s));
+  // Calibrate -> five good samples, stable.
+  const uint32_t nominal[rtc32k::CAL_SAMPLE_COUNT] = {32768, 32768, 32767, 32768, 32768};
+  for (size_t i = 0; i < rtc32k::CAL_SAMPLE_COUNT; i++) s.cal.record(true, nominal[i]);
+  EXPECT_EQ(calQuality(s.cal), CalQuality::Stable);
+  // Disable -> the screen goes OFF and the exit path owes nothing anymore.
+  s.markDisabled();
+  EXPECT_FALSE(s.xtalOn);
+  EXPECT_FALSE(rtc32k::shouldDisableOnExit(s));
 }
