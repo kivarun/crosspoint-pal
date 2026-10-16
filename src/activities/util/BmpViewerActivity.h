@@ -14,10 +14,10 @@
 #include "components/ModalTheme.h"
 #include "util/ImageSettingsInput.h"
 
-// Image viewer: full-screen BMP/PNG viewing with an Options modal for render
-// settings, image info and file management. Tone state starts each session
-// from the persisted SETTINGS.viewerRenderProfile; staged edits live in
-// draftProfile until Apply.
+// Image viewer: full-screen BMP/PNG/JPEG viewing with an Options modal for
+// render settings, image info and file management. Tone state starts each
+// session from the persisted SETTINGS.viewerRenderProfile; staged edits live
+// in draftProfile until Apply.
 //
 // Modal model: ONE modal surface over the image. viewerPage selects which PAGE
 // that surface shows (options / settings / slideshow / info / delete confirm);
@@ -69,11 +69,24 @@ class BmpViewerActivity final : public Activity {
   void doSetSleepCover();
   bool canSetSleepCover() const;
   // Canonical format-aware render entry for the CURRENT image (viewer chrome
-  // path): PNG goes through the PNG converter/presentation path and never
-  // enters renderBmp(); BMP renders through the grayscale pipeline.
-  // showLoadingPopup gates the decode loading popup for both pipelines.
+  // path): JPEG runs the upstream JPEG viewer pipeline (fit + gray planes),
+  // PNG goes through the PNG converter/presentation path and never enters
+  // renderBmp(); BMP renders through the grayscale pipeline.
+  // showLoadingPopup gates the decode loading popup for all pipelines.
   void renderCurrentImage(bool showLoadingPopup);
   void renderBmp(bool showPopup);
+  // The upstream JPEG viewer pipeline (PR #3918), framed as the JPEG sibling
+  // of renderBmp(): fitImage config, the converter decode + button hints in
+  // every pass, the Absolute-or-HALF gray base, the LSB/MSB plane transfers
+  // and the gray buffer, then the BW framebuffer rebuild so the modal popups
+  // keep their differential-update base. The tone LUT does not apply (the
+  // JPEG converter has no tone hook) — the Image Settings page stays
+  // BMP-only.
+  void renderJpeg(bool showPopup);
+  // Upstream JPEG sleep-cover conversion (PR #3918): decode through the
+  // pixel-cache file, convert the pixels into a 2-bit grayscale BMP and
+  // publish it as /sleep.bmp (temp + replace, CROP cover mode honored).
+  bool saveJpegSleepCover();
   // Image-only render of the current file through the shared imageonly seam
   // with the sleep-image presentation policy (no chrome, no popup, no BW
   // framebuffer rebuild): the slideshow frames' canonical path.
@@ -154,6 +167,10 @@ class BmpViewerActivity final : public Activity {
   std::vector<std::string> siblingImages;
   int currentImageIndex = -1;
   bool isPng = false;
+  // JPEG source (upstream PR #3918): drives the render dispatch, the sleep
+  // cover conversion and the tone-capable gate (JPEG, like PNG, has no tone
+  // hook — the Image Settings page stays BMP-only).
+  bool isJpeg = false;
   // Slideshow-continuation mode (managed Timer-wake resume); never set on a
   // normally opened viewer.
   bool slideshowResume = false;

@@ -35,14 +35,16 @@
 #include "util/SlideshowState.h"
 
 namespace {
-
 // Sleep decode tone state (ToneLut is 264B, too big for the render task stack
 // budget): one shared buffer for the custom screens and both slideshow paths.
 ToneLut sleepTone;
 
-// The sleep-image grayscale mode policy is shared with the slideshow
-// presentation (imageonly seam).
+// The sleep-image presentation policy (Metalio clean waveform, gray mode,
+// drawSleepBitmap) is shared with the slideshow presentation (imageonly
+// seam) — this file keeps no second copy.
 using imageonly::sleepGrayscaleMode;
+using imageonly::sleepCleanRefresh;
+using imageonly::cleanBeforeAbsoluteGray;
 
 // Kept separate from /sleep.bmp and /.sleep so alpha-overlay art does not mix with full-screen wallpapers.
 constexpr char TRANSPARENT_SLEEP_ROOT_BMP[] = "/sleep-overlay.bmp";
@@ -359,6 +361,7 @@ AlphaOverlayResult tryRenderTransparentOverlayBmp(HalFile& file, GfxRenderer& re
     return AlphaOverlayResult::Error;
   const bool absolute = renderer.grayscaleCapabilities(sleepGrayscaleMode(renderer)).supported();
   if (absolute) {
+    cleanBeforeAbsoluteGray(renderer);
     if (!renderer.displayGrayscaleBase(sleepGrayscaleMode(renderer))) return AlphaOverlayResult::Error;
   } else {
     renderer.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
@@ -673,7 +676,7 @@ void SleepActivity::renderDefaultSleepScreen() const {
     renderer.invertScreen();
   }
 
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+  renderer.displayBuffer(sleepCleanRefresh);
 }
 
 void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap, const bool preserveBackground) const {
@@ -700,7 +703,7 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap, const bool pre
       SETTINGS.sleepScreenCoverFilter == CrossPointSettings::SLEEP_SCREEN_COVER_FILTER::INVERTED_BLACK_AND_WHITE;
   // Static sleep screens keep the established gray policy: Direct when the
   // panel supports it (sleepGrayscaleMode), never the slideshow's Absolute
-  // scrub.
+  // scrub. The Metalio clean-waveform policy lives inside the seam.
   imageonly::drawSleepBitmap(renderer, bitmap, hasGreyscale, imageonly::sleepGrayscaleMode(renderer), x, y, cropX,
                              cropY, preserveBackground, invertAfterDraw);
 }
@@ -882,7 +885,7 @@ void SleepActivity::renderLastScreenSleepScreen() const {
 
 void SleepActivity::renderBlankSleepScreen() const {
   renderer.clearScreen();
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+  renderer.displayBuffer(sleepCleanRefresh);
 }
 
 void SleepActivity::renderSlideshowSleepScreen() const {

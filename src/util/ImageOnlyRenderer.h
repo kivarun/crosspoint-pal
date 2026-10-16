@@ -1,6 +1,8 @@
 #pragma once
 
 #include <Bitmap.h>
+#include <BoardConfig.h>
+#include <Epub/converters/ImageToFramebufferDecoder.h>
 #include <HalDisplay.h>
 #include <ToneLut.h>
 
@@ -11,7 +13,7 @@
 #include "util/SlideshowPolicy.h"
 
 // Shared slideshow rendering seam (Image Viewer slideshow and global sleep
-// slideshow): ONE BMP/PNG file rendered on the panel with an explicitly
+// slideshow): ONE BMP/PNG/JPEG file rendered on the panel with an explicitly
 // supplied tone LUT, using the ESTABLISHED SLEEP-IMAGE PRESENTATION POLICY —
 // no chrome, no popup, no text, and NO post-presentation BW framebuffer
 // rebuild (the interactive viewer's differential-UI preparation stays in
@@ -24,6 +26,27 @@ namespace imageonly {
 
 // Center an image on the page (shared by every BMP render path).
 void fitOnScreen(int imageW, int imageH, int pageW, int pageH, int* x, int* y);
+
+// RenderConfig that fits a converter-decoded image into the screen: the scale
+// is capped at 1x, the decoded rect uses the exact scaled dimensions and is
+// centered. The single fit owner for the converter render paths (the JPEG
+// viewer pipeline, the JPEG sleep-cover conversion and the JPEG sleep frames).
+RenderConfig fitImageConfig(const ImageDimensions& dimensions, const GfxRenderer& renderer);
+
+// The clean refresh a sleep-image presentation ends with: HALF on most
+// panels, Metalio's full 0xF7 waveform (the two-partial 0xFC HALF leaves the
+// prior frame visible there). One owner for the static sleep screens and the
+// image-only presentation, so one board never mixes waveforms.
+#if FREEINK_DEVICE_METALIO_EINK4
+inline constexpr auto sleepCleanRefresh = HalDisplay::FULL_REFRESH;
+#else
+inline constexpr auto sleepCleanRefresh = HalDisplay::HALF_REFRESH;
+#endif
+
+// Metalio: the absolute gray paint has no base pass, so the prior screen
+// shows through after the panel sits unpowered — clean with 0xF7 first. No-op
+// elsewhere (see SleepActivity history #3944).
+void cleanBeforeAbsoluteGray(GfxRenderer& renderer);
 
 // Grayscale transfer mode STATIC sleep-image rendering uses: Direct when the
 // panel supports it, Absolute otherwise. Callers of drawSleepBitmap() own the
@@ -52,16 +75,17 @@ bool drawSleepBitmap(GfxRenderer& renderer, const Bitmap& bitmap, const bool has
                      const HalDisplay::GrayscaleMode grayscaleMode, const int x, const int y, const float cropX,
                      const float cropY, const bool preserveBackground, const bool invertAfterDraw);
 
-// Render ONE BMP/PNG file as a slideshow frame with the supplied tone LUT:
-// centered/fit, the sleep-image presentation policy above, no button hints,
-// no loading popup, no error text, no BW framebuffer rebuild. False when the
-// file cannot be opened, parsed or drawn — the caller owns the fallback
-// (fail closed: no timer, repaint, or exit).
+// Render ONE BMP/PNG/JPEG file as a slideshow frame with the supplied tone
+// LUT: centered/fit, the sleep-image presentation policy above, no button
+// hints, no loading popup, no error text, no BW framebuffer rebuild. The
+// PNG/JPEG converters have no tone hook, so the LUT applies to BMP sources
+// only. False when the file cannot be opened, parsed or drawn — the caller
+// owns the fallback (fail closed: no timer, repaint, or exit).
 bool renderImageFile(GfxRenderer& renderer, const std::string& path, const ToneLut& tone);
 
-// Deterministic sorted list of the BMP/PNG files directly inside dirPath
-// (slideshow frame semantics: hidden files skipped, natural sort). Empty when
-// the directory cannot be opened.
+// Deterministic sorted list of the image files (BMP/PNG/JPEG) directly
+// inside dirPath (slideshow frame semantics: hidden files skipped, natural
+// sort). Empty when the directory cannot be opened.
 std::vector<std::string> listImageFiles(const std::string& dirPath);
 
 // The next slideshow frame after currentPath inside ITS directory. Forward

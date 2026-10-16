@@ -1,6 +1,7 @@
 #include "BmpViewerActivity.h"
 
 #include <Bitmap.h>
+#include <Epub/converters/JpegToFramebufferConverter.h>
 #include <Epub/converters/PngToFramebufferConverter.h>
 #include <FsHelpers.h>
 #include <HalDisplay.h>
@@ -27,14 +28,18 @@ namespace fui = freeink::ui;
 
 namespace {
 constexpr char CUSTOM_SLEEP_ROOT_BMP[] = "/sleep.bmp";
+constexpr char CUSTOM_SLEEP_TMP_BMP[] = "/sleep.bmp.tmp";
+constexpr char JPEG_SLEEP_TMP_PXC[] = "/sleep.bmp.pxc.tmp";
 constexpr char TRANSPARENT_SLEEP_ROOT_BMP[] = "/sleep-overlay.bmp";
 constexpr char TRANSPARENT_SLEEP_ROOT_PNG[] = "/sleep-overlay.png";
 constexpr size_t COPY_BUFFER_SIZE = 2048;
-
 std::string baseNameOf(const std::string& path) {
   const size_t lastSlash = path.find_last_of('/');
   return (lastSlash != std::string::npos) ? path.substr(lastSlash + 1) : path;
 }
+
+constexpr uint8_t GRAYSCALE_PALETTE[] = {0, 0, 0, 0, 85, 85, 85, 0, 170, 170, 170, 0, 255, 255, 255, 0};
+
 }  // namespace
 
 BmpViewerActivity::BmpViewerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string path,
@@ -66,7 +71,7 @@ void BmpViewerActivity::loadSiblingImages() {
 }
 
 bool BmpViewerActivity::canSetSleepCover() const {
-  return FsHelpers::hasBmpExtension(filePath) ||
+  return FsHelpers::hasBmpExtension(filePath) || FsHelpers::hasJpgExtension(filePath) ||
          (SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::TRANSPARENT_CUSTOM &&
           FsHelpers::hasPngExtension(filePath));
 }
@@ -343,8 +348,9 @@ int BmpViewerActivity::buildPageItems() {
       add(tr(STR_OPTIONS), nullptr, true);
       menuActionCount = 0;
       // Image Settings exist only for formats whose decode path consumes the
-      // tone pipeline (BMP); PNG is offered Info/Delete/sleep-cover only.
-      if (imageSettingsInput::imageSettingsAvailable(!isPng)) {
+      // tone pipeline (BMP); PNG and JPEG are offered Info/Delete/sleep-cover
+      // only (the converters have no tone hook).
+      if (imageSettingsInput::imageSettingsAvailable(!isPng && !isJpeg)) {
         add(tr(STR_IMAGE_SETTINGS), nullptr);
         menuActions[menuActionCount++] = ViewerAction::Settings;
       }
@@ -659,7 +665,7 @@ int BmpViewerActivity::pageSelectableCount() const {
       // settings only for tone-capable formats (BMP), then Info / Delete,
       // plus Set sleep cover when allowed.
       int rows = 3;  // Slideshow / Info / Delete
-      if (imageSettingsInput::imageSettingsAvailable(!isPng)) rows++;
+      if (imageSettingsInput::imageSettingsAvailable(!isPng && !isJpeg)) rows++;
       if (canSetSleepCover()) rows++;
       return rows;
     }
@@ -741,7 +747,7 @@ void BmpViewerActivity::openInfoPage() {
   infoRows.emplace_back(tr(STR_PATH), filePath);
 
   // Dimensions, format, bit depth, file size through the existing decode APIs
-  // only (no new parser). PNG: the converter exposes dimensions only.
+  // only (no new parser). PNG/JPEG: the converters expose dimensions only.
   char line[80];
   if (isPng) {
     ImageDimensions dimensions;
@@ -750,6 +756,13 @@ void BmpViewerActivity::openInfoPage() {
       infoRows.emplace_back(tr(STR_SIZE), line);
     }
     infoRows.emplace_back(tr(STR_FORMAT), "PNG");
+  } else if (isJpeg) {
+    ImageDimensions dimensions;
+    if (JpegToFramebufferConverter::getDimensionsStatic(filePath, dimensions)) {
+      snprintf(line, sizeof(line), "%d x %d", dimensions.width, dimensions.height);
+      infoRows.emplace_back(tr(STR_SIZE), line);
+    }
+    infoRows.emplace_back(tr(STR_FORMAT), "JPEG");
   } else {
     HalFile file;
     if (Storage.openFileForRead("BMP", filePath, file)) {
@@ -841,7 +854,8 @@ void BmpViewerActivity::performDelete() {
     LOG_ERR("BMP", "Failed to delete %s", filePath.c_str());
   }
   // Viewer images have no generated cache artifacts in this firmware (there is
-  // no removeImageCache() mechanism; BMP/PNG viewers decode from source), so
+  // no removeImageCache() mechanism; BMP/PNG/JPEG viewers decode from
+  // source), so
   // nothing else to clean up.
 
   // Delete contract: a failed physical delete aborts BEFORE any list/index
@@ -872,6 +886,7 @@ void BmpViewerActivity::performDelete() {
   if (!navPath.empty() && navPath.back() != '/') navPath += "/";
   filePath = navPath + siblingImages[currentImageIndex];
   isPng = FsHelpers::hasPngExtension(filePath);
+  isJpeg = FsHelpers::hasJpgExtension(filePath);
   onEnter();
 }
 
@@ -1144,7 +1159,8 @@ void BmpViewerActivity::modalBack() {
   switch (viewerPage) {
     case ViewerPage::Options:
       // Root page Back closes the modal; the image re-renders according to
-      // its format (grayscale pipeline for BMP, PNG path for PNG) to restore
+      // its format (grayscale pipeline for BMP, JPEG pipeline for JPEG, PNG
+      // path for PNG) to restore
       // the panel content under it.
       viewerPage = ViewerPage::Viewer;
       renderCurrentImage(false);
@@ -1291,6 +1307,12 @@ void BmpViewerActivity::saveSleepProfile() {
 }
 
 void BmpViewerActivity::renderCurrentImage(const bool showLoadingPopup) {
+  if (isJpeg) {
+    // JPEG decodes through the upstream JPEG viewer pipeline (PR #3918) and
+    // never enters renderBmp().
+    renderJpeg(showLoadingPopup);
+    return;
+  }
   if (isPng) {
     // PNG decodes through the shared PNG converter path and never enters
     // renderBmp().
@@ -1306,12 +1328,98 @@ void BmpViewerActivity::renderCurrentImage(const bool showLoadingPopup) {
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     } else {
       renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_FILE_OPEN_FAILED));
-      GUI.drawButtonHints(renderer, labels.btn1, "", "", "");
+      const auto errorLabels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+      GUI.drawButtonHints(renderer, errorLabels.btn1, "", "", "");
       renderer.displayBuffer(HalDisplay::HALF_REFRESH);
     }
     return;
   }
   renderBmp(showLoadingPopup);
+}
+
+void BmpViewerActivity::renderJpeg(const bool showPopup) {
+  // The upstream JPEG viewer pipeline (PR #3918), framed as renderBmp()'s
+  // JPEG sibling: fitImage config, the converter decode + button hints in
+  // every pass, the Absolute-or-HALF gray base, the LSB/MSB plane transfers
+  // and the gray buffer, then the BW framebuffer rebuild so the modal popups
+  // keep their differential-update base. The tone LUT does not apply (the
+  // JPEG converter has no tone hook) — the Image Settings page stays BMP-only.
+  const auto pageHeight = renderer.getScreenHeight();
+  Rect popupRect;
+  if (showPopup) {
+    popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+    GUI.fillPopupProgress(renderer, popupRect, 20);  // Initial 20% progress
+  }
+
+  JpegToFramebufferConverter decoder;
+  ImageDimensions dimensions;
+  if (!decoder.getDimensions(filePath, dimensions) || dimensions.width <= 0 || dimensions.height <= 0) {
+    renderer.clearScreen();
+    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_FILE_OPEN_FAILED));
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+    GUI.drawButtonHints(renderer, labels.btn1, "", "", "");
+    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    return;
+  }
+  const auto config = imageonly::fitImageConfig(dimensions, renderer);
+
+  bool hasPrevious = (siblingImages.size() > 1 && currentImageIndex > 0);
+  bool hasNext = (siblingImages.size() > 1 && currentImageIndex != -1 &&
+                  currentImageIndex < static_cast<int>(siblingImages.size()) - 1);
+  // Viewer chrome: Confirm opens the Options modal (the sleep cover lives in
+  // the modal's Options page, never on the Confirm key).
+  const auto labels =
+      mappedInput.mapLabels(tr(STR_BACK), tr(STR_OPTIONS), (hasPrevious ? "<" : ""), (hasNext ? ">" : ""));
+  const auto drawImage = [&]() {
+    if (!decoder.decodeToFramebuffer(filePath, renderer, config)) return false;
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    return true;
+  };
+
+  if (showPopup) GUI.fillPopupProgress(renderer, popupRect, 50);
+
+  renderer.clearScreen();
+  if (!drawImage()) {
+    renderer.clearScreen();
+    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_FILE_OPEN_FAILED));
+    const auto errorLabels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+    GUI.drawButtonHints(renderer, errorLabels.btn1, "", "", "");
+    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    return;
+  }
+
+  const bool absolute = renderer.grayscaleCapabilities(HalDisplay::GrayscaleMode::Absolute).supported();
+  if (absolute && !renderer.displayGrayscaleBase(HalDisplay::GrayscaleMode::Absolute)) return;
+  if (!absolute) renderer.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
+  bool ready = true;
+  for (const auto mode : {GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB}) {
+    renderer.clearScreen(absolute ? 0xFF : 0x00);
+    renderer.setRenderMode(mode);
+    if (!drawImage()) {
+      ready = false;
+      break;
+    }
+    if (mode == GfxRenderer::GRAYSCALE_LSB) {
+      renderer.copyGrayscaleLsbBuffers();
+    } else {
+      renderer.copyGrayscaleMsbBuffers();
+    }
+  }
+  if (ready) renderer.displayGrayBuffer();
+
+  // Rebuild the BW framebuffer for popups and subsequent differential updates.
+  renderer.setRenderMode(GfxRenderer::BW);
+  renderer.clearScreen();
+  if (!drawImage()) ready = false;
+  renderer.cleanupGrayscaleWithFrameBuffer();
+  if (!ready) {
+    // A failed decode pass must not leave the panel without feedback
+    // (renderBmp's failure treatment).
+    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_FILE_OPEN_FAILED));
+    const auto errorLabels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+    GUI.drawButtonHints(renderer, errorLabels.btn1, "", "", "");
+    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+  }
 }
 
 void BmpViewerActivity::onEnter() {
@@ -1333,6 +1441,7 @@ void BmpViewerActivity::onEnter() {
   }
 
   isPng = FsHelpers::hasPngExtension(filePath);
+  isJpeg = FsHelpers::hasJpgExtension(filePath);
 
   renderCurrentImage(true);
 }
@@ -1352,6 +1461,7 @@ void BmpViewerActivity::advanceSlideshowFrame() {
   }
   filePath = next;
   isPng = FsHelpers::hasPngExtension(filePath);
+  isJpeg = FsHelpers::hasJpgExtension(filePath);
 
   // Re-arm the retained state with the frame being rendered BEFORE sleeping
   // again, so the next timer wake continues from here.
@@ -1549,10 +1659,99 @@ void BmpViewerActivity::onExit() {
   renderer.displayBuffer(HalDisplay::HALF_REFRESH);
 }
 
+bool BmpViewerActivity::saveJpegSleepCover() {
+  if (Storage.exists(JPEG_SLEEP_TMP_PXC) && !Storage.remove(JPEG_SLEEP_TMP_PXC)) {
+    LOG_ERR("BMP", "Failed to remove previous sleep image pixels");
+    return false;
+  }
+  bool keepBmpTemp = false;
+  const ScopedCleanup cleanup{[&keepBmpTemp]() {
+    Storage.remove(JPEG_SLEEP_TMP_PXC);
+    if (!keepBmpTemp) Storage.remove(CUSTOM_SLEEP_TMP_BMP);
+  }};
+
+  JpegToFramebufferConverter decoder;
+  ImageDimensions dimensions;
+  if (!decoder.getDimensions(filePath, dimensions)) return false;
+  auto config = imageonly::fitImageConfig(dimensions, renderer);
+  if (SETTINGS.sleepScreenCoverMode == CrossPointSettings::SLEEP_SCREEN_COVER_MODE::CROP &&
+      (dimensions.width > renderer.getScreenWidth() || dimensions.height > renderer.getScreenHeight())) {
+    const float ratio = static_cast<float>(dimensions.width) / dimensions.height;
+    const float screenRatio = static_cast<float>(renderer.getScreenWidth()) / renderer.getScreenHeight();
+    config.x = config.y = 0;
+    config.maxWidth = renderer.getScreenWidth();
+    config.maxHeight = renderer.getScreenHeight();
+    if (ratio > screenRatio) {
+      config.sourceCropX = 1.0f - screenRatio / ratio;
+    } else {
+      config.sourceCropY = 1.0f - ratio / screenRatio;
+    }
+  }
+  config.cachePath = JPEG_SLEEP_TMP_PXC;
+  renderer.clearScreen();
+  bool cacheWritten;
+  if (!decoder.decodeToFramebuffer(filePath, renderer, config, cacheWritten) || !cacheWritten) {
+    LOG_ERR("BMP", "Failed to decode sleep image pixels");
+    return false;
+  }
+
+  HalFile input, output;
+  if (!Storage.openFileForRead("BMP", JPEG_SLEEP_TMP_PXC, input)) return false;
+  uint16_t width, height;
+  if (input.read(&width, sizeof(width)) != sizeof(width) || input.read(&height, sizeof(height)) != sizeof(height) ||
+      width != config.maxWidth || height != config.maxHeight) {
+    LOG_ERR("BMP", "Invalid sleep image pixels");
+    return false;
+  }
+  const size_t pixelRowBytes = (width + 3) / 4;
+  const size_t bmpRowBytes = (width + 15) / 16 * 4;
+  if (input.size() != 4 + pixelRowBytes * height) {
+    LOG_ERR("BMP", "Incomplete sleep image pixels");
+    return false;
+  }
+  auto row = makeUniqueNoThrow<uint8_t[]>(bmpRowBytes);
+  if (!row) {
+    LOG_ERR("BMP", "OOM: sleep image row");
+    return false;
+  }
+  if (!Storage.openFileForWrite("BMP", CUSTOM_SLEEP_TMP_BMP, output)) return false;
+  BmpHeader header;
+  createBmpHeader(&header, width, height, BmpRowOrder::TopDown);
+  header.infoHeader.biBitCount = 2;
+  header.infoHeader.biClrUsed = header.infoHeader.biClrImportant = 4;
+  header.infoHeader.biSizeImage = bmpRowBytes * height;
+  header.fileHeader.bfOffBits = sizeof(header) - sizeof(header.colors) + sizeof(GRAYSCALE_PALETTE);
+  header.fileHeader.bfSize = header.fileHeader.bfOffBits + header.infoHeader.biSizeImage;
+  if (output.write(&header, sizeof(header) - sizeof(header.colors)) != sizeof(header) - sizeof(header.colors) ||
+      output.write(GRAYSCALE_PALETTE, sizeof(GRAYSCALE_PALETTE)) != sizeof(GRAYSCALE_PALETTE)) {
+    LOG_ERR("BMP", "Failed to write sleep image header");
+    return false;
+  }
+  for (int y = 0; y < height; ++y) {
+    if (input.read(row.get(), pixelRowBytes) != pixelRowBytes || output.write(row.get(), bmpRowBytes) != bmpRowBytes) {
+      LOG_ERR("BMP", "Failed to write sleep image row %d", y);
+      return false;
+    }
+  }
+  if (!output.close()) {
+    LOG_ERR("BMP", "Failed to close sleep image");
+    return false;
+  }
+  if (!Storage.replaceFile(CUSTOM_SLEEP_TMP_BMP, CUSTOM_SLEEP_ROOT_BMP)) {
+    // ponytail: FAT replacement is not atomic; keep the complete temp for recovery.
+    keepBmpTemp = true;
+    LOG_ERR("BMP", "Failed to publish sleep image");
+    return false;
+  }
+  return true;
+}
+
 void BmpViewerActivity::doSetSleepCover() {
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
 
-  const bool transparentMode = SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::TRANSPARENT_CUSTOM;
+  const bool jpeg = FsHelpers::hasJpgExtension(filePath);
+  const bool transparentMode =
+      !jpeg && SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::TRANSPARENT_CUSTOM;
   if (!canSetSleepCover()) return;
 
   const char* destination =
@@ -1560,7 +1759,9 @@ void BmpViewerActivity::doSetSleepCover() {
                       : CUSTOM_SLEEP_ROOT_BMP;
   bool success = filePath == destination;
 
-  if (!success) {
+  if (jpeg) {
+    success = saveJpegSleepCover();
+  } else if (!success) {
     auto buffer = makeUniqueNoThrow<uint8_t[]>(COPY_BUFFER_SIZE);
     if (!buffer) {
       LOG_ERR("BMP", "OOM: sleep cover copy buffer");
@@ -1615,6 +1816,7 @@ void BmpViewerActivity::loop() {
     if (dirPath.back() != '/') dirPath += "/";
     filePath = dirPath + siblingImages[currentImageIndex];
     isPng = FsHelpers::hasPngExtension(filePath);
+    isJpeg = FsHelpers::hasJpgExtension(filePath);
     onEnter();
     return true;
   };

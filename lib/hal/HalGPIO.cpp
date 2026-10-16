@@ -109,6 +109,9 @@ void HalGPIO::begin() {
 
 void HalGPIO::update() {
   inputMgr.update();
+  const uint8_t pageButtons = inputMgr.capacitivePageButtonMask();
+  capacitivePagePressed = (pageButtons & ~previousCapacitivePageButtons) != 0;
+  previousCapacitivePageButtons = pageButtons;
   const bool connected = isUsbConnected();
   usbStateChanged = (connected != lastUsbConnected);
   lastUsbConnected = connected;
@@ -117,6 +120,10 @@ void HalGPIO::update() {
 bool HalGPIO::wasUsbStateChanged() const { return usbStateChanged; }
 
 bool HalGPIO::isPressed(uint8_t buttonIndex) const { return inputMgr.isPressed(buttonIndex); }
+
+void HalGPIO::prepareForDeepSleep() {
+  if (!inputMgr.prepareForDeepSleep()) LOG_ERR("GPIO", "Failed to put touch controller to sleep");
+}
 
 bool HalGPIO::wasPressed(uint8_t buttonIndex) const { return inputMgr.wasPressed(buttonIndex); }
 
@@ -233,7 +240,8 @@ bool HalGPIO::coldBootImpliesPowerButton() const {
   // post-flash boots as battery button boots, and STAT-only boards like the
   // EEGO A4 misread them the same way once the charger terminates at 100%
   // (STAT inactive reads as "no USB").
-  return isXteinkDevice() || BoardConfig::isPaperMono() || BoardConfig::isSticky();
+  // The Metalio sleeps powered off and only its button turns it back on.
+  return isXteinkDevice() || BoardConfig::isPaperMono() || BoardConfig::isSticky() || BoardConfig::isMetalioEInk4();
 }
 
 // Guard the wake/reset value pinning in WakeupClassify.h against IDF drift.

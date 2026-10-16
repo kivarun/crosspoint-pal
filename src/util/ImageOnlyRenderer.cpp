@@ -1,6 +1,7 @@
 #include "util/ImageOnlyRenderer.h"
 
 #include <Bitmap.h>
+#include <Epub/converters/JpegToFramebufferConverter.h>
 #include <Epub/converters/PngToFramebufferConverter.h>
 #include <FsHelpers.h>
 #include <HalDisplay.h>
@@ -19,6 +20,46 @@ namespace {
 // SdFat long-name buffer, same bound as the viewer's sibling scan.
 constexpr size_t MAX_IMAGE_NAME_LEN = 500;
 
+// The JPEG branch of the sleep-image presentation policy (upstream PR #3918's
+// JPEG viewer pipeline, framed for frames): clear, the converter decode as
+// the BW base pass, the Absolute-or-HALF gray base, the LSB/MSB plane passes
+// and the gray buffer. No chrome, no BW framebuffer rebuild (the next frame
+// or wake paint owns the panel after this). False when any decode pass fails.
+bool renderJpegSleepFrame(GfxRenderer& renderer, const std::string& path) {
+  JpegToFramebufferConverter decoder;
+  ImageDimensions dimensions;
+  if (!decoder.getDimensions(path, dimensions) || dimensions.width <= 0 || dimensions.height <= 0) return false;
+  const RenderConfig config = fitImageConfig(dimensions, renderer);
+
+  renderer.clearScreen();
+  if (!decoder.decodeToFramebuffer(path, renderer, config)) return false;
+
+  const bool absolute = renderer.grayscaleCapabilities(HalDisplay::GrayscaleMode::Absolute).supported();
+  if (absolute) {
+    cleanBeforeAbsoluteGray(renderer);
+    if (!renderer.displayGrayscaleBase(HalDisplay::GrayscaleMode::Absolute)) return false;
+  } else {
+    renderer.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
+  }
+  bool ready = true;
+  for (const auto mode : {GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB}) {
+    renderer.clearScreen(absolute ? 0xFF : 0x00);
+    renderer.setRenderMode(mode);
+    if (!decoder.decodeToFramebuffer(path, renderer, config)) {
+      ready = false;
+      break;
+    }
+    if (mode == GfxRenderer::GRAYSCALE_LSB) {
+      renderer.copyGrayscaleLsbBuffers();
+    } else {
+      renderer.copyGrayscaleMsbBuffers();
+    }
+  }
+  if (ready) renderer.displayGrayBuffer();
+  renderer.setRenderMode(GfxRenderer::BW);
+  return ready;
+}
+
 }  // namespace
 
 void fitOnScreen(const int imageW, const int imageH, const int pageW, const int pageH, int* x, int* y) {
@@ -36,6 +77,17 @@ void fitOnScreen(const int imageW, const int imageH, const int pageW, const int 
     *x = (pageW - imageW) / 2;
     *y = (pageH - imageH) / 2;
   }
+}
+
+RenderConfig fitImageConfig(const ImageDimensions& dimensions, const GfxRenderer& renderer) {
+  const float scale = std::min({static_cast<float>(renderer.getScreenWidth()) / dimensions.width,
+                                static_cast<float>(renderer.getScreenHeight()) / dimensions.height, 1.0f});
+  const int width = std::max(1, std::min(renderer.getScreenWidth(), static_cast<int>(dimensions.width * scale)));
+  const int height = std::max(1, std::min(renderer.getScreenHeight(), static_cast<int>(dimensions.height * scale)));
+  RenderConfig config{(renderer.getScreenWidth() - width) / 2, (renderer.getScreenHeight() - height) / 2, width,
+                      height};
+  config.useExactDimensions = true;
+  return config;
 }
 
 bool renderPngToFramebuffer(GfxRenderer& renderer, const std::string& path) {
@@ -60,27 +112,35 @@ HalDisplay::GrayscaleMode sleepGrayscaleMode(const GfxRenderer& renderer) {
              : HalDisplay::GrayscaleMode::Absolute;
 }
 
+void cleanBeforeAbsoluteGray(GfxRenderer& renderer) {
+#if FREEINK_DEVICE_METALIO_EINK4
+  renderer.displayBuffer(HalDisplay::FULL_REFRESH);
+#else
+  (void)renderer;
+#endif
+}
+
 bool drawSleepBitmap(GfxRenderer& renderer, const Bitmap& bitmap, const bool hasGreyscale,
                      const HalDisplay::GrayscaleMode grayscaleMode, const int x, const int y, const float cropX,
                      const float cropY, const bool preserveBackground, const bool invertAfterDraw) {
   // Verbatim sleep-image presentation contract of
   // SleepActivity::renderBitmapSleepScreen() (minus the cover placement): one
   // drawBitmap pass, then the gray base + plane transfers + gray buffer for
-  // grayscale sources, or the single-pass HALF_REFRESH transfer for BW
-  // sources. No BW framebuffer rebuild — the next content arrives with the
-  // next wake/frame paint. hasGreyscale is the CALLER's source classification
-  // (the cover filter may deliberately downgrade a gray bitmap to BW).
-  // grayscaleMode is the CALLER's gray policy: static sleep screens keep the
-  // Direct-capable sleepGrayscaleMode(), slideshow frames pass Absolute so
-  // every timer wake gets the scrubbing base transition over the physically
-  // retained e-ink frame.
+  // grayscale sources, or the single-pass clean transfer for BW sources. No
+  // BW framebuffer rebuild — the next content arrives with the next wake/frame
+  // paint. hasGreyscale is the CALLER's source classification (the cover
+  // filter may deliberately downgrade a gray bitmap to BW). grayscaleMode is
+  // the CALLER's gray policy: static sleep screens keep the Direct-capable
+  // sleepGrayscaleMode(), slideshow frames pass Absolute so every timer wake
+  // gets the scrubbing base transition over the physically retained e-ink
+  // frame.
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
 
   if (!preserveBackground) renderer.clearScreen();
 
   if (!renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, cropX, cropY, preserveBackground)) {
-    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    renderer.displayBuffer(sleepCleanRefresh);
     return false;
   }
 
@@ -88,6 +148,7 @@ bool drawSleepBitmap(GfxRenderer& renderer, const Bitmap& bitmap, const bool has
 
   const bool nativeGray = hasGreyscale && renderer.grayscaleCapabilities(grayscaleMode).supported();
   if (nativeGray) {
+    cleanBeforeAbsoluteGray(renderer);
     if (!renderer.displayGrayscaleBase(grayscaleMode)) return true;
   } else if (hasGreyscale) {
     // OEM grayscale pipeline base. Must stay HALF: the gray nudge LUT is
@@ -96,7 +157,7 @@ bool drawSleepBitmap(GfxRenderer& renderer, const Bitmap& bitmap, const bool has
     // the differential nudge then lands unevenly (blotchy noise in gray areas).
     renderer.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
   } else {
-    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    renderer.displayBuffer(sleepCleanRefresh);
     return true;
   }
 
@@ -135,6 +196,13 @@ bool renderImageFile(GfxRenderer& renderer, const std::string& path, const ToneL
     if (!renderPngToFramebuffer(renderer, path)) return false;
     renderer.displayBuffer(HalDisplay::HALF_REFRESH);
     return true;
+  }
+
+  if (FsHelpers::hasJpgExtension(path)) {
+    // JPEG: the same sleep-image presentation through the JPEG gray pipeline
+    // (upstream PR #3918). The converter has no tone hook, so the supplied
+    // LUT does not apply here either.
+    return renderJpegSleepFrame(renderer, path);
   }
 
   HalFile file;
@@ -181,7 +249,7 @@ std::vector<std::string> listImageFiles(const std::string& dirPath) {
       file.getName(name, sizeof(name));
       if (name[0] != '.') {
         std::string fname(name);
-        if (FsHelpers::hasBmpExtension(fname) || FsHelpers::hasPngExtension(fname)) {
+        if (FsHelpers::hasImageExtension(fname)) {
           images.push_back(fname);
         }
       }

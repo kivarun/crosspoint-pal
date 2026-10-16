@@ -9,6 +9,16 @@ namespace {
 
 using namespace std::string_view_literals;
 
+TEST(ImageExtension, IncludesBmpPngAndJpegCases) {
+  for (const auto path : {"cover.bmp"sv, "COVER.BMP"sv, "art.png"sv, "ART.PNG"sv, "photo.jpg"sv, "PHOTO.JPG"sv,
+                          "scan.jpeg"sv, "SCAN.JPEG"sv}) {
+    EXPECT_TRUE(FsHelpers::hasImageExtension(path)) << path;
+  }
+  for (const auto path : {"book.epub"sv, "notes.txt"sv, "animation.gif"sv, "cover"sv, ""sv}) {
+    EXPECT_FALSE(FsHelpers::hasImageExtension(path)) << path;
+  }
+}
+
 TEST(ReflowableBookExtension, IncludesTextFormatsAndExcludesImageBooks) {
   for (const auto path : {"/Books/book.epub"sv, "book.TXT"sv, "book.mD"sv}) {
     EXPECT_TRUE(FsHelpers::hasReflowableBookExtension(path));
