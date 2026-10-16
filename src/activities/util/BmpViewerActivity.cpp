@@ -15,6 +15,7 @@
 #include <numeric>
 
 #include "CrossPointSettings.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
@@ -715,10 +716,28 @@ void BmpViewerActivity::menuAction(ViewerAction action) {
     case ViewerAction::Info:
       openInfoPage();
       break;
-    case ViewerAction::SleepCover:
-      viewerPage = ViewerPage::Viewer;  // modal closes; the sleep-cover flow re-renders itself
-      doSetSleepCover();
+    case ViewerAction::SleepCover: {
+      // Upstream's sleep-screen confirmation (#3994) anchored to the modal's
+      // Options row: the modal closes, the confirmation runs over the image,
+      // cancel re-renders the panel, Confirm enters the sleep-cover flow.
+      viewerPage = ViewerPage::Viewer;
+      auto confirmation =
+          makeUniqueNoThrow<ConfirmationActivity>(renderer, mappedInput, tr(STR_SET_SLEEP_COVER) + std::string("?"),
+                                                  baseNameOf(filePath));
+      if (!confirmation) {
+        LOG_ERR("BMP", "OOM: sleep cover confirmation (%zu bytes)", sizeof(ConfirmationActivity));
+        renderCurrentImage(false);
+        break;
+      }
+      startActivityForResult(std::move(confirmation), [this](const ActivityResult& result) {
+        if (result.isCancelled) {
+          renderCurrentImage(false);
+          return;
+        }
+        doSetSleepCover();
+      });
       break;
+    }
     case ViewerAction::Delete:
       deleteHeadline = baseNameOf(filePath);
       // Full-width wrapped filename lines (existing measured primitive: ≤2
