@@ -1,5 +1,6 @@
 #include "SettingsActivity.h"
 
+#include <BleCompanion.h>
 #include <BlePageTurner.h>
 #include <BoardConfig.h>
 #include <GfxRenderer.h>
@@ -33,6 +34,7 @@
 #include "SilentRestart.h"
 #include "StatusBarSettingsActivity.h"
 #include "TextSettingsActivity.h"
+#include "activities/network/CompanionActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/IntervalSelectionActivity.h"
 #include "components/ListRowPresentation.h"
@@ -158,6 +160,9 @@ void SettingsActivity::rebuildSettings() {
   addAction(SettingsSection::Network, StrId::STR_WIFI_NETWORKS, SettingAction::Network);
   if (bleturner::status().compiledIn) {
     addAction(SettingsSection::Network, StrId::STR_BT_PAGE_TURNER, SettingAction::Bluetooth);
+  }
+  if (blecompanion::compiledIn()) {
+    addAction(SettingsSection::Network, StrId::STR_COMPANION, SettingAction::Companion);
   }
   addAction(SettingsSection::Network, StrId::STR_KOREADER_SYNC, SettingAction::KOReaderSync);
   addAction(SettingsSection::Network, StrId::STR_OPDS_SERVERS, SettingAction::OPDSBrowser);
@@ -367,6 +372,15 @@ void SettingsActivity::toggleSelectedSetting() {
           return;
         }
         startActivityForResult(std::move(activity), resultHandler);
+        break;
+      }
+      case SettingAction::Companion: {
+        auto activity = makeUniqueNoThrow<CompanionActivity>(renderer, mappedInput);
+        if (!activity) {
+          LOG_ERR("SETTINGS", "OOM: CompanionActivity");
+          return;
+        }
+        startActivityForResult(std::move(activity), nullptr);
         break;
       }
       case SettingAction::ClearCache:
@@ -591,8 +605,7 @@ void SettingsActivity::drawFooter() {
       selected >= 0 && selected < static_cast<int>(settings.size()) && !settingsRowEnabled(settings[selected]);
   // A disabled row promises no Toggle: Confirm is a no-op there.
   const char* confirmLabel = disabled ? "" : (picker ? tr(STR_SELECT) : tr(STR_TOGGLE));
-  const auto labels =
-      mappedInput.mapLabels(tr(STR_BACK), confirmLabel, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   // Only the Confirm slot can go empty (Back/Up/Down always draw); the
   // opt-in erase clears a stale Toggle frame when the selection lands on a
   // disabled row.
