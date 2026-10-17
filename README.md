@@ -87,7 +87,9 @@ lose the ability to reflash that device.
 
 **Do not install this fork on a USB-locked / re-locked XTEINK device unless
 you already have a verified recovery path.** Unlocked devices (e.g. bought
-directly from xteink.com) can always be re-flashed normally.
+directly from xteink.com) can always be re-flashed normally. The vendor's own
+unlock tool is documented at https://crosspointreader.com/#unlock-tool; the
+only firmwares it officially knows are upstream CrossPoint and CrossInk.
 
 ## Install firmware
 
