@@ -372,10 +372,13 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   char sdFontFamilyName[32] = "";
   // Dictionary folder name under /dictionaries (empty = no dictionary)
   char dictionaryName[32] = "";
-  // Companion phone address from the last accepted companion bond (BLE MAC,
-  // "AA:BB:CC:DD:EE:FF" style). Empty = no companion phone paired yet. Only
-  // the companion's own bond; HID page-turner bonds are not recorded here.
+  // Companion phone identity from the last accepted companion bond: the
+  // bonded ID address text ("aa:bb:cc:dd:ee:ff") plus its NimBLE address
+  // type (0 public, 1 random; 0xFF = unset). Empty address = no companion
+  // phone paired yet. Only the companion's own bond; HID page-turner bonds
+  // are not recorded here.
   char companionPeerAddr[18] = "";
+  uint8_t companionPeerAddrType = 0xFF;
   // Master switch for all SD-card plugin discovery/execution. New installs keep
   // this disabled; settings migration enables it when pre-existing plugin files
   // are found so a firmware update never silently disables an existing setup.

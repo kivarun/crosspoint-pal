@@ -1,5 +1,11 @@
 // The one file of the companion module that includes NimBLE. Real bodies under
 // FREEINK_CAP_BLE_COMPANION; stub bodies otherwise, so callers never #ifdef.
+//
+// Ownership model: NimBLE callbacks only copy bounded data into the fixed
+// ring (control packets and connection/authentication events) and return.
+// ALL product logic — the identity policy, persistence callbacks, session
+// progression, state and revision changes, disconnect decisions — runs on the
+// main loop inside loop(). Nothing here calls into settings or the filesystem.
 #include "BleCompanion.h"
 
 #include <BoardConfig.h>
@@ -14,6 +20,7 @@
 #include <cstring>
 
 #include "BleCompanionJson.h"
+#include "CompanionPeer.h"
 #include "CompanionSession.h"
 
 #endif
@@ -26,24 +33,30 @@ namespace {
 
 constexpr const char* TAG = "BLECOMP";
 constexpr const char* DEVICE_NAME = "CrossPoint Pal";
-// The control ring: NimBLE callbacks copy bytes here and return; the main loop
-// parses. Six 512 B packets, matching a 1.5 s phone retry budget.
+// The ring: NimBLE callbacks copy bounded entries here and return; the main
+// loop processes. Six entries cover a 1.5 s phone retry budget.
 constexpr size_t QUEUE_SIZE = 6;
-
-struct Packet {
-  uint16_t length = 0;
-  std::array<uint8_t, MAX_CONTROL_BYTES> data{};
-};
-
-class ServerCallbacks;
-class ControlCallbacks;
 
 }  // namespace
 
 class BleCompanion::Impl {
  public:
+  // One ring entry. `kind` decides which fields are meaningful; the 512-byte
+  // payload is shared by all kinds so the ring stays one fixed-size array.
+  enum class Kind : uint8_t { Control, Connected, Authenticated, Disconnected };
+
+  struct Entry {
+    Kind kind = Kind::Control;
+    uint16_t length = 0;      // Control: payload bytes
+    uint16_t connHandle = 0;  // Connected/Authenticated/Disconnected
+    bool encrypted = false;   // Authenticated
+    PeerId peer{};            // Authenticated: the bonded ID address
+    uint8_t data[MAX_CONTROL_BYTES] = {};
+  };
+
   // Defined after the callback classes below: they need the complete Impl.
-  bool begin(const char* storedPeerAddr, void (*savePeerAddr)(const char*), void (*forgetPeerAddr)());
+  bool begin(const char* storedPeerAddr, uint8_t storedPeerAddrType, void (*savePeerAddr)(const char*, uint8_t),
+             void (*forgetPeerAddr)());
   void stop();
   bool forgetBond();
 
@@ -57,16 +70,25 @@ class BleCompanion::Impl {
   }
 
   void loop() {
-    if (queueOverflow_) {
-      portENTER_CRITICAL(&queueMux_);
-      queueOverflow_ = false;
-      portEXIT_CRITICAL(&queueMux_);
-      reject("queue_full", "Too many control messages");
-      return;
+    Entry entry;
+    while (pop(entry)) {
+      switch (entry.kind) {
+        case Kind::Connected:
+          handleConnected(entry);
+          break;
+        case Kind::Authenticated:
+          handleAuthenticated(entry);
+          break;
+        case Kind::Disconnected:
+          handleDisconnected(entry);
+          break;
+        case Kind::Control:
+          handleControl(reinterpret_cast<const char*>(entry.data), entry.length);
+          break;
+      }
     }
-    Packet packet;
-    for (int processed = 0; processed < 3 && dequeue(packet); processed++) {
-      handleControl(reinterpret_cast<const char*>(packet.data.data()), packet.length);
+    if (takeQueueOverflow()) {
+      reject("queue_full", "Too many messages");
     }
   }
 
@@ -89,82 +111,135 @@ class BleCompanion::Impl {
     return {c.title, c.body};
   }
 
-  // --- NimBLE callbacks (they run on the NimBLE host task) ---
-  void radioConnected(NimBLEServer* server, NimBLEConnInfo& info) {
-    server->updateConnParams(info.getConnHandle(), 12, 24, 0, 300);
-    setState(RadioState::AwaitingAuthentication);
+  // --- NimBLE callbacks (they run on the NimBLE host task; enqueues only) ---
+  void radioConnected(NimBLEConnInfo& info) {
+    Entry entry;
+    entry.kind = Kind::Connected;
+    entry.connHandle = info.getConnHandle();
+    push(entry);
   }
 
-  void radioDisconnected(NimBLEServer*, NimBLEConnInfo&, int) {
-    session_.reset();  // ephemeral state dies with the link
-    if (state_ != RadioState::Stopped) setState(RadioState::Advertising);
+  void radioDisconnected(NimBLEConnInfo& info) {
+    Entry entry;
+    entry.kind = Kind::Disconnected;
+    entry.connHandle = info.getConnHandle();
+    push(entry);
   }
 
-  void authenticated(NimBLEConnInfo& info) {
-    if (!info.isEncrypted()) {
-      if (server_ != nullptr) server_->disconnect(info.getConnHandle());
-      return;
-    }
-    const char* addr = info.getAddress().toString().c_str();
-    switch (CompanionSession::authenticate(addr, storedPeerAddr_)) {
-      case AuthDecision::Allow:
-        break;
-      case AuthDecision::Adopt:
-        if (savePeerAddr_ != nullptr) savePeerAddr_(addr);
-        storedPeerAddr_ = addr;
-        break;
-      case AuthDecision::Reject:
-        LOG_ERR(TAG, "Rejecting bond from %s: another phone is paired", addr);
-        if (server_ != nullptr) server_->disconnect(info.getConnHandle());
-        return;
-    }
-    setState(RadioState::Connected);
+  void radioAuthenticated(NimBLEConnInfo& info) {
+    Entry entry;
+    entry.kind = Kind::Authenticated;
+    entry.connHandle = info.getConnHandle();
+    entry.encrypted = info.isEncrypted();
+    // The bonded IDENTITY (stable across Android RPA changes), never the
+    // over-the-air address: NimBLEAddress is taken by value, so nothing
+    // dangles.
+    const NimBLEAddress id = info.getIdAddress();
+    memcpy(entry.peer.addr, id.getVal(), sizeof(entry.peer.addr));
+    entry.peer.type = id.getType();
+    push(entry);
   }
 
   void controlWritten(NimBLECharacteristic* characteristic) {
     const NimBLEAttValue value = characteristic->getValue();
-    if (!enqueue(reinterpret_cast<const uint8_t*>(value.data()), value.size())) {
-      // enqueue() flags the overflow itself; loop() reports it to the phone.
+    const size_t length = value.size();
+    if (length == 0 || length > MAX_CONTROL_BYTES) {
+      flagQueueOverflow();
+      return;
     }
+    Entry entry;
+    entry.kind = Kind::Control;
+    entry.length = static_cast<uint16_t>(length);
+    memcpy(entry.data, value.data(), length);
+    push(entry);
   }
 
  private:
-  void setState(const RadioState state) {
-    if (state_ == state) return;
-    state_ = state;
-    revision_++;  // volatile: the NimBLE task bumps it too
-  }
-
-  bool enqueue(const uint8_t* data, const size_t length) {
-    if (data == nullptr || length == 0 || length > MAX_CONTROL_BYTES) {
-      queueOverflow_ = true;
-      return false;
-    }
+  // The ring: one producer (NimBLE host task), one consumer (main loop).
+  // Indices and the overflow flag are only mutated inside the portMUX
+  // critical section; that section is the synchronization contract.
+  bool push(const Entry& entry) {
     bool accepted = false;
     portENTER_CRITICAL(&queueMux_);
     const uint8_t next = (queueHead_ + 1) % QUEUE_SIZE;
     if (next != queueTail_) {
-      Packet& packet = queue_[queueHead_];
-      packet.length = length;
-      memcpy(packet.data.data(), data, length);
+      queue_[queueHead_] = entry;
       queueHead_ = next;
       accepted = true;
+    } else {
+      queueOverflow_ = true;
     }
     portEXIT_CRITICAL(&queueMux_);
-    if (!accepted) queueOverflow_ = true;
     return accepted;
   }
 
-  bool dequeue(Packet& packet) {
+  bool pop(Entry& entry) {
     bool available = false;
     portENTER_CRITICAL(&queueMux_);
     if (queueTail_ != queueHead_) {
-      packet = queue_[queueTail_];
+      entry = queue_[queueTail_];
       queueTail_ = (queueTail_ + 1) % QUEUE_SIZE;
       available = true;
     }
     portEXIT_CRITICAL(&queueMux_);
     return available;
+  }
+
+  bool takeQueueOverflow() {
+    bool overflow = false;
+    portENTER_CRITICAL(&queueMux_);
+    overflow = queueOverflow_;
+    queueOverflow_ = false;
+    portEXIT_CRITICAL(&queueMux_);
+    return overflow;
+  }
+
+  static void flagQueueOverflow() {
+    portENTER_CRITICAL(&queueMux_);
+    queueOverflow_ = true;
+    portEXIT_CRITICAL(&queueMux_);
+  }
+
+  // --- Main-loop event handling (the single product-state owner) ---
+  void handleConnected(const Entry& entry) {
+    if (server_ != nullptr) {
+      server_->updateConnParams(entry.connHandle, 12, 24, 0, 300);
+    }
+    setState(RadioState::AwaitingAuthentication);
+  }
+
+  void handleAuthenticated(const Entry& entry) {
+    if (!entry.encrypted) {
+      LOG_ERR(TAG, "Rejecting unencrypted connection");
+      if (server_ != nullptr) server_->disconnect(entry.connHandle);
+      return;
+    }
+    switch (CompanionSession::authenticate(entry.peer, storedPeer_)) {
+      case AuthDecision::Allow:
+        break;
+      case AuthDecision::Adopt: {
+        char text[PEER_ID_TEXT_LEN + 1];
+        if (peerIdToString(entry.peer, text, sizeof(text)) && savePeerAddr_ != nullptr) {
+          savePeerAddr_(text, entry.peer.type);
+        }
+        storedPeer_ = entry.peer;
+        break;
+      }
+      case AuthDecision::Reject: {
+        char text[PEER_ID_TEXT_LEN + 1];
+        if (peerIdToString(entry.peer, text, sizeof(text))) {
+          LOG_ERR(TAG, "Rejecting bond from %s: another phone is paired", text);
+        }
+        if (server_ != nullptr) server_->disconnect(entry.connHandle);
+        return;
+      }
+    }
+    setState(RadioState::Connected);
+  }
+
+  void handleDisconnected(const Entry&) {
+    session_.reset();  // ephemeral state dies with the link
+    if (state_ != RadioState::Stopped) setState(RadioState::Advertising);
   }
 
   void handleControl(const char* data, const size_t length) {
@@ -210,22 +285,28 @@ class BleCompanion::Impl {
     if (n != 0 && event_ != nullptr) event_->notify(reinterpret_cast<const uint8_t*>(out), n);
   }
 
+  void setState(const RadioState state) {
+    if (state_ == state) return;
+    state_ = state;
+    revision_++;
+  }
+
   NimBLEServer* server_ = nullptr;
   NimBLECharacteristic* control_ = nullptr;
   NimBLECharacteristic* event_ = nullptr;
   ServerCallbacks* serverCallbacks_ = nullptr;
   ControlCallbacks* controlCallbacks_ = nullptr;
 
-  const char* storedPeerAddr_ = "";
-  void (*savePeerAddr_)(const char*) = nullptr;
+  const void (*savePeerAddr_)(const char*, uint8_t) = nullptr;
   void (*forgetPeerAddr_)() = nullptr;
+  PeerId storedPeer_{};  // main-loop-owned identity policy state
 
   CompanionSession session_;
   uint32_t passkey_ = 0;
   RadioState state_ = RadioState::Stopped;
-  volatile uint32_t revision_ = 0;
+  uint32_t revision_ = 0;
 
-  std::array<Packet, QUEUE_SIZE> queue_{};
+  std::array<Entry, QUEUE_SIZE> queue_{};
   volatile uint8_t queueHead_ = 0;
   volatile uint8_t queueTail_ = 0;
   volatile bool queueOverflow_ = false;
@@ -237,12 +318,10 @@ namespace {
 class ServerCallbacks final : public NimBLEServerCallbacks {
  public:
   explicit ServerCallbacks(BleCompanion::Impl& owner) : owner_(owner) {}
-  void onConnect(NimBLEServer* server, NimBLEConnInfo& info) override { owner_.radioConnected(server, info); }
-  void onDisconnect(NimBLEServer* server, NimBLEConnInfo& info, int reason) override {
-    owner_.radioDisconnected(server, info, reason);
-  }
+  void onConnect(NimBLEServer*, NimBLEConnInfo& info) override { owner_.radioConnected(info); }
+  void onDisconnect(NimBLEServer*, NimBLEConnInfo& info, int) override { owner_.radioDisconnected(info); }
   uint32_t onPassKeyDisplay() override { return owner_.passkeyForDisplay(); }
-  void onAuthenticationComplete(NimBLEConnInfo& info) override { owner_.authenticated(info); }
+  void onAuthenticationComplete(NimBLEConnInfo& info) override { owner_.radioAuthenticated(info); }
 
  private:
   BleCompanion::Impl& owner_;
@@ -261,11 +340,22 @@ class ControlCallbacks final : public NimBLECharacteristicCallbacks {
 
 }  // namespace
 
-bool BleCompanion::Impl::begin(const char* storedPeerAddr, void (*savePeerAddr)(const char*),
-                               void (*forgetPeerAddr)()) {
-  storedPeerAddr_ = storedPeerAddr;
+bool BleCompanion::Impl::begin(const char* storedPeerAddr, const uint8_t storedPeerAddrType,
+                               void (*savePeerAddr)(const char*, uint8_t), void (*forgetPeerAddr)()) {
   savePeerAddr_ = savePeerAddr;
   forgetPeerAddr_ = forgetPeerAddr;
+  // Parse the persisted identity once; a malformed pair degrades to "none
+  // configured" so a corrupt settings file can never lock the phone out or
+  // let a bogus identity through.
+  if (storedPeerAddr != nullptr && storedPeerAddr[0] != '\0' &&
+      peerIdFromString(storedPeerAddr, storedPeerAddrType, storedPeer_)) {
+    // parsed
+  } else {
+    storedPeer_ = PeerId{};
+    if (storedPeerAddr != nullptr && storedPeerAddr[0] != '\0') {
+      LOG_ERR(TAG, "Stored companion identity is malformed; treating as unpaired");
+    }
+  }
   session_.reset();
   passkey_ = 100000 + esp_random() % 900000;
 
@@ -318,33 +408,42 @@ void BleCompanion::Impl::stop() {
 }
 
 bool BleCompanion::Impl::forgetBond() {
+  // The seam decides: only a configured companion identity selects a bond,
+  // and nothing else in the store is ever touched.
+  PeerId target;
+  if (!companionBondTarget(storedPeer_, target)) {
+    LOG_ERR(TAG, "No companion bond configured; nothing to delete");
+    return false;
+  }
   const bool wasUp = NimBLEDevice::isInitialized();
-  if (!wasUp && !begin(storedPeerAddr_, savePeerAddr_, forgetPeerAddr_)) return false;
+  if (!wasUp && !begin(nullptr, ADDR_TYPE_UNSET, savePeerAddr_, forgetPeerAddr_)) return false;
   if (server_ != nullptr) {
     while (server_->getConnectedCount() > 0) {
       server_->disconnect(server_->getPeerInfo(0));
       delay(50);
     }
   }
-  if (forgetPeerAddr_ != nullptr) {
-    forgetPeerAddr_();
-    storedPeerAddr_ = "";
+  const NimBLEAddress targetAddress(target.addr, target.type);
+  const bool deleted = NimBLEDevice::deleteBond(targetAddress);
+  if (!deleted) {
+    // With the stack up, false means the bond is already absent from the
+    // store (the phone forgot us first): the reset goal — this identity is
+    // no longer bonded — still holds. Log it either way.
+    LOG_INF(TAG, "Companion bond not present in the store (already removed)");
   }
-  if (!NimBLEDevice::deleteAllBonds()) {
-    LOG_ERR(TAG, "Bond deletion failed");
-    if (!wasUp) stop();
-    return false;
-  }
+  if (forgetPeerAddr_ != nullptr) forgetPeerAddr_();
+  storedPeer_ = PeerId{};
   if (!wasUp) stop();
   return true;
 }
 
 BleCompanion::~BleCompanion() = default;
 
-bool BleCompanion::begin(const char* storedPeerAddr, void (*savePeerAddr)(const char*), void (*forgetPeerAddr)()) {
+bool BleCompanion::begin(const char* storedPeerAddr, const uint8_t storedPeerAddrType,
+                         void (*savePeerAddr)(const char*, uint8_t), void (*forgetPeerAddr)()) {
   if (impl_ != nullptr) return true;
   impl_ = new Impl();
-  if (!impl_->begin(storedPeerAddr, savePeerAddr, forgetPeerAddr)) {
+  if (!impl_->begin(storedPeerAddr, storedPeerAddrType, savePeerAddr, forgetPeerAddr)) {
     delete impl_;
     impl_ = nullptr;
     return false;
@@ -384,7 +483,7 @@ bool compiledIn() { return true; }
 #else  // capability off: stub bodies, no BLE linked
 
 BleCompanion::~BleCompanion() = default;
-bool BleCompanion::begin(const char*, void (*)(const char*), void (*)()) { return false; }
+bool BleCompanion::begin(const char*, uint8_t, void (*)(const char*, uint8_t), void (*)()) { return false; }
 void BleCompanion::loop() {}
 void BleCompanion::stop() {}
 bool BleCompanion::forgetBond() { return false; }

@@ -46,14 +46,20 @@ bool compiledIn();
 class BleCompanion {
  public:
   ~BleCompanion();
-  // Starts NimBLE as a GATT peripheral and advertises. `storedPeerAddr` is the
-  // persisted companion phone address ("" when none); `savePeerAddr` is called
-  // back with a first-time peer's address, `forgetPeerAddr` with "".
-  bool begin(const char* storedPeerAddr, void (*savePeerAddr)(const char* addr), void (*forgetPeerAddr)());
+  // Starts NimBLE as a GATT peripheral and advertises. `storedPeerAddr` is
+  // the persisted companion phone identity text ("aa:bb:cc:dd:ee:ff", "" when
+  // none) and `storedPeerAddrType` its NimBLE address type (0 public, 1
+  // random). Both callbacks run on the main loop: `savePeerAddr` stores a
+  // first-time peer's identity, `forgetPeerAddr` clears it.
+  bool begin(const char* storedPeerAddr, uint8_t storedPeerAddrType,
+             void (*savePeerAddr)(const char* addr, uint8_t type), void (*forgetPeerAddr)());
   void loop();
   // Fully tears the stack down (NimBLEDevice::deinit); RAM returns to the heap.
   void stop();
-  // Forgets the companion bond and address (pairing reset).
+  // Deletes ONLY the configured companion bond and clears the persisted
+  // identity (via `forgetPeerAddr`). False when no companion identity is
+  // configured or the bond could not be removed; no other bond is ever
+  // touched, and the whole store is never cleared.
   bool forgetBond();
   // One physical button edge to the phone. `button` is a Button enum value.
   bool sendButtonEvent(uint8_t button, bool pressed);

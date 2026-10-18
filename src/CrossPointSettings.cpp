@@ -104,10 +104,11 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   if (dictionaryName[0] != '\0') {
     doc["dictionaryName"] = dictionaryName;
   }
-  // Companion phone address — not in SettingsList, saved manually so the
+  // Companion phone identity — not in SettingsList, saved manually so the
   // one-phone policy survives restarts.
   if (companionPeerAddr[0] != '\0') {
     doc["companionPeerAddr"] = companionPeerAddr;
+    doc["companionPeerAddrType"] = companionPeerAddrType;
   }
   // The displayed option list varies by board, so this setting uses a dynamic
   // display-index mapping and is skipped by the generic persistence loop.
@@ -309,9 +310,17 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   if (storedFontFamily != STORED_NOTOSANS) needsResave = true;
   // Dictionary folder name — uses dynamic getter/setter in SettingsList, load manually
   copyToField(dictionaryName, doc["dictionaryName"] | "", sizeof(dictionaryName));
-  // Companion phone address — absent in older files leaves it empty (no
-  // companion phone paired yet), so existing installs keep working.
+  // Companion phone identity — absent in older files leaves it unset (no
+  // companion phone paired yet), so existing installs keep working. A
+  // corrupt type byte degrades to unset rather than to a wrong identity.
   copyToField(companionPeerAddr, doc["companionPeerAddr"] | "", sizeof(companionPeerAddr));
+  companionPeerAddrType = doc["companionPeerAddrType"] | 0xFF;
+  if (companionPeerAddr[0] == '\0') {
+    companionPeerAddrType = 0xFF;
+  } else if (companionPeerAddrType > 1) {
+    companionPeerAddr[0] = '\0';
+    companionPeerAddrType = 0xFF;
+  }
   // Language -- stored as code string for stability across enum reorders.
   if (doc["language"].is<const char*>()) {
     language = static_cast<uint8_t>(I18n::languageFromCode(doc["language"].as<const char*>()));

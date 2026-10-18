@@ -15,8 +15,8 @@ constexpr unsigned long PAIRING_RESET_HOLD_MS = 1500;
 
 // The input edges the session forwards, in MappedInputManager order.
 const MappedInputManager::Button FORWARDED[] = {
-    MappedInputManager::Button::Back, MappedInputManager::Button::Confirm, MappedInputManager::Button::Left,
-    MappedInputManager::Button::Right, MappedInputManager::Button::Up,    MappedInputManager::Button::Down,
+    MappedInputManager::Button::Back,  MappedInputManager::Button::Confirm, MappedInputManager::Button::Left,
+    MappedInputManager::Button::Right, MappedInputManager::Button::Up,      MappedInputManager::Button::Down,
 };
 
 }  // namespace
@@ -33,8 +33,8 @@ bool CompanionActivity::protocolButton(const MappedInputManager::Button button, 
 
 void CompanionActivity::logHeap(const char* when) {
   const auto heap = HalMemory::getInternalHeap();
-  LOG_INF("BLECOMP", "Heap %s: free %u, largest %u", when,
-          static_cast<unsigned>(heap.freeBytes), static_cast<unsigned>(heap.largestBlockBytes));
+  LOG_INF("BLECOMP", "Heap %s: free %u, largest %u", when, static_cast<unsigned>(heap.freeBytes),
+          static_cast<unsigned>(heap.largestBlockBytes));
 }
 
 void CompanionActivity::beginSession() {
@@ -43,14 +43,21 @@ void CompanionActivity::beginSession() {
   // One radio owner: the page turner must be off before the companion starts,
   // and its own policy resumes when this activity leaves.
   bleturner::stopNow(1000);
+  // Persistence callbacks run on the main loop (the adapter defers them
+  // there), so touching SETTINGS here is safe.
   const bool started = ble_.begin(
-      SETTINGS.companionPeerAddr,
-      [](const char* addr) {
+      SETTINGS.companionPeerAddr, SETTINGS.companionPeerAddrType,
+      [](const char* addr, uint8_t type) {
         strncpy(SETTINGS.companionPeerAddr, addr, sizeof(SETTINGS.companionPeerAddr) - 1);
         SETTINGS.companionPeerAddr[sizeof(SETTINGS.companionPeerAddr) - 1] = '\0';
+        SETTINGS.companionPeerAddrType = type;
         SETTINGS.saveToFile();
       },
-      []() { SETTINGS.companionPeerAddr[0] = '\0'; });
+      []() {
+        SETTINGS.companionPeerAddr[0] = '\0';
+        SETTINGS.companionPeerAddrType = 0xFF;
+        SETTINGS.saveToFile();
+      });
   if (!started) {
     LOG_ERR("BLECOMP", "Could not start the companion radio");
   } else {
@@ -106,10 +113,16 @@ void CompanionActivity::loop() {
   const bool resetReleased = mappedInput.wasReleased(MappedInputManager::Button::Down) ||
                              mappedInput.wasReleased(MappedInputManager::Button::Confirm);
   if (resetInputArmed_ && (resetHeld || resetReleased) && mappedInput.getHeldTime() >= PAIRING_RESET_HOLD_MS) {
+    // ONE coherent reset: the adapter deletes only the companion bond and
+    // clears the persisted identity (with saveToFile) on success; a fresh
+    // pairing session starts only after that succeeded.
     if (ble_.forgetBond()) {
       LOG_INF("BLECOMP", "Companion pairing reset");
       ble_.stop();
       beginSession();
+    } else {
+      LOG_ERR("BLECOMP", "Companion pairing reset failed; nothing was deleted");
+      requestUpdate();
     }
     return;
   }

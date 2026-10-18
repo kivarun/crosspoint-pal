@@ -11,24 +11,25 @@
 
 #include "BleCompanionJson.h"
 #include "BleCompanionProtocol.h"
+#include "CompanionPeer.h"
 
 namespace blecompanion {
 
 enum class SessionState : uint8_t { AwaitingHello, Active };
 
 enum class SessionEvent : uint8_t {
-  None,          // the message changed nothing the UI shows
-  HelloAccepted, // send hello_ack
-  ContentStored, // the content slot changed: repaint
-  ContentRepeat, // identical contentId and payload: ack only, no repaint
-  Rejected,      // protocol error: send the error reply from lastRejection()
+  None,           // the message changed nothing the UI shows
+  HelloAccepted,  // send hello_ack
+  ContentStored,  // the content slot changed: repaint
+  ContentRepeat,  // identical contentId and payload: ack only, no repaint
+  Rejected,       // protocol error: send the error reply from lastRejection()
 };
 
 enum class Rejection : uint8_t {
   None,
-  Version,   // hello with an unknown protocol version
-  NotHello,  // any message before hello
-  BadMessage // malformed or out of bounds
+  Version,    // hello with an unknown protocol version
+  NotHello,   // any message before hello
+  BadMessage  // malformed or out of bounds
 };
 
 // Whether a peer may bond/authenticate. The radio adapter calls this with the
@@ -82,13 +83,13 @@ class CompanionSession {
   }
 
   // Authentication decision for a connecting peer against the persisted
-  // companion address ("" when none). Adopt saves the address on the caller.
-  static AuthDecision authenticate(const char* peerAddr, const char* storedAddr) {
-    if (peerAddr == nullptr || peerAddr[0] == '\0') return AuthDecision::Reject;
-    if (storedAddr != nullptr && storedAddr[0] != '\0' && strcmp(storedAddr, peerAddr) == 0) {
-      return AuthDecision::Allow;
-    }
-    if (storedAddr == nullptr || storedAddr[0] == '\0') return AuthDecision::Adopt;
+  // companion identity. Only the ID address (not the over-the-air address)
+  // participates, and only after successful encrypted authentication. The
+  // caller adopts the peer into persistence when this returns Adopt.
+  static AuthDecision authenticate(const PeerId& incoming, const PeerId& stored) {
+    if (incoming.unset()) return AuthDecision::Reject;
+    if (stored.set() && stored == incoming) return AuthDecision::Allow;
+    if (stored.unset()) return AuthDecision::Adopt;
     return AuthDecision::Reject;  // one phone at a time; the user resets pairing to change it
   }
 

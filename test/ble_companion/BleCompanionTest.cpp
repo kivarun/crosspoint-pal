@@ -11,13 +11,10 @@ using namespace blecompanion;
 namespace {
 ContentMessage makeContent() { return {}; }
 
-std::string hello(uint8_t version) {
-  return "{\"op\":\"hello\",\"version\":" + std::to_string(version) + "}";
-}
+std::string hello(uint8_t version) { return "{\"op\":\"hello\",\"version\":" + std::to_string(version) + "}"; }
 
 std::string contentMsg(const std::string& title, const std::string& body, const std::string& id) {
-  return "{\"op\":\"content\",\"title\":\"" + title + "\",\"body\":\"" + body +
-         "\",\"contentId\":\"" + id + "\"}";
+  return "{\"op\":\"content\",\"title\":\"" + title + "\",\"body\":\"" + body + "\",\"contentId\":\"" + id + "\"}";
 }
 }  // namespace
 
@@ -155,7 +152,8 @@ TEST(BleCompanionJson, WritersProduceBoundedJson) {
   EXPECT_EQ(std::string(out, n), "{\"op\":\"button\",\"button\":\"down\",\"pressed\":false}");
 
   n = writeError("bad_message", "Malformed control message", out, sizeof(out));
-  EXPECT_EQ(std::string(out, n), "{\"op\":\"error\",\"code\":\"bad_message\",\"message\":\"Malformed control message\"}");
+  EXPECT_EQ(std::string(out, n),
+            "{\"op\":\"error\",\"code\":\"bad_message\",\"message\":\"Malformed control message\"}");
 
   char small[16];
   EXPECT_EQ(writeHelloAck(small, sizeof(small)), 0u);
@@ -220,15 +218,76 @@ TEST(BleCompanionSession, DisconnectResetsEphemeralState) {
 }
 
 TEST(BleCompanionSession, AuthenticationDecisions) {
-  EXPECT_EQ(CompanionSession::authenticate("AA:BB", ""), AuthDecision::Adopt);
-  EXPECT_EQ(CompanionSession::authenticate("AA:BB", "AA:BB"), AuthDecision::Allow);
-  EXPECT_EQ(CompanionSession::authenticate("AA:BB", "CC:DD"), AuthDecision::Reject);
-  EXPECT_EQ(CompanionSession::authenticate("", "AA:BB"), AuthDecision::Reject);
+  PeerId first{};
+  ASSERT_TRUE(peerIdFromString("aa:bb:cc:dd:ee:01", ADDR_TYPE_RANDOM, first));
+  PeerId second{};
+  ASSERT_TRUE(peerIdFromString("aa:bb:cc:dd:ee:02", ADDR_TYPE_RANDOM, second));
+  PeerId unset{};
+  EXPECT_TRUE(unset.unset());
+  // First valid identity is adopted.
+  EXPECT_EQ(CompanionSession::authenticate(first, unset), AuthDecision::Adopt);
+  // The same identity is allowed.
+  EXPECT_EQ(CompanionSession::authenticate(first, first), AuthDecision::Allow);
+  // A different identity is rejected.
+  EXPECT_EQ(CompanionSession::authenticate(second, first), AuthDecision::Reject);
+  EXPECT_EQ(CompanionSession::authenticate(unset, first), AuthDecision::Reject);
   // Persistent pairing state lives outside the session: authenticating never
   // touches the session state machine.
   CompanionSession s;
   const std::string h = hello(1);
   s.onControl(h.data(), h.size());
-  EXPECT_EQ(CompanionSession::authenticate("CC:DD", "AA:BB"), AuthDecision::Reject);
+  EXPECT_EQ(CompanionSession::authenticate(second, first), AuthDecision::Reject);
   EXPECT_TRUE(s.helloed());
+}
+
+TEST(BleCompanionPeer, IdentityComparesAddressAndType) {
+  PeerId a{};
+  ASSERT_TRUE(peerIdFromString("aa:bb:cc:dd:ee:01", ADDR_TYPE_RANDOM, a));
+  PeerId b{};
+  ASSERT_TRUE(peerIdFromString("aa:bb:cc:dd:ee:01", ADDR_TYPE_RANDOM, b));
+  EXPECT_EQ(a, b);
+  // Same bytes, different type: a DIFFERENT identity.
+  PeerId otherType{};
+  ASSERT_TRUE(peerIdFromString("aa:bb:cc:dd:ee:01", ADDR_TYPE_PUBLIC, otherType));
+  EXPECT_NE(a, otherType);
+  // Same text, different bytes: different.
+  PeerId c{};
+  ASSERT_TRUE(peerIdFromString("aa:bb:cc:dd:ee:02", ADDR_TYPE_RANDOM, c));
+  EXPECT_NE(a, c);
+}
+
+TEST(BleCompanionPeer, TextRoundTrip) {
+  PeerId in{};
+  ASSERT_TRUE(peerIdFromString("a1:b2:c3:d4:e5:f6", ADDR_TYPE_RANDOM, in));
+  char text[PEER_ID_TEXT_LEN + 1];
+  ASSERT_TRUE(peerIdToString(in, text, sizeof(text)));
+  EXPECT_STREQ(text, "a1:b2:c3:d4:e5:f6");
+  PeerId out{};
+  ASSERT_TRUE(peerIdFromString(text, ADDR_TYPE_RANDOM, out));
+  EXPECT_EQ(in, out);
+  // The stored form and a reloaded form with the same type are the same
+  // identity: persistence survives a settings reload.
+}
+
+TEST(BleCompanionPeer, MalformedTextRejected) {
+  PeerId out{};
+  EXPECT_FALSE(peerIdFromString("", ADDR_TYPE_RANDOM, out));
+  EXPECT_FALSE(peerIdFromString("aa:bb:cc:dd:ee", ADDR_TYPE_RANDOM, out));
+  EXPECT_FALSE(peerIdFromString("aa:bb:cc:dd:ee:ff:00", ADDR_TYPE_RANDOM, out));
+  EXPECT_FALSE(peerIdFromString("aa:bb:cc:dd:ee:gg", ADDR_TYPE_RANDOM, out));
+  EXPECT_FALSE(peerIdFromString("aa:bb:cc:dd:ee:ff", 2, out));
+  EXPECT_FALSE(peerIdFromString("aa:bb:cc:dd:ee:ff", 0xFF, out));
+  EXPECT_TRUE(out.unset());
+}
+
+TEST(BleCompanionPeer, BondTargetSelectsExactIdentityOnly) {
+  // A configured identity selects exactly that bond.
+  PeerId stored{};
+  ASSERT_TRUE(peerIdFromString("aa:bb:cc:dd:ee:01", ADDR_TYPE_RANDOM, stored));
+  PeerId target{};
+  ASSERT_TRUE(companionBondTarget(stored, target));
+  EXPECT_EQ(target, stored);  // the EXACT identity, never a guess
+  // No configured identity: nothing may be deleted (no delete-all fallback).
+  PeerId unset{};
+  EXPECT_FALSE(companionBondTarget(unset, target));
 }
