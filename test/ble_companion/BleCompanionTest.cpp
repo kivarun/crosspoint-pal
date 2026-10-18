@@ -6,6 +6,7 @@
 #include "BleCompanionJson.h"
 #include "CompanionSession.h"
 #include "ConnectionHandle.h"
+#include "PoisonedHandles.h"
 
 using namespace blecompanion;
 
@@ -308,4 +309,60 @@ TEST(BleCompanionSession, ConnectionHandleZeroIsAValidAcceptedSession) {
   // The sentinel's value: NimBLE's BLE_HS_CONN_HANDLE_NONE (0xffff), asserted
   // against the real NimBLE constant in the adapter.
   EXPECT_EQ(kNoSessionHandle, 0xFFFF);
+}
+
+TEST(BleCompanionSession, PoisonedConnectionCannotReauthenticate) {
+  // Connected(H) -> overflow fail-close -> poison(H). A later
+  // Authenticated(H) must not establish a session or emit egress: the
+  // dispatch skips poisoned handles, and even if an entry reached the
+  // session gate, the cleared sentinel keeps it closed.
+  PoisonedHandles handles;
+  ASSERT_TRUE(handles.poison(7));
+  EXPECT_TRUE(handles.poisoned(7));                 // the dispatch skips this peer
+  EXPECT_FALSE(sessionBound(kNoSessionHandle, 7));  // the session gate is closed
+  // The teardown completes only when the disconnect lands.
+  handles.forget(7);
+  EXPECT_FALSE(handles.poisoned(7));
+}
+
+TEST(BleCompanionSession, PoisonedHandlesAreBoundedByTheStackConnectionLimit) {
+  PoisonedHandles handles;
+  EXPECT_TRUE(handles.poison(1));
+  EXPECT_TRUE(handles.poison(2));
+  EXPECT_TRUE(handles.poison(3));
+  EXPECT_TRUE(handles.poisoned(1));
+  EXPECT_TRUE(handles.poisoned(2));
+  EXPECT_TRUE(handles.poisoned(3));
+  EXPECT_FALSE(handles.poison(4)) << "capacity must match the stack connection limit";
+  // Releasing one dying link frees a slot for a new one.
+  handles.forget(2);
+  EXPECT_TRUE(handles.poison(4));
+  EXPECT_FALSE(handles.poisoned(2));
+  EXPECT_TRUE(handles.poisoned(4));
+  // The sentinel is never a real connection handle.
+  EXPECT_FALSE(handles.poison(kNoSessionHandle));
+  EXPECT_FALSE(handles.poisoned(kNoSessionHandle));
+  // Forgetting an untracked handle is a no-op.
+  handles.forget(99);
+  EXPECT_TRUE(handles.poisoned(1));
+}
+
+TEST(BleCompanionSession, PoisonedHandlesForgetCompletedTeardowns) {
+  // A poisoned handle that is no longer connected finished its teardown: its
+  // Disconnected entry was lost to ring pressure, so it must not leak — a
+  // reused handle would otherwise stay blocked forever.
+  PoisonedHandles handles;
+  ASSERT_TRUE(handles.poison(1));
+  ASSERT_TRUE(handles.poison(2));
+  ASSERT_TRUE(handles.poison(3));
+  const uint16_t live[] = {2};  // only peer 2 is still connected
+  handles.forgetNotIn(live, 1);
+  EXPECT_FALSE(handles.poisoned(1));
+  EXPECT_TRUE(handles.poisoned(2));
+  EXPECT_FALSE(handles.poisoned(3));
+  // An empty live list releases everything (fail-close with zero peers).
+  handles.forgetNotIn(nullptr, 0);
+  EXPECT_FALSE(handles.poisoned(2));
+  // The freed capacity accepts a new dying link.
+  EXPECT_TRUE(handles.poison(4));
 }

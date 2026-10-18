@@ -28,6 +28,7 @@
 #include "CompanionPeer.h"
 #include "CompanionSession.h"
 #include "ConnectionHandle.h"
+#include "PoisonedHandles.h"
 
 #endif
 
@@ -42,6 +43,9 @@ static_assert(ADDR_TYPE_UNSET == CompanionAddrTypeUnset);
 // The no-session sentinel is NimBLE's own; 0x0000 is a valid connection
 // handle and must work like any other accepted handle.
 static_assert(kNoSessionHandle == BLE_HS_CONN_HANDLE_NONE);
+// The poison tracker must hold every connection the stack allows at once.
+static_assert(kMaxCompanionConnections >= NIMBLE_MAX_CONNECTIONS);
+
 #endif
 
 #if FREEINK_CAP_BLE_COMPANION
@@ -116,7 +120,20 @@ class BleCompanion::Impl {
         overflowFailClosed();
         return;
       }
+      // A failed advertising resume is retried on later passes: the link is
+      // already gone, so no event will otherwise re-trigger it.
+      if (advertisingResumePending_ && resumeAdvertising()) {
+        advertisingResumePending_ = false;
+      }
       if (!pop(entry)) break;
+      if (entry.kind == Kind::Disconnected || entry.kind == Kind::Connected) {
+        // A dying link cannot emit Connected for its own handle, so both
+        // kinds prove the teardown completed: Disconnected directly, and
+        // Connected because the stack reuses the handle only afterwards.
+        poisonedHandles_.forget(entry.connHandle);
+      } else if (poisonedHandles_.poisoned(entry.connHandle)) {
+        continue;  // a dying peer's events must not reach product logic
+      }
       switch (entry.kind) {
         case Kind::Connected:
           handleConnected(entry);
@@ -249,24 +266,62 @@ class BleCompanion::Impl {
   // --- Main-loop event handling (the single product-state owner) ---
 
   // The queue is poisoned once an entry was dropped: producer order is lost,
-  // so no surviving entry can be trusted. Discard everything still queued,
-  // force the accepted link down, clear the session and settle in the
-  // non-session state. No notification: the handle may already be stale or
-  // reused, so it is not a trustworthy recipient.
+  // so no surviving entry can be trusted. Discard everything still queued and
+  // force every connected peer down: a pre-auth link is not tracked by the
+  // session handle, so it must not survive the fail-close boundary. Each
+  // handle stays poisoned until its disconnect completes, so a later
+  // authentication from a dying link can never establish a session. The
+  // product state stays where it is: each Disconnected entry resumes
+  // advertising, and only then is the teardown actually complete. No
+  // notification: no peer here is a trustworthy recipient.
   void overflowFailClosed() {
     portENTER_CRITICAL(&queueMux_);
     queueHead_ = queueTail_;
     queueOverflow_ = false;
     portEXIT_CRITICAL(&queueMux_);
-    if (sessionHandle_ != kNoSessionHandle) {
-      if (server_ != nullptr) server_->disconnect(sessionHandle_);
-      sessionHandle_ = kNoSessionHandle;
+    LOG_ERR(TAG, "Queue overflow; failing the companion session closed");
+    if (server_ != nullptr) {
+      // Real handles only: getPeerInfo(i) misresolves around freed slots, and
+      // a default NimBLEConnInfo carries handle 0, which is a valid handle
+      // here. The small vector allocation is justified: fail-close is a rare
+      // recovery path and there is no allocation-free public enumeration.
+      const auto peers = server_->getPeerDevices();
+      // A poisoned handle that is no longer connected finished its teardown;
+      // its Disconnected entry was lost to the same pressure. Release it, or
+      // a reused handle would stay blocked forever.
+      poisonedHandles_.forgetNotIn(peers.data(), peers.size());
+      for (const uint16_t handle : peers) {
+        poisonedHandles_.poison(handle);
+        if (!server_->disconnect(handle)) {
+          LOG_ERR(TAG, "Could not force a companion link down");
+        }
+      }
+      // No peer was connected: no Disconnected entry will arrive to resume
+      // advertising, so the fail-close itself owns the resume.
+      if (peers.empty() && state_ != RadioState::Stopped && !resumeAdvertising()) {
+        advertisingResumePending_ = true;
+      }
     }
+    sessionHandle_ = kNoSessionHandle;
     session_.reset();
-    if (state_ != RadioState::Stopped) setState(RadioState::Advertising);
+  }
+
+  // Restart pairing-mode advertising after a link went away. The product
+  // state claims Advertising only once the radio actually advertises again.
+  bool resumeAdvertising() {
+    NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
+    if (advertising == nullptr || !advertising->start()) {
+      LOG_ERR(TAG, "Could not restart companion advertising");
+      return false;
+    }
+    setState(RadioState::Advertising);
+    return true;
   }
 
   void handleConnected(const Entry& entry) {
+    // A live link supersedes a pending advertising resume: once a peer is
+    // connected, the radio must not claim Advertising.
+    advertisingResumePending_ = false;
     if (sessionHandle_ != kNoSessionHandle && entry.connHandle != sessionHandle_) {
       // A second peer connected while a session is active. The one-phone
       // policy rejects it at authentication; do not disturb the live session.
@@ -322,7 +377,9 @@ class BleCompanion::Impl {
     }
     sessionHandle_ = kNoSessionHandle;
     session_.reset();  // ephemeral state dies with the link
-    if (state_ != RadioState::Stopped) setState(RadioState::Advertising);
+    if (state_ != RadioState::Stopped && !resumeAdvertising()) {
+      advertisingResumePending_ = true;  // retried on the next loop pass
+    }
   }
 
   void handleControl(const Entry& entry) {
@@ -399,6 +456,8 @@ class BleCompanion::Impl {
   uint16_t sessionHandle_ = kNoSessionHandle;  // accepted session's connection handle
 
   CompanionSession session_;
+  PoisonedHandles poisonedHandles_;  // dying links until their disconnect lands
+  bool advertisingResumePending_ = false;
   uint32_t passkey_ = 0;
   RadioState state_ = RadioState::Stopped;
   uint32_t revision_ = 0;
@@ -545,12 +604,13 @@ bool BleCompanion::Impl::forgetBond() {
     return false;
   }
   if (server_ != nullptr) {
-    while (server_->getConnectedCount() > 0) {
-      if (!server_->disconnect(server_->getPeerInfo(0))) {
+    // Terminate the peers the server still lists (async, no wait): the
+    // positional getPeerInfo(i) misresolves around freed connection slots.
+    for (const uint16_t handle : server_->getPeerDevices()) {
+      if (!server_->disconnect(handle)) {
         LOG_ERR(TAG, "Could not drop the companion connection");
         break;
       }
-      delay(50);
     }
   }
   // ble_gap_unpair refuses to run while advertising is active when the peer
@@ -567,9 +627,7 @@ bool BleCompanion::Impl::forgetBond() {
   } else if (!(deleted = NimBLEDevice::deleteBond(targetAddress))) {
     LOG_ERR(TAG, "Failed to delete the companion bond");
   }
-  if (!advertising->start()) {
-    LOG_ERR(TAG, "Advertising restart failed");
-  }
+  resumeAdvertising();
   if (!deleted) return false;
   if (forgetPeerAddr_ != nullptr) forgetPeerAddr_();
   storedPeer_ = PeerId{};

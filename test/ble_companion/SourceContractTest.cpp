@@ -17,7 +17,8 @@ namespace {
 namespace fs = std::filesystem;
 
 const std::set<std::string> kOwn = {"BleCompanion.h",     "BleCompanionProtocol.h", "BleCompanionJson.h",
-                                    "CompanionSession.h", "CompanionPeer.h",        "ConnectionHandle.h"};
+                                    "CompanionSession.h", "CompanionPeer.h",        "ConnectionHandle.h",
+                                    "PoisonedHandles.h"};
 const std::set<std::string> kStd = {"array", "cstddef", "cstdint", "cstdio", "cstring", "initializer_list", "memory"};
 const std::set<std::string> kAdapterOnly = {"NimBLEDevice.h", "esp_random.h", "Memory.h"};
 
@@ -165,21 +166,87 @@ TEST(BleCompanionSourceContractTest, OverflowPoisonsTheQueueBeforeFurtherProcess
       << "an observed overflow must fail closed and stop processing";
   EXPECT_NE(loopBody.find("return;"), std::string::npos)
       << "an observed overflow must return from the loop without processing more entries";
-  // The fail-closed path itself: discard queued entries, tear the accepted
-  // session down, settle in the non-session state, emit nothing.
+  // The fail-closed path itself: discard queued entries, terminate every
+  // connected peer (pre-auth links included) and poison its handle, clear
+  // the session, emit nothing, and claim no product state — the teardown
+  // completes only on each Disconnected entry, which resumes advertising.
   const size_t failStart = adapter.find("void overflowFailClosed()");
   ASSERT_NE(failStart, std::string::npos);
-  const size_t failEnd = adapter.find("void handleConnected", failStart);
+  const size_t failEnd = adapter.find("bool resumeAdvertising()", failStart);
   ASSERT_NE(failEnd, std::string::npos);
   const std::string failClosed = adapter.substr(failStart, failEnd - failStart);
   EXPECT_NE(failClosed.find("queueHead_ = queueTail_"), std::string::npos)
       << "remaining queued entries must be discarded";
-  EXPECT_NE(failClosed.find("disconnect(sessionHandle_)"), std::string::npos)
-      << "the exact accepted handle must be forced down";
+  EXPECT_NE(failClosed.find("getPeerDevices()"), std::string::npos)
+      << "connected peers must be enumerated by real handle (getPeerInfo(i) misresolves around freed slots)";
+  EXPECT_NE(failClosed.find("poisonedHandles_.forgetNotIn("), std::string::npos)
+      << "poisoned handles whose teardown already completed must be released";
+  EXPECT_NE(failClosed.find("poisonedHandles_.poison("), std::string::npos)
+      << "terminated handles must stay poisoned until their disconnect lands";
+  EXPECT_NE(failClosed.find("disconnect(handle)"), std::string::npos) << "each connected peer must be forced down";
+  EXPECT_NE(failClosed.find("LOG_ERR"), std::string::npos) << "a fail-close must be diagnosable from serial logs";
+  const size_t emptyPeers = failClosed.find("peers.empty()");
+  ASSERT_NE(emptyPeers, std::string::npos);
+  const size_t failResume = failClosed.find("resumeAdvertising()");
+  ASSERT_NE(failResume, std::string::npos);
+  EXPECT_LT(emptyPeers, failResume)
+      << "with zero connected peers no Disconnected entry will arrive: the fail-close owns the resume";
   EXPECT_NE(failClosed.find("sessionHandle_ = kNoSessionHandle"), std::string::npos) << "the session must be cleared";
-  EXPECT_NE(failClosed.find("setState(RadioState::Advertising)"), std::string::npos)
-      << "product state must settle in the non-session state";
+  EXPECT_EQ(failClosed.find("setState("), std::string::npos)
+      << "fail-close must not claim a state; the Disconnected path resumes advertising";
   EXPECT_EQ(failClosed.find("notifyTo("), std::string::npos) << "no protocol egress on overflow";
+  // Dispatch ordering: a Disconnected entry releases its poisoned handle
+  // before normal handling; every other entry from a dying peer is skipped.
+  EXPECT_NE(loopBody.find("poisonedHandles_.forget(entry.connHandle);"), std::string::npos)
+      << "the disconnect lifecycle must release the poisoned handle";
+  EXPECT_NE(loopBody.find("poisonedHandles_.poisoned(entry.connHandle)"), std::string::npos)
+      << "a dying peer's events must be skipped before product logic";
+}
+
+TEST(BleCompanionSourceContractTest, AdvertisingResumesOnlyWhenStarted) {
+  const std::string adapter = readAll(fs::path(BLECOMPANION_ROOT_PATH) / "src" / "BleCompanion.cpp");
+  // handleDisconnected must claim Advertising only through the canonical
+  // resume helper, which starts real advertising before settling the state.
+  const size_t disconnectedStart = adapter.find("void handleDisconnected(const Entry& entry)");
+  ASSERT_NE(disconnectedStart, std::string::npos);
+  const size_t disconnectedEnd = adapter.find("void handleControl(const Entry& entry)", disconnectedStart);
+  ASSERT_NE(disconnectedEnd, std::string::npos);
+  const std::string handleDisconnected = adapter.substr(disconnectedStart, disconnectedEnd - disconnectedStart);
+  EXPECT_NE(handleDisconnected.find("resumeAdvertising()"), std::string::npos)
+      << "advertising must restart through the canonical helper";
+  EXPECT_EQ(handleDisconnected.find("setState(RadioState::Advertising)"), std::string::npos)
+      << "the product state must never claim Advertising without a real start";
+  // A live link supersedes a pending resume: handleConnected must clear the
+  // retry flag, or a late success could claim Advertising over a session.
+  const size_t connectedStart = adapter.find("void handleConnected(const Entry& entry)");
+  ASSERT_NE(connectedStart, std::string::npos);
+  const size_t connectedEnd = adapter.find("void handleAuthenticated(const Entry& entry)", connectedStart);
+  ASSERT_NE(connectedEnd, std::string::npos);
+  EXPECT_NE(adapter.substr(connectedStart, connectedEnd - connectedStart).find("advertisingResumePending_ = false;"),
+            std::string::npos)
+      << "a live link must supersede a pending advertising resume";
+  const size_t resumeStart = adapter.find("bool resumeAdvertising()");
+  ASSERT_NE(resumeStart, std::string::npos);
+  const size_t resumeEnd = adapter.find("void handleConnected(const Entry& entry)", resumeStart);
+  ASSERT_NE(resumeEnd, std::string::npos);
+  const std::string resume = adapter.substr(resumeStart, resumeEnd - resumeStart);
+  const size_t start = resume.find("advertising->start()");
+  ASSERT_NE(start, std::string::npos);
+  const size_t claim = resume.find("setState(RadioState::Advertising)");
+  ASSERT_NE(claim, std::string::npos);
+  EXPECT_LT(start, claim) << "the state is claimed only after advertising actually starts";
+  const size_t failure = resume.find("return false;");
+  ASSERT_NE(failure, std::string::npos);
+  EXPECT_LT(failure, claim) << "a failed restart must return before any state claim";
+  EXPECT_NE(resume.find("LOG_ERR"), std::string::npos) << "a failed restart must be reported";
+  // A failed restart is retried on later loop passes: the link is gone, so no
+  // event will otherwise re-trigger the resume.
+  const size_t loopStart = adapter.find("void loop() {");
+  ASSERT_NE(loopStart, std::string::npos);
+  const size_t loopEnd = adapter.find("Status status() const", loopStart);
+  ASSERT_NE(loopEnd, std::string::npos);
+  EXPECT_NE(adapter.substr(loopStart, loopEnd - loopStart).find("advertisingResumePending_"), std::string::npos)
+      << "a failed advertising resume must be retried by the main loop";
 }
 
 TEST(BleCompanionSourceContractTest, CallbacksAreSingleOwnerNoBareNew) {
