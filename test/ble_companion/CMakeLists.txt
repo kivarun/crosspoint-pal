@@ -29,6 +29,7 @@ target_include_directories(BleCompanionSourceContractTest PRIVATE
 
 target_compile_definitions(BleCompanionSourceContractTest PRIVATE
   BLECOMPANION_ROOT_PATH="${REPO_ROOT}/lib/BleCompanion"
+  REPO_ROOT_PATH="${REPO_ROOT}"
 )
 
 target_link_libraries(BleCompanionSourceContractTest PRIVATE

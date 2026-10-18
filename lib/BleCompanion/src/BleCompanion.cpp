@@ -22,10 +22,12 @@
 
 #include <array>
 #include <cstring>
+#include <memory>
 
 #include "BleCompanionJson.h"
 #include "CompanionPeer.h"
 #include "CompanionSession.h"
+#include "ConnectionHandle.h"
 
 #endif
 
@@ -37,6 +39,9 @@ namespace blecompanion {
 static_assert(ADDR_TYPE_PUBLIC == CompanionAddrTypePublic);
 static_assert(ADDR_TYPE_RANDOM == CompanionAddrTypeRandom);
 static_assert(ADDR_TYPE_UNSET == CompanionAddrTypeUnset);
+// The no-session sentinel is NimBLE's own; 0x0000 is a valid connection
+// handle and must work like any other accepted handle.
+static_assert(kNoSessionHandle == BLE_HS_CONN_HANDLE_NONE);
 #endif
 
 #if FREEINK_CAP_BLE_COMPANION
@@ -89,12 +94,15 @@ class BleCompanion::Impl {
   bool forgetBond();
 
   bool sendButtonEvent(const uint8_t button, const bool pressed) {
-    if (state_ != RadioState::Connected || event_ == nullptr || !session_.helloed()) return false;
+    if (state_ != RadioState::Connected || sessionHandle_ == kNoSessionHandle || event_ == nullptr ||
+        !session_.helloed()) {
+      return false;
+    }
     if (button > static_cast<uint8_t>(Button::Down)) return false;
     char out[96];
     const size_t n = writeButtonEvent(static_cast<Button>(button), pressed, out, sizeof(out));
     if (n == 0) return false;
-    return event_->notify(reinterpret_cast<const uint8_t*>(out), n);
+    return notifyTo(sessionHandle_, out, n);
   }
 
   void loop() {
@@ -116,17 +124,16 @@ class BleCompanion::Impl {
       }
     }
     if (takeQueueOverflow()) {
-      // Dropped entries can include lifecycle events, so the accepted session
-      // must end for real: force the link down (a no-op when it is already
-      // gone) and drop the stale handle. A reconnected phone re-authenticates
-      // and re-hellos.
-      if (sessionHandle_ != 0) {
+      // Dropped entries can include lifecycle events, so the accepted link is
+      // no longer trustworthy: fail closed. Force the exact accepted handle
+      // down and clear the session. No notification goes out: the handle may
+      // already be stale or reused, so it is not a trustworthy recipient.
+      if (sessionHandle_ != kNoSessionHandle) {
         if (server_ != nullptr) server_->disconnect(sessionHandle_);
-        sessionHandle_ = 0;
+        sessionHandle_ = kNoSessionHandle;
       }
       session_.reset();
       revision_++;
-      reject("queue_full", "Too many messages");
     }
   }
 
@@ -185,7 +192,10 @@ class BleCompanion::Impl {
     const NimBLEAttValue value = characteristic->getValue();
     const size_t length = value.size();
     if (length == 0 || length > MAX_CONTROL_BYTES) {
-      flagQueueOverflow();
+      // Unqueueable writes are dropped silently: the writer is not yet known
+      // to the main loop's policy (it may be a pairing-time peer), so no
+      // error can be scoped to it, and treating a validation failure as ring
+      // pressure would tear down an unrelated live session.
       return;
     }
     Entry entry;
@@ -236,15 +246,9 @@ class BleCompanion::Impl {
     return overflow;
   }
 
-  void flagQueueOverflow() {
-    portENTER_CRITICAL(&queueMux_);
-    queueOverflow_ = true;
-    portEXIT_CRITICAL(&queueMux_);
-  }
-
   // --- Main-loop event handling (the single product-state owner) ---
   void handleConnected(const Entry& entry) {
-    if (sessionHandle_ != 0 && entry.connHandle != sessionHandle_) {
+    if (sessionHandle_ != kNoSessionHandle && entry.connHandle != sessionHandle_) {
       // A second peer connected while a session is active. The one-phone
       // policy rejects it at authentication; do not disturb the live session.
       return;
@@ -264,7 +268,7 @@ class BleCompanion::Impl {
       if (server_ != nullptr) server_->disconnect(entry.connHandle);
       return;
     }
-    if (sessionHandle_ != 0 && entry.connHandle != sessionHandle_) {
+    if (sessionHandle_ != kNoSessionHandle && entry.connHandle != sessionHandle_) {
       LOG_ERR(TAG, "Rejecting a second connection while a session is active");
       if (server_ != nullptr) server_->disconnect(entry.connHandle);
       return;
@@ -294,45 +298,47 @@ class BleCompanion::Impl {
   }
 
   void handleDisconnected(const Entry& entry) {
-    if (sessionHandle_ != 0 && entry.connHandle != sessionHandle_) {
+    if (sessionHandle_ != kNoSessionHandle && entry.connHandle != sessionHandle_) {
       return;  // a rejected or foreign peer left; the accepted session stays
     }
-    sessionHandle_ = 0;
+    sessionHandle_ = kNoSessionHandle;
     session_.reset();  // ephemeral state dies with the link
     if (state_ != RadioState::Stopped) setState(RadioState::Advertising);
   }
 
   void handleControl(const Entry& entry) {
     // Only the accepted companion session reaches product state; anything
-    // else (rejected phone, pairing-time writes) is dropped here.
-    if (sessionHandle_ == 0 || entry.connHandle != sessionHandle_) return;
+    // else (rejected phone, pairing-time writes) is dropped here. Handle 0 is
+    // a valid accepted session; the sentinel is kNoSessionHandle.
+    if (!sessionBound(sessionHandle_, entry.connHandle)) return;
     const SessionEvent event = session_.onControl(reinterpret_cast<const char*>(entry.data), entry.length);
     switch (event) {
       case SessionEvent::HelloAccepted: {
         char out[64];
         const size_t n = writeHelloAck(out, sizeof(out));
-        if (n != 0 && event_ != nullptr) event_->notify(reinterpret_cast<const uint8_t*>(out), n);
+        if (n != 0) notifyTo(sessionHandle_, out, n);
+        revision_++;  // sessionActive changed: the snapshot must repaint
         break;
       }
       case SessionEvent::ContentStored:
       case SessionEvent::ContentRepeat: {
         char out[80];
         const size_t n = writeContentAck(session_.content().contentId, out, sizeof(out));
-        if (n != 0 && event_ != nullptr) event_->notify(reinterpret_cast<const uint8_t*>(out), n);
+        if (n != 0) notifyTo(sessionHandle_, out, n);
         if (event == SessionEvent::ContentStored) revision_++;
         break;
       }
       case SessionEvent::Rejected: {
         switch (session_.lastRejection()) {
           case Rejection::Version:
-            reject("version", "Unsupported protocol version");
+            reject(sessionHandle_, "version", "Unsupported protocol version");
             break;
           case Rejection::NotHello:
-            reject("hello_first", "Send hello first");
+            reject(sessionHandle_, "hello_first", "Send hello first");
             break;
           case Rejection::BadMessage:
           case Rejection::None:
-            reject("bad_message", "Malformed control message");
+            reject(sessionHandle_, "bad_message", "Malformed control message");
             break;
         }
         break;
@@ -342,10 +348,18 @@ class BleCompanion::Impl {
     }
   }
 
-  void reject(const char* code, const char* message) {
+  // All protocol egress goes through here, scoped to one connection handle.
+  // NimBLE's handle-less notify would broadcast to every connected peer,
+  // including rejected or pairing ones.
+  bool notifyTo(uint16_t handle, const char* data, const size_t length) {
+    if (event_ == nullptr || handle == kNoSessionHandle) return false;
+    return event_->notify(reinterpret_cast<const uint8_t*>(data), length, handle);
+  }
+
+  void reject(uint16_t handle, const char* code, const char* message) {
     char out[MAX_CONTROL_BYTES];
     const size_t n = writeError(code, message, out, sizeof(out));
-    if (n != 0 && event_ != nullptr) event_->notify(reinterpret_cast<const uint8_t*>(out), n);
+    if (n != 0) notifyTo(handle, out, n);
   }
 
   void setState(const RadioState state) {
@@ -357,13 +371,13 @@ class BleCompanion::Impl {
   NimBLEServer* server_ = nullptr;
   NimBLECharacteristic* control_ = nullptr;
   NimBLECharacteristic* event_ = nullptr;
-  ServerCallbacks* serverCallbacks_ = nullptr;
-  ControlCallbacks* controlCallbacks_ = nullptr;
+  std::unique_ptr<ServerCallbacks> serverCallbacks_;
+  std::unique_ptr<ControlCallbacks> controlCallbacks_;
 
   void (*savePeerAddr_)(const char*, uint8_t) = nullptr;
   void (*forgetPeerAddr_)() = nullptr;
-  PeerId storedPeer_{};         // main-loop-owned identity policy state
-  uint16_t sessionHandle_ = 0;  // connection handle of the accepted session, 0 = none
+  PeerId storedPeer_{};                        // main-loop-owned identity policy state
+  uint16_t sessionHandle_ = kNoSessionHandle;  // accepted session's connection handle
 
   CompanionSession session_;
   uint32_t passkey_ = 0;
@@ -377,12 +391,9 @@ class BleCompanion::Impl {
   portMUX_TYPE queueMux_ = portMUX_INITIALIZER_UNLOCKED;
 
  public:
-  // NimBLE holds these pointers without owning them (the server's delete flag
-  // is off); the Impl destructor is their single owner.
-  ~Impl() {
-    delete serverCallbacks_;
-    delete controlCallbacks_;
-  }
+  // Single owner of the two NimBLE callback objects (the server's delete
+  // flag is off). Defined after the callback classes so they are complete.
+  ~Impl();
 };
 
 namespace {
@@ -412,6 +423,12 @@ class ControlCallbacks final : public NimBLECharacteristicCallbacks {
 
 }  // namespace
 
+// The Impl destructor destroys the callback objects after their types are
+// complete; their unique_ptr members free them exactly once, on every path.
+// Defined here, directly in blecompanion: a nested anonymous namespace does
+// not enclose BleCompanion::Impl.
+BleCompanion::Impl::~Impl() = default;
+
 bool BleCompanion::Impl::begin(const char* storedPeerAddr, const uint8_t storedPeerAddrType,
                                void (*savePeerAddr)(const char*, uint8_t), void (*forgetPeerAddr)()) {
   // One radio owner: the adapter is process-global and shared with the BLE
@@ -436,6 +453,15 @@ bool BleCompanion::Impl::begin(const char* storedPeerAddr, const uint8_t storedP
   }
   session_.reset();
   passkey_ = 100000 + esp_random() % 900000;
+  // Allocate the callback objects before any NimBLE state exists: a failed
+  // allocation here leaves nothing to tear down, and Impl owns them for the
+  // whole session (no bare new, no abort under -fno-exceptions).
+  serverCallbacks_ = makeUniqueNoThrow<ServerCallbacks>(*this);
+  controlCallbacks_ = makeUniqueNoThrow<ControlCallbacks>(*this);
+  if (serverCallbacks_ == nullptr || controlCallbacks_ == nullptr) {
+    LOG_ERR(TAG, "Not enough heap for the companion callbacks");
+    return false;
+  }
 
   NimBLEDevice::init(DEVICE_NAME);
   NimBLEDevice::setMTU(517);
@@ -444,15 +470,13 @@ bool BleCompanion::Impl::begin(const char* storedPeerAddr, const uint8_t storedP
   NimBLEDevice::setSecurityPasskey(passkey_);
 
   server_ = NimBLEDevice::createServer();
-  serverCallbacks_ = new ServerCallbacks(*this);
-  server_->setCallbacks(serverCallbacks_, false);  // Impl owns the object
+  server_->setCallbacks(serverCallbacks_.get(), false);  // Impl owns the object
   NimBLEService* service = server_->createService(SERVICE_UUID);
   control_ = service->createCharacteristic(CONTROL_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_ENC,
                                            MAX_CONTROL_BYTES);
   event_ =
       service->createCharacteristic(EVENT_UUID, NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ_ENC, MAX_CONTROL_BYTES);
-  controlCallbacks_ = new ControlCallbacks(*this);
-  control_->setCallbacks(controlCallbacks_);
+  control_->setCallbacks(controlCallbacks_.get());
   server_->start();
 
   NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
@@ -470,19 +494,20 @@ bool BleCompanion::Impl::begin(const char* storedPeerAddr, const uint8_t storedP
 }
 
 void BleCompanion::Impl::stop() {
+  // NimBLE teardown first: deinit deletes the server/characteristics the
+  // callbacks are registered with, so no callback can fire into a dying Impl.
   if (NimBLEDevice::isInitialized()) NimBLEDevice::deinit(true);
   server_ = nullptr;
-  serverCallbacks_ = nullptr;
   control_ = nullptr;
   event_ = nullptr;
-  // serverCallbacks_/controlCallbacks_ are Impl-owned; the destructor deletes
-  // them, so they are not nulled here.
+  // serverCallbacks_/controlCallbacks_ stay alive: their unique_ptr members
+  // release them exactly once in ~Impl.
   portENTER_CRITICAL(&queueMux_);
   queueHead_ = 0;
   queueTail_ = 0;
   queueOverflow_ = false;
   portEXIT_CRITICAL(&queueMux_);
-  sessionHandle_ = 0;
+  sessionHandle_ = kNoSessionHandle;
   session_.reset();
   setState(RadioState::Stopped);
 }

@@ -5,6 +5,7 @@
 
 #include "BleCompanionJson.h"
 #include "CompanionSession.h"
+#include "ConnectionHandle.h"
 
 using namespace blecompanion;
 
@@ -290,4 +291,21 @@ TEST(BleCompanionPeer, BondTargetSelectsExactIdentityOnly) {
   // No configured identity: nothing may be deleted (no delete-all fallback).
   PeerId unset{};
   EXPECT_FALSE(companionBondTarget(unset, target));
+}
+
+TEST(BleCompanionSession, ConnectionHandleZeroIsAValidAcceptedSession) {
+  // BLE connection handle 0x0000 is valid: an accepted session on it must
+  // behave like any other accepted handle.
+  constexpr uint16_t kZero = 0;
+  EXPECT_TRUE(sessionBound(kZero, kZero));  // entry from the accepted session
+  EXPECT_FALSE(sessionBound(kZero, 7));     // a foreign connection's entry
+  // The no-session sentinel never matches, not even handle 0 or 0xffff.
+  EXPECT_FALSE(sessionBound(kNoSessionHandle, kZero));
+  EXPECT_FALSE(sessionBound(kNoSessionHandle, kNoSessionHandle));
+  // A real accepted handle keeps matching only itself.
+  EXPECT_TRUE(sessionBound(5, 5));
+  EXPECT_FALSE(sessionBound(5, 7));
+  // The sentinel's value: NimBLE's BLE_HS_CONN_HANDLE_NONE (0xffff), asserted
+  // against the real NimBLE constant in the adapter.
+  EXPECT_EQ(kNoSessionHandle, 0xFFFF);
 }

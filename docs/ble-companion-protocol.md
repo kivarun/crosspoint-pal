@@ -48,6 +48,8 @@ reader → phone:
   never forwarded; it leaves the session.
 - Malformed or oversized messages are answered with
   `error{code:"bad_message"}` and the session stays alive.
+- If the reader's internal event queue overflows, it drops the link without
+  an error notification; reconnect and send `hello` again.
 - Reader→phone notifications are at most MTU−3 bytes; every message above
   fits comfortably once MTU 517 is negotiated.
 

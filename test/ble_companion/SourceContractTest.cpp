@@ -16,9 +16,9 @@ namespace {
 
 namespace fs = std::filesystem;
 
-const std::set<std::string> kOwn = {"BleCompanion.h", "BleCompanionProtocol.h", "BleCompanionJson.h",
-                                    "CompanionSession.h", "CompanionPeer.h"};
-const std::set<std::string> kStd = {"array", "cstddef", "cstdint", "cstdio", "cstring", "initializer_list"};
+const std::set<std::string> kOwn = {"BleCompanion.h",     "BleCompanionProtocol.h", "BleCompanionJson.h",
+                                    "CompanionSession.h", "CompanionPeer.h",        "ConnectionHandle.h"};
+const std::set<std::string> kStd = {"array", "cstddef", "cstdint", "cstdio", "cstring", "initializer_list", "memory"};
 const std::set<std::string> kAdapterOnly = {"NimBLEDevice.h", "esp_random.h", "Memory.h"};
 
 std::string readAll(const fs::path& path) {
@@ -91,7 +91,62 @@ TEST(BleCompanionSourceContractTest, IdentityUsesTheBondedIdAddress) {
       << "the over-the-air address must never take part in identity decisions";
   EXPECT_NE(adapter.find("isBonded()"), std::string::npos)
       << "authentication must require a persistent bond, not a paired-only link";
-  EXPECT_NE(adapter.find("entry.connHandle != sessionHandle_"), std::string::npos)
+  EXPECT_NE(adapter.find("sessionBound("), std::string::npos)
       << "control packets must be bound to the accepted companion session";
+}
+
+TEST(BleCompanionSourceContractTest, SessionHandleUsesNimBLEsSentinel) {
+  const std::string adapter = readAll(fs::path(BLECOMPANION_ROOT_PATH) / "src" / "BleCompanion.cpp");
+  EXPECT_NE(adapter.find("kNoSessionHandle == BLE_HS_CONN_HANDLE_NONE"), std::string::npos)
+      << "the no-session sentinel must be pinned to NimBLE's BLE_HS_CONN_HANDLE_NONE";
+  EXPECT_EQ(adapter.find("sessionHandle_ == 0"), std::string::npos)
+      << "connection handle 0 is valid; it must never mean no session";
+  EXPECT_EQ(adapter.find("sessionHandle_ != 0"), std::string::npos)
+      << "connection handle 0 is valid; it must never mean no session";
+  EXPECT_NE(adapter.find("sessionHandle_ = kNoSessionHandle;"), std::string::npos)
+      << "cleared sessions must reset to the sentinel";
+}
+
+TEST(BleCompanionSourceContractTest, ProtocolEgressIsAlwaysHandleScoped) {
+  const std::string adapter = readAll(fs::path(BLECOMPANION_ROOT_PATH) / "src" / "BleCompanion.cpp");
+  size_t pos = 0;
+  int notifyCalls = 0;
+  while ((pos = adapter.find("->notify(", pos)) != std::string::npos) {
+    ++notifyCalls;
+    pos += 9;
+  }
+  EXPECT_EQ(notifyCalls, 1) << "every protocol message must go through the handle-scoped notifyTo helper";
+  EXPECT_NE(adapter.find("notifyTo(uint16_t handle"), std::string::npos)
+      << "egress must be scoped to one connection handle";
+  EXPECT_EQ(adapter.find("connHandle = BLE_HS_CONN_HANDLE_NONE"), std::string::npos)
+      << "the sentinel must never be used as a broadcast fallback";
+}
+
+TEST(BleCompanionSourceContractTest, RenderTaskNeverReadsCompanionState) {
+  const std::string activity =
+      readAll(fs::path(REPO_ROOT_PATH) / "src" / "activities" / "network" / "CompanionActivity.cpp");
+  const size_t renderStart = activity.find("void CompanionActivity::render(");
+  ASSERT_NE(renderStart, std::string::npos);
+  const size_t renderEnd = activity.find("renderer.displayBuffer();", renderStart);
+  ASSERT_NE(renderEnd, std::string::npos);
+  const std::string renderBody = activity.substr(renderStart, renderEnd - renderStart);
+  EXPECT_EQ(renderBody.find("ble_."), std::string::npos)
+      << "render() must read only the published snapshot, never BleCompanion state";
+  EXPECT_NE(activity.find("RenderLock::Mode::Try"), std::string::npos)
+      << "snapshot publication must take the rendering mutex (try-lock, retried per pass)";
+}
+
+TEST(BleCompanionSourceContractTest, CallbacksAreSingleOwnerNoBareNew) {
+  const std::string adapter = readAll(fs::path(BLECOMPANION_ROOT_PATH) / "src" / "BleCompanion.cpp");
+  EXPECT_EQ(adapter.find("new ServerCallbacks"), std::string::npos)
+      << "callback allocation must use the nothrow ownership pattern";
+  EXPECT_EQ(adapter.find("new ControlCallbacks"), std::string::npos)
+      << "callback allocation must use the nothrow ownership pattern";
+  EXPECT_NE(adapter.find("makeUniqueNoThrow<ServerCallbacks>"), std::string::npos)
+      << "callbacks must be allocated no-throw and owned by Impl";
+  EXPECT_NE(adapter.find("setCallbacks(serverCallbacks_.get()"), std::string::npos)
+      << "NimBLE must not own the server callbacks";
+  EXPECT_EQ(adapter.find("serverCallbacks_ = nullptr;"), std::string::npos)
+      << "stop() must not release the Impl-owned callbacks before ~Impl";
 }
 }  // namespace

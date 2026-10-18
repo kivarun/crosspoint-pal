@@ -40,10 +40,10 @@ struct Status {
   uint32_t revision = 0;        // bumps on every state change the UI shows
 };
 
-// The content slot, read for rendering. Pointers stay valid until the next
-// loop() that processed messages. The render task reads this while the main
-// loop may accept a new push concurrently: one frame may mix old and new
-// text; the revision-triggered repaint that follows shows the new content.
+// The content slot, read on the main task only. Pointers reference the
+// session's storage and stay valid until the next loop() pass processes
+// messages. The render task must never call this: it reads the activity's
+// published snapshot instead (see CompanionActivity).
 struct ContentView {
   const char* title = nullptr;
   const char* body = nullptr;
@@ -77,6 +77,8 @@ class BleCompanion {
   // One physical button edge to the phone. `button` is a Button enum value.
   bool sendButtonEvent(uint8_t button, bool pressed);
 
+  // Main-task state read (call from the main task, like loop()); the render
+  // task must read the activity's published snapshot instead.
   Status status() const;
   ContentView content() const;
 
