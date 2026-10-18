@@ -1,5 +1,6 @@
 #include "CrossPointSettings.h"
 
+#include <BleCompanion.h>
 #include <BlePageTurnerJson.h>
 #include <I18n.h>
 #include <Logging.h>
@@ -314,12 +315,12 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   // companion phone paired yet), so existing installs keep working. A
   // corrupt type byte degrades to unset rather than to a wrong identity.
   copyToField(companionPeerAddr, doc["companionPeerAddr"] | "", sizeof(companionPeerAddr));
-  companionPeerAddrType = doc["companionPeerAddrType"] | 0xFF;
+  companionPeerAddrType = doc["companionPeerAddrType"] | blecompanion::CompanionAddrTypeUnset;
   if (companionPeerAddr[0] == '\0') {
-    companionPeerAddrType = 0xFF;
-  } else if (companionPeerAddrType > 1) {
+    companionPeerAddrType = blecompanion::CompanionAddrTypeUnset;
+  } else if (companionPeerAddrType > blecompanion::CompanionAddrTypeRandom) {
     companionPeerAddr[0] = '\0';
-    companionPeerAddrType = 0xFF;
+    companionPeerAddrType = blecompanion::CompanionAddrTypeUnset;
   }
   // Language -- stored as code string for stability across enum reorders.
   if (doc["language"].is<const char*>()) {

@@ -6,6 +6,9 @@
 // ALL product logic — the identity policy, persistence callbacks, session
 // progression, state and revision changes, disconnect decisions — runs on the
 // main loop inside loop(). Nothing here calls into settings or the filesystem.
+// Control entries carry the writer's connection handle; the main loop drops
+// everything that is not the accepted companion session, so a rejected or
+// pairing phone can never move product state with a control packet.
 #include "BleCompanion.h"
 
 #include <BoardConfig.h>
@@ -13,6 +16,7 @@
 
 #if FREEINK_CAP_BLE_COMPANION
 
+#include <Memory.h>
 #include <NimBLEDevice.h>
 #include <esp_random.h>
 
@@ -27,6 +31,14 @@
 
 namespace blecompanion {
 
+// The persisted identity contract has one home in the public header; these
+// private constants must agree with it.
+#if FREEINK_CAP_BLE_COMPANION
+static_assert(ADDR_TYPE_PUBLIC == CompanionAddrTypePublic);
+static_assert(ADDR_TYPE_RANDOM == CompanionAddrTypeRandom);
+static_assert(ADDR_TYPE_UNSET == CompanionAddrTypeUnset);
+#endif
+
 #if FREEINK_CAP_BLE_COMPANION
 
 namespace {
@@ -36,6 +48,21 @@ constexpr const char* DEVICE_NAME = "CrossPoint Pal";
 // The ring: NimBLE callbacks copy bounded entries here and return; the main
 // loop processes. Six entries cover a 1.5 s phone retry budget.
 constexpr size_t QUEUE_SIZE = 6;
+
+class ServerCallbacks;
+class ControlCallbacks;
+
+// PeerId stores the address in display (MSB-first) order — the byte order a
+// phone shows and a user types; NimBLE's ble_addr_t stores it LSB-first. This
+// helper is the single place the two representations are translated.
+ble_addr_t bleAddress(const PeerId& peer) {
+  ble_addr_t addr{};
+  addr.type = peer.type;
+  for (size_t i = 0; i < sizeof(addr.val); i++) {
+    addr.val[i] = peer.addr[sizeof(addr.val) - 1 - i];
+  }
+  return addr;
+}
 
 }  // namespace
 
@@ -48,8 +75,9 @@ class BleCompanion::Impl {
   struct Entry {
     Kind kind = Kind::Control;
     uint16_t length = 0;      // Control: payload bytes
-    uint16_t connHandle = 0;  // Connected/Authenticated/Disconnected
+    uint16_t connHandle = 0;  // the connection the entry belongs to
     bool encrypted = false;   // Authenticated
+    bool bonded = false;      // Authenticated: a persistent bond was established
     PeerId peer{};            // Authenticated: the bonded ID address
     uint8_t data[MAX_CONTROL_BYTES] = {};
   };
@@ -83,11 +111,21 @@ class BleCompanion::Impl {
           handleDisconnected(entry);
           break;
         case Kind::Control:
-          handleControl(reinterpret_cast<const char*>(entry.data), entry.length);
+          handleControl(entry);
           break;
       }
     }
     if (takeQueueOverflow()) {
+      // Dropped entries can include lifecycle events, so the accepted session
+      // must end for real: force the link down (a no-op when it is already
+      // gone) and drop the stale handle. A reconnected phone re-authenticates
+      // and re-hellos.
+      if (sessionHandle_ != 0) {
+        if (server_ != nullptr) server_->disconnect(sessionHandle_);
+        sessionHandle_ = 0;
+      }
+      session_.reset();
+      revision_++;
       reject("queue_full", "Too many messages");
     }
   }
@@ -131,16 +169,19 @@ class BleCompanion::Impl {
     entry.kind = Kind::Authenticated;
     entry.connHandle = info.getConnHandle();
     entry.encrypted = info.isEncrypted();
+    entry.bonded = info.isBonded();
     // The bonded IDENTITY (stable across Android RPA changes), never the
-    // over-the-air address: NimBLEAddress is taken by value, so nothing
-    // dangles.
-    const NimBLEAddress id = info.getIdAddress();
-    memcpy(entry.peer.addr, id.getVal(), sizeof(entry.peer.addr));
-    entry.peer.type = id.getType();
+    // over-the-air address. NimBLEAddress is taken by value, so nothing
+    // dangles; its raw bytes are LSB-first and PeerId wants display order.
+    const ble_addr_t* id = info.getIdAddress().getBase();
+    for (size_t i = 0; i < sizeof(entry.peer.addr); i++) {
+      entry.peer.addr[i] = id->val[sizeof(id->val) - 1 - i];
+    }
+    entry.peer.type = id->type;
     push(entry);
   }
 
-  void controlWritten(NimBLECharacteristic* characteristic) {
+  void controlWritten(NimBLECharacteristic* characteristic, NimBLEConnInfo& info) {
     const NimBLEAttValue value = characteristic->getValue();
     const size_t length = value.size();
     if (length == 0 || length > MAX_CONTROL_BYTES) {
@@ -149,6 +190,7 @@ class BleCompanion::Impl {
     }
     Entry entry;
     entry.kind = Kind::Control;
+    entry.connHandle = info.getConnHandle();
     entry.length = static_cast<uint16_t>(length);
     memcpy(entry.data, value.data(), length);
     push(entry);
@@ -194,7 +236,7 @@ class BleCompanion::Impl {
     return overflow;
   }
 
-  static void flagQueueOverflow() {
+  void flagQueueOverflow() {
     portENTER_CRITICAL(&queueMux_);
     queueOverflow_ = true;
     portEXIT_CRITICAL(&queueMux_);
@@ -202,15 +244,28 @@ class BleCompanion::Impl {
 
   // --- Main-loop event handling (the single product-state owner) ---
   void handleConnected(const Entry& entry) {
+    if (sessionHandle_ != 0 && entry.connHandle != sessionHandle_) {
+      // A second peer connected while a session is active. The one-phone
+      // policy rejects it at authentication; do not disturb the live session.
+      return;
+    }
     if (server_ != nullptr) {
       server_->updateConnParams(entry.connHandle, 12, 24, 0, 300);
     }
+    LOG_DBG(TAG, "Peer connected, handle %u", entry.connHandle);
     setState(RadioState::AwaitingAuthentication);
   }
 
   void handleAuthenticated(const Entry& entry) {
-    if (!entry.encrypted) {
-      LOG_ERR(TAG, "Rejecting unencrypted connection");
+    if (!entry.encrypted || !entry.bonded) {
+      // The policy requires an encrypted persistent bond: a paired-only link
+      // has no stable identity, so it can never be adopted.
+      LOG_ERR(TAG, "Rejecting a %s connection", entry.bonded ? "unencrypted" : "unbonded");
+      if (server_ != nullptr) server_->disconnect(entry.connHandle);
+      return;
+    }
+    if (sessionHandle_ != 0 && entry.connHandle != sessionHandle_) {
+      LOG_ERR(TAG, "Rejecting a second connection while a session is active");
       if (server_ != nullptr) server_->disconnect(entry.connHandle);
       return;
     }
@@ -234,16 +289,24 @@ class BleCompanion::Impl {
         return;
       }
     }
+    sessionHandle_ = entry.connHandle;
     setState(RadioState::Connected);
   }
 
-  void handleDisconnected(const Entry&) {
+  void handleDisconnected(const Entry& entry) {
+    if (sessionHandle_ != 0 && entry.connHandle != sessionHandle_) {
+      return;  // a rejected or foreign peer left; the accepted session stays
+    }
+    sessionHandle_ = 0;
     session_.reset();  // ephemeral state dies with the link
     if (state_ != RadioState::Stopped) setState(RadioState::Advertising);
   }
 
-  void handleControl(const char* data, const size_t length) {
-    const SessionEvent event = session_.onControl(data, length);
+  void handleControl(const Entry& entry) {
+    // Only the accepted companion session reaches product state; anything
+    // else (rejected phone, pairing-time writes) is dropped here.
+    if (sessionHandle_ == 0 || entry.connHandle != sessionHandle_) return;
+    const SessionEvent event = session_.onControl(reinterpret_cast<const char*>(entry.data), entry.length);
     switch (event) {
       case SessionEvent::HelloAccepted: {
         char out[64];
@@ -297,9 +360,10 @@ class BleCompanion::Impl {
   ServerCallbacks* serverCallbacks_ = nullptr;
   ControlCallbacks* controlCallbacks_ = nullptr;
 
-  const void (*savePeerAddr_)(const char*, uint8_t) = nullptr;
+  void (*savePeerAddr_)(const char*, uint8_t) = nullptr;
   void (*forgetPeerAddr_)() = nullptr;
-  PeerId storedPeer_{};  // main-loop-owned identity policy state
+  PeerId storedPeer_{};         // main-loop-owned identity policy state
+  uint16_t sessionHandle_ = 0;  // connection handle of the accepted session, 0 = none
 
   CompanionSession session_;
   uint32_t passkey_ = 0;
@@ -311,6 +375,14 @@ class BleCompanion::Impl {
   volatile uint8_t queueTail_ = 0;
   volatile bool queueOverflow_ = false;
   portMUX_TYPE queueMux_ = portMUX_INITIALIZER_UNLOCKED;
+
+ public:
+  // NimBLE holds these pointers without owning them (the server's delete flag
+  // is off); the Impl destructor is their single owner.
+  ~Impl() {
+    delete serverCallbacks_;
+    delete controlCallbacks_;
+  }
 };
 
 namespace {
@@ -330,8 +402,8 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
 class ControlCallbacks final : public NimBLECharacteristicCallbacks {
  public:
   explicit ControlCallbacks(BleCompanion::Impl& owner) : owner_(owner) {}
-  void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo&) override {
-    owner_.controlWritten(characteristic);
+  void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& info) override {
+    owner_.controlWritten(characteristic, info);
   }
 
  private:
@@ -342,6 +414,12 @@ class ControlCallbacks final : public NimBLECharacteristicCallbacks {
 
 bool BleCompanion::Impl::begin(const char* storedPeerAddr, const uint8_t storedPeerAddrType,
                                void (*savePeerAddr)(const char*, uint8_t), void (*forgetPeerAddr)()) {
+  // One radio owner: the adapter is process-global and shared with the BLE
+  // page turner, so starting on a live adapter would corrupt both.
+  if (NimBLEDevice::isInitialized()) {
+    LOG_ERR(TAG, "The BLE adapter is already in use; not starting the companion");
+    return false;
+  }
   savePeerAddr_ = savePeerAddr;
   forgetPeerAddr_ = forgetPeerAddr;
   // Parse the persisted identity once; a malformed pair degrades to "none
@@ -367,7 +445,7 @@ bool BleCompanion::Impl::begin(const char* storedPeerAddr, const uint8_t storedP
 
   server_ = NimBLEDevice::createServer();
   serverCallbacks_ = new ServerCallbacks(*this);
-  server_->setCallbacks(serverCallbacks_, true);  // freed with the server
+  server_->setCallbacks(serverCallbacks_, false);  // Impl owns the object
   NimBLEService* service = server_->createService(SERVICE_UUID);
   control_ = service->createCharacteristic(CONTROL_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_ENC,
                                            MAX_CONTROL_BYTES);
@@ -396,44 +474,61 @@ void BleCompanion::Impl::stop() {
   server_ = nullptr;
   serverCallbacks_ = nullptr;
   control_ = nullptr;
-  controlCallbacks_ = nullptr;
   event_ = nullptr;
+  // serverCallbacks_/controlCallbacks_ are Impl-owned; the destructor deletes
+  // them, so they are not nulled here.
   portENTER_CRITICAL(&queueMux_);
   queueHead_ = 0;
   queueTail_ = 0;
   queueOverflow_ = false;
   portEXIT_CRITICAL(&queueMux_);
+  sessionHandle_ = 0;
   session_.reset();
   setState(RadioState::Stopped);
 }
 
 bool BleCompanion::Impl::forgetBond() {
   // The seam decides: only a configured companion identity selects a bond,
-  // and nothing else in the store is ever touched.
+  // and nothing else in the store is ever touched. The radio must be up: the
+  // companion activity owns it for the whole reset.
+  if (!NimBLEDevice::isInitialized()) {
+    LOG_ERR(TAG, "The companion radio is not running; cannot reset pairing");
+    return false;
+  }
   PeerId target;
   if (!companionBondTarget(storedPeer_, target)) {
     LOG_ERR(TAG, "No companion bond configured; nothing to delete");
     return false;
   }
-  const bool wasUp = NimBLEDevice::isInitialized();
-  if (!wasUp && !begin(nullptr, ADDR_TYPE_UNSET, savePeerAddr_, forgetPeerAddr_)) return false;
   if (server_ != nullptr) {
     while (server_->getConnectedCount() > 0) {
-      server_->disconnect(server_->getPeerInfo(0));
+      if (!server_->disconnect(server_->getPeerInfo(0))) {
+        LOG_ERR(TAG, "Could not drop the companion connection");
+        break;
+      }
       delay(50);
     }
   }
-  const NimBLEAddress targetAddress(target.addr, target.type);
-  const bool deleted = NimBLEDevice::deleteBond(targetAddress);
-  if (!deleted) {
-    // With the stack up, false means the bond is already absent from the
-    // store (the phone forgot us first): the reset goal — this identity is
-    // no longer bonded — still holds. Log it either way.
+  // ble_gap_unpair refuses to run while advertising is active when the peer
+  // distributed an IRK (every Android phone does), so pause it around the
+  // deletion and restore the idle state afterwards.
+  NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
+  advertising->stop();
+  const NimBLEAddress targetAddress(bleAddress(target));
+  bool deleted = true;
+  if (!NimBLEDevice::isBonded(targetAddress)) {
+    // The phone forgot us first: the reset goal — this identity is no longer
+    // bonded — already holds.
     LOG_INF(TAG, "Companion bond not present in the store (already removed)");
+  } else if (!(deleted = NimBLEDevice::deleteBond(targetAddress))) {
+    LOG_ERR(TAG, "Failed to delete the companion bond");
   }
+  if (!advertising->start()) {
+    LOG_ERR(TAG, "Advertising restart failed");
+  }
+  if (!deleted) return false;
   if (forgetPeerAddr_ != nullptr) forgetPeerAddr_();
   storedPeer_ = PeerId{};
-  if (!wasUp) stop();
   return true;
 }
 
@@ -442,12 +537,15 @@ BleCompanion::~BleCompanion() = default;
 bool BleCompanion::begin(const char* storedPeerAddr, const uint8_t storedPeerAddrType,
                          void (*savePeerAddr)(const char*, uint8_t), void (*forgetPeerAddr)()) {
   if (impl_ != nullptr) return true;
-  impl_ = new Impl();
-  if (!impl_->begin(storedPeerAddr, storedPeerAddrType, savePeerAddr, forgetPeerAddr)) {
-    delete impl_;
-    impl_ = nullptr;
+  auto impl = makeUniqueNoThrow<Impl>();
+  if (impl == nullptr) {
+    LOG_ERR(TAG, "Not enough heap for the companion radio");
     return false;
   }
+  if (!impl->begin(storedPeerAddr, storedPeerAddrType, savePeerAddr, forgetPeerAddr)) {
+    return false;  // the unique_ptr destroys the half-built Impl
+  }
+  impl_ = impl.release();
   return true;
 }
 

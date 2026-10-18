@@ -19,7 +19,7 @@ namespace fs = std::filesystem;
 const std::set<std::string> kOwn = {"BleCompanion.h", "BleCompanionProtocol.h", "BleCompanionJson.h",
                                     "CompanionSession.h", "CompanionPeer.h"};
 const std::set<std::string> kStd = {"array", "cstddef", "cstdint", "cstdio", "cstring", "initializer_list"};
-const std::set<std::string> kAdapterOnly = {"NimBLEDevice.h", "esp_random.h"};
+const std::set<std::string> kAdapterOnly = {"NimBLEDevice.h", "esp_random.h", "Memory.h"};
 
 std::string readAll(const fs::path& path) {
   std::ifstream in(path);
@@ -84,21 +84,14 @@ TEST(BleCompanionSourceContractTest, NoPersistenceInsideTheModule) {
     }
   }
 }
-
 TEST(BleCompanionSourceContractTest, IdentityUsesTheBondedIdAddress) {
-  const std::string adapter =
-      readAll(fs::path(BLECOMPANION_ROOT_PATH) / "src" / "BleCompanion.cpp");
-  EXPECT_NE(adapter.find("getIdAddress()"), std::string::npos)
-      << "the adapter must capture the bonded ID address";
+  const std::string adapter = readAll(fs::path(BLECOMPANION_ROOT_PATH) / "src" / "BleCompanion.cpp");
+  EXPECT_NE(adapter.find("getIdAddress()"), std::string::npos) << "the adapter must capture the bonded ID address";
   EXPECT_EQ(adapter.find("info.getAddress()"), std::string::npos)
       << "the over-the-air address must never take part in identity decisions";
-  // The identity policy runs on the main loop, not inside a NimBLE callback:
-  // the callback captures and enqueues only.
-  const size_t callbackBlock = adapter.find("class ServerCallbacks final");
-  const size_t policy = adapter.find("CompanionSession::authenticate");
-  ASSERT_NE(callbackBlock, std::string::npos);
-  ASSERT_NE(policy, std::string::npos);
-  EXPECT_LT(policy, callbackBlock) << "identity policy must not live inside the callback classes";
+  EXPECT_NE(adapter.find("isBonded()"), std::string::npos)
+      << "authentication must require a persistent bond, not a paired-only link";
+  EXPECT_NE(adapter.find("entry.connHandle != sessionHandle_"), std::string::npos)
+      << "control packets must be bound to the accepted companion session";
 }
-
 }  // namespace

@@ -21,6 +21,9 @@ constexpr uint8_t ADDR_TYPE_RANDOM = 1;
 constexpr uint8_t ADDR_TYPE_UNSET = 0xFF;
 
 struct PeerId {
+  // Six bytes in display (MSB-first) order — the byte order a phone shows
+  // and the persisted text carries. The NimBLE adapter translates to and
+  // from NimBLE's LSB-first ble_addr_t at its boundary.
   uint8_t addr[6] = {};
   uint8_t type = ADDR_TYPE_UNSET;
 

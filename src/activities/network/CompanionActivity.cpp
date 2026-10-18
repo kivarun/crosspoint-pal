@@ -3,8 +3,10 @@
 #include <BlePageTurner.h>
 #include <HalMemory.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -13,7 +15,10 @@ namespace {
 
 constexpr unsigned long PAIRING_RESET_HOLD_MS = 1500;
 
-// The input edges the session forwards, in MappedInputManager order.
+// The input edges the session forwards, in MappedInputManager order. The
+// list order is also the protocol's wire value order (Button enum in
+// BleCompanionJson.h, mapped by index in protocolButton): reordering any of
+// the three changes the values the phone receives.
 const MappedInputManager::Button FORWARDED[] = {
     MappedInputManager::Button::Back,  MappedInputManager::Button::Confirm, MappedInputManager::Button::Left,
     MappedInputManager::Button::Right, MappedInputManager::Button::Up,      MappedInputManager::Button::Down,
@@ -42,7 +47,12 @@ void CompanionActivity::beginSession() {
   largestBeforeBegin_ = HalMemory::getInternalHeap().largestBlockBytes;
   // One radio owner: the page turner must be off before the companion starts,
   // and its own policy resumes when this activity leaves.
-  bleturner::stopNow(1000);
+  if (!bleturner::stopNow(1000)) {
+    LOG_ERR("BLECOMP", "Could not stop the BLE page turner; the companion radio stays off");
+    observed_ = ble_.status();
+    requestUpdate();
+    return;
+  }
   // Persistence callbacks run on the main loop (the adapter defers them
   // there), so touching SETTINGS here is safe.
   const bool started = ble_.begin(
@@ -55,7 +65,7 @@ void CompanionActivity::beginSession() {
       },
       []() {
         SETTINGS.companionPeerAddr[0] = '\0';
-        SETTINGS.companionPeerAddrType = 0xFF;
+        SETTINGS.companionPeerAddrType = blecompanion::CompanionAddrTypeUnset;
         SETTINGS.saveToFile();
       });
   if (!started) {
@@ -99,12 +109,9 @@ void CompanionActivity::loop() {
 
   // Pairing reset: hold Down or Confirm, armed only after a neutral frame so
   // the release that opened this activity cannot trigger it.
-  const bool anyForwarded = [&] {
-    for (const auto b : FORWARDED) {
-      if (mappedInput.isPressed(b) || mappedInput.wasReleased(b)) return true;
-    }
-    return false;
-  }();
+  const bool anyForwarded = std::any_of(
+      std::begin(FORWARDED), std::end(FORWARDED),
+      [this](const MappedInputManager::Button b) { return mappedInput.isPressed(b) || mappedInput.wasReleased(b); });
   if (!resetInputArmed_ && !anyForwarded) {
     resetInputArmed_ = true;
   }

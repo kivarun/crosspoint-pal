@@ -23,6 +23,14 @@ namespace blecompanion {
 
 enum class RadioState : uint8_t { Stopped, Advertising, AwaitingAuthentication, Connected };
 
+// The companion identity's NimBLE address type, persisted next to the address
+// text in the settings.
+enum : uint8_t {
+  CompanionAddrTypePublic = 0,
+  CompanionAddrTypeRandom = 1,
+  CompanionAddrTypeUnset = 0xFF  // no companion phone configured
+};
+
 struct Status {
   bool compiledIn = false;
   RadioState state = RadioState::Stopped;
@@ -33,7 +41,9 @@ struct Status {
 };
 
 // The content slot, read for rendering. Pointers stay valid until the next
-// loop() that processed messages.
+// loop() that processed messages. The render task reads this while the main
+// loop may accept a new push concurrently: one frame may mix old and new
+// text; the revision-triggered repaint that follows shows the new content.
 struct ContentView {
   const char* title = nullptr;
   const char* body = nullptr;
@@ -50,7 +60,9 @@ class BleCompanion {
   // the persisted companion phone identity text ("aa:bb:cc:dd:ee:ff", "" when
   // none) and `storedPeerAddrType` its NimBLE address type (0 public, 1
   // random). Both callbacks run on the main loop: `savePeerAddr` stores a
-  // first-time peer's identity, `forgetPeerAddr` clears it.
+  // first-time peer's identity, `forgetPeerAddr` clears it. Fails bounded
+  // when the NimBLE adapter is already in use (the module is one radio owner
+  // and expects the BLE page turner to be stopped first).
   bool begin(const char* storedPeerAddr, uint8_t storedPeerAddrType,
              void (*savePeerAddr)(const char* addr, uint8_t type), void (*forgetPeerAddr)());
   void loop();
@@ -58,8 +70,9 @@ class BleCompanion {
   void stop();
   // Deletes ONLY the configured companion bond and clears the persisted
   // identity (via `forgetPeerAddr`). False when no companion identity is
-  // configured or the bond could not be removed; no other bond is ever
-  // touched, and the whole store is never cleared.
+  // configured, the radio is not running, or the bond could not be removed;
+  // an already-absent bond counts as reset. No other bond is ever touched,
+  // and the whole store is never cleared.
   bool forgetBond();
   // One physical button edge to the phone. `button` is a Button enum value.
   bool sendButtonEvent(uint8_t button, bool pressed);

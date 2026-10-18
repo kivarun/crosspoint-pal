@@ -67,8 +67,9 @@ reader → phone:
 ## Hardware UAT checklist (X4 Classic)
 
 1. Flash the `x4c` build; open Settings → Network → Phone Companion.
-2. Record the `BLECOMP` heap log lines: before init / after init / after
-   connect / after teardown.
+2. Record the `BLECOMP` heap log lines: "after BLE init", "after connect"
+   and "after teardown" (the before-init figures travel inside the teardown
+   line, in parentheses).
 3. Pair the phone (passkey dialog), send title/body, verify the e-ink paint
    and `content_ack` on the phone.
 4. Press the reader's side keys; verify `button` events on the phone.
@@ -76,3 +77,6 @@ reader → phone:
    Bluetooth page turner still starts afterwards.
 6. Reset pairing on both sides; verify a second phone is rejected while the
    first identity is stored.
+7. With no phone ever paired, hold the reset (Down or Confirm, 1.5 s) and
+   verify the log reports "No companion bond configured; nothing to delete"
+   and nothing changes.
