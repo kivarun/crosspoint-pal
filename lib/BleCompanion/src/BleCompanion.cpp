@@ -59,7 +59,8 @@ class ControlCallbacks;
 
 // PeerId stores the address in display (MSB-first) order — the byte order a
 // phone shows and a user types; NimBLE's ble_addr_t stores it LSB-first. This
-// helper is the single place the two representations are translated.
+// helper translates outbound (PeerId → ble_addr_t); radioAuthenticated()
+// translates the inbound direction inline.
 ble_addr_t bleAddress(const PeerId& peer) {
   ble_addr_t addr{};
   addr.type = peer.type;
@@ -107,7 +108,15 @@ class BleCompanion::Impl {
 
   void loop() {
     Entry entry;
-    while (pop(entry)) {
+    while (true) {
+      // The poison is observed BEFORE the next entry reaches product logic
+      // (and on every later pass): a control entry queued after a dropped
+      // lifecycle event can never mutate state or emit egress.
+      if (takeQueueOverflow()) {
+        overflowFailClosed();
+        return;
+      }
+      if (!pop(entry)) break;
       switch (entry.kind) {
         case Kind::Connected:
           handleConnected(entry);
@@ -122,18 +131,6 @@ class BleCompanion::Impl {
           handleControl(entry);
           break;
       }
-    }
-    if (takeQueueOverflow()) {
-      // Dropped entries can include lifecycle events, so the accepted link is
-      // no longer trustworthy: fail closed. Force the exact accepted handle
-      // down and clear the session. No notification goes out: the handle may
-      // already be stale or reused, so it is not a trustworthy recipient.
-      if (sessionHandle_ != kNoSessionHandle) {
-        if (server_ != nullptr) server_->disconnect(sessionHandle_);
-        sessionHandle_ = kNoSessionHandle;
-      }
-      session_.reset();
-      revision_++;
     }
   }
 
@@ -178,13 +175,16 @@ class BleCompanion::Impl {
     entry.encrypted = info.isEncrypted();
     entry.bonded = info.isBonded();
     // The bonded IDENTITY (stable across Android RPA changes), never the
-    // over-the-air address. NimBLEAddress is taken by value, so nothing
-    // dangles; its raw bytes are LSB-first and PeerId wants display order.
-    const ble_addr_t* id = info.getIdAddress().getBase();
+    // over-the-air address. Bind getIdAddress()'s return value to a local
+    // first: getBase() points into that object, so reading it requires the
+    // value to stay alive. Its raw bytes are LSB-first and PeerId wants
+    // display order.
+    const NimBLEAddress id = info.getIdAddress();
+    const ble_addr_t* idAddr = id.getBase();
     for (size_t i = 0; i < sizeof(entry.peer.addr); i++) {
-      entry.peer.addr[i] = id->val[sizeof(id->val) - 1 - i];
+      entry.peer.addr[i] = idAddr->val[sizeof(idAddr->val) - 1 - i];
     }
-    entry.peer.type = id->type;
+    entry.peer.type = idAddr->type;
     push(entry);
   }
 
@@ -247,6 +247,25 @@ class BleCompanion::Impl {
   }
 
   // --- Main-loop event handling (the single product-state owner) ---
+
+  // The queue is poisoned once an entry was dropped: producer order is lost,
+  // so no surviving entry can be trusted. Discard everything still queued,
+  // force the accepted link down, clear the session and settle in the
+  // non-session state. No notification: the handle may already be stale or
+  // reused, so it is not a trustworthy recipient.
+  void overflowFailClosed() {
+    portENTER_CRITICAL(&queueMux_);
+    queueHead_ = queueTail_;
+    queueOverflow_ = false;
+    portEXIT_CRITICAL(&queueMux_);
+    if (sessionHandle_ != kNoSessionHandle) {
+      if (server_ != nullptr) server_->disconnect(sessionHandle_);
+      sessionHandle_ = kNoSessionHandle;
+    }
+    session_.reset();
+    if (state_ != RadioState::Stopped) setState(RadioState::Advertising);
+  }
+
   void handleConnected(const Entry& entry) {
     if (sessionHandle_ != kNoSessionHandle && entry.connHandle != sessionHandle_) {
       // A second peer connected while a session is active. The one-phone

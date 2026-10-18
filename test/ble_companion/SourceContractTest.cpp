@@ -135,6 +135,52 @@ TEST(BleCompanionSourceContractTest, RenderTaskNeverReadsCompanionState) {
   EXPECT_NE(activity.find("RenderLock::Mode::Try"), std::string::npos)
       << "snapshot publication must take the rendering mutex (try-lock, retried per pass)";
 }
+TEST(BleCompanionSourceContractTest, IdentityAddressIsNotReadThroughATemporary) {
+  const std::string adapter = readAll(fs::path(BLECOMPANION_ROOT_PATH) / "src" / "BleCompanion.cpp");
+  // The negatives carry the invariant: chaining an interior-pointer accessor
+  // onto the by-value temporary is the hazard; any bound-local spelling of
+  // the fix is acceptable.
+  EXPECT_EQ(adapter.find("info.getIdAddress().getBase()"), std::string::npos)
+      << "getBase() points into a by-value temporary; the value must be bound to a local first";
+  EXPECT_EQ(adapter.find("info.getIdAddress().getVal()"), std::string::npos)
+      << "getVal() points into a by-value temporary; the value must be bound to a local first";
+}
+
+TEST(BleCompanionSourceContractTest, OverflowPoisonsTheQueueBeforeFurtherProcessing) {
+  const std::string adapter = readAll(fs::path(BLECOMPANION_ROOT_PATH) / "src" / "BleCompanion.cpp");
+  // Drain-loop ordering: the poison is observed before the next entry reaches
+  // product logic, so a control entry queued after a dropped lifecycle event
+  // can never mutate state or emit egress.
+  const size_t loopStart = adapter.find("void loop() {");
+  ASSERT_NE(loopStart, std::string::npos);
+  const size_t loopEnd = adapter.find("Status status() const", loopStart);
+  ASSERT_NE(loopEnd, std::string::npos);
+  const std::string loopBody = adapter.substr(loopStart, loopEnd - loopStart);
+  const size_t poisonCheck = loopBody.find("takeQueueOverflow()");
+  ASSERT_NE(poisonCheck, std::string::npos);
+  const size_t dispatch = loopBody.find("switch (entry.kind)");
+  ASSERT_NE(dispatch, std::string::npos);
+  EXPECT_LT(poisonCheck, dispatch) << "the overflow check must precede entry dispatch";
+  EXPECT_NE(loopBody.find("overflowFailClosed();"), std::string::npos)
+      << "an observed overflow must fail closed and stop processing";
+  EXPECT_NE(loopBody.find("return;"), std::string::npos)
+      << "an observed overflow must return from the loop without processing more entries";
+  // The fail-closed path itself: discard queued entries, tear the accepted
+  // session down, settle in the non-session state, emit nothing.
+  const size_t failStart = adapter.find("void overflowFailClosed()");
+  ASSERT_NE(failStart, std::string::npos);
+  const size_t failEnd = adapter.find("void handleConnected", failStart);
+  ASSERT_NE(failEnd, std::string::npos);
+  const std::string failClosed = adapter.substr(failStart, failEnd - failStart);
+  EXPECT_NE(failClosed.find("queueHead_ = queueTail_"), std::string::npos)
+      << "remaining queued entries must be discarded";
+  EXPECT_NE(failClosed.find("disconnect(sessionHandle_)"), std::string::npos)
+      << "the exact accepted handle must be forced down";
+  EXPECT_NE(failClosed.find("sessionHandle_ = kNoSessionHandle"), std::string::npos) << "the session must be cleared";
+  EXPECT_NE(failClosed.find("setState(RadioState::Advertising)"), std::string::npos)
+      << "product state must settle in the non-session state";
+  EXPECT_EQ(failClosed.find("notifyTo("), std::string::npos) << "no protocol egress on overflow";
+}
 
 TEST(BleCompanionSourceContractTest, CallbacksAreSingleOwnerNoBareNew) {
   const std::string adapter = readAll(fs::path(BLECOMPANION_ROOT_PATH) / "src" / "BleCompanion.cpp");
