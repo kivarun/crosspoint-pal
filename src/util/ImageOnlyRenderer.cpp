@@ -123,8 +123,8 @@ void cleanBeforeAbsoluteGray(GfxRenderer& renderer) {
 bool drawSleepBitmap(GfxRenderer& renderer, const Bitmap& bitmap, const bool hasGreyscale,
                      const HalDisplay::GrayscaleMode grayscaleMode, const int x, const int y, const float cropX,
                      const float cropY, const bool preserveBackground, const bool invertAfterDraw) {
-  // Verbatim sleep-image presentation contract of
-  // SleepActivity::renderBitmapSleepScreen() (minus the cover placement): one
+  // Image-only/slideshow variant of SleepActivity::renderBitmapSleepScreen()
+  // (minus the cover placement, overlay compositing and BW-frame keeper): one
   // drawBitmap pass, then the gray base + plane transfers + gray buffer for
   // grayscale sources, or the single-pass clean transfer for BW sources. No
   // BW framebuffer rebuild — the next content arrives with the next wake/frame

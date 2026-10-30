@@ -48,17 +48,33 @@ TEST(SleepScreenModeCompatibility, SlideshowValueIsAppendOnly) {
   EXPECT_EQ(slideshow::SLEEP_SCREEN_SLIDESHOW_VALUE, 8);
 }
 
-// Picker/value-list sizing (SlideshowPolicy seam): a capable board advertises
-// the full table (Slideshow at its persisted value 8); an incapable board's
-// value list stops BEFORE the appended entry — no phantom picker item, and
-// the enum clamp in CrossPointSettings::fromJson() (enumLabels().size())
-// folds a stored value 8 back to the default.
-TEST(SleepScreenModeCompatibility, AdvertisedCountTracksCapability) {
-  EXPECT_EQ(slideshow::advertisedSleepScreenValueCount(true, 9), 9);
-  EXPECT_EQ(slideshow::advertisedSleepScreenValueCount(false, 9), 8);
-  // The device contract: the full table is SLIDESHOW + the 8 historical
-  // values (CrossPointSettings.h static_asserts SLIDESHOW == 8).
-  EXPECT_EQ(9, static_cast<size_t>(slideshow::SLEEP_SCREEN_SLIDESHOW_VALUE) + 1);
+// Sleep-screen advertisement (SlideshowPolicy seam): a capable board
+// advertises the full table (SLIDESHOW at its persisted value 8); an
+// incapable board's advertised list omits ONLY the fork-only SLIDESHOW value
+// — its numeric slot stays reserved, later appended values like upstream's
+// COVER_TRANSPARENT(9) stay advertised (board-independent static mode). The
+// device table is 10 modes (8 historical + SLIDESHOW(8) + COVER_TRANSPARENT(9),
+// pinned by CrossPointSettings.h static_asserts).
+TEST(SleepScreenModeCompatibility, AdvertisedValuesOmitOnlySlideshowWhenIncapable) {
+  uint8_t ids[16] = {};
+  EXPECT_EQ(slideshow::advertisedSleepScreenValueIds(true, 10, 8, ids), 10u);
+  for (size_t i = 0; i < 10; ++i) {
+    EXPECT_EQ(ids[i], static_cast<uint8_t>(i));
+  }
+  EXPECT_EQ(slideshow::advertisedSleepScreenValueIds(false, 10, 8, ids), 9u);
+  for (size_t i = 0; i < 8; ++i) {
+    EXPECT_EQ(ids[i], static_cast<uint8_t>(i));
+  }
+  EXPECT_EQ(ids[8], 9);  // COVER_TRANSPARENT advertised; SLIDESHOW's slot reserved
+  // The cut is anchored to the SLIDESHOW value, not to a list position.
+  EXPECT_EQ(slideshow::advertisedSleepScreenValueIds(false, 10, 9, ids), 9u);
+  EXPECT_EQ(ids[8], 8);
+  // Advertised ids are distinct: the picker can never offer one value twice.
+  for (size_t i = 0; i < 9; ++i) {
+    for (size_t j = i + 1; j < 9; ++j) {
+      ASSERT_NE(ids[i], ids[j]);
+    }
+  }
 }
 
 // Fixed production storage contract: canonical /.sleep first, legacy /sleep

@@ -41,6 +41,11 @@ struct SettingInfo {
   std::vector<StrId> enumValues;
   std::span<const StrId> staticEnumValues;
   std::vector<std::string> enumStringValues;  // runtime alternative to StrId enumValues (for SD card fonts etc.)
+  // Persisted value behind each advertised list entry, when the advertised set
+  // is not the positional 0..n-1 table (sleep screen: the fork-only Slideshow
+  // value is omitted on boards without the capability, SlideshowPolicy seam).
+  // Empty = positional: advertised index == persisted value.
+  std::vector<uint8_t> enumValueIds;
   SettingAction action = SettingAction::None;
 
   struct ValueRange {
@@ -82,8 +87,28 @@ struct SettingInfo {
     return *this;
   }
 
+  SettingInfo& withValueIds(std::vector<uint8_t> ids) {
+    enumValueIds = std::move(ids);
+    return *this;
+  }
+
   std::span<const StrId> enumLabels() const {
     return staticEnumValues.empty() ? std::span<const StrId>(enumValues) : staticEnumValues;
+  }
+
+  // The persisted value behind advertised index uiIndex; identity for
+  // positional enums. Caller must keep uiIndex < enumLabels().size().
+  uint8_t advertisedValue(const size_t uiIndex) const {
+    return enumValueIds.empty() ? static_cast<uint8_t>(uiIndex) : enumValueIds[uiIndex];
+  }
+
+  // The advertised index of a persisted value, -1 when it is not advertised.
+  int advertisedIndexFor(const uint8_t persistedValue) const {
+    if (enumValueIds.empty()) return persistedValue;
+    for (size_t i = 0; i < enumValueIds.size(); ++i) {
+      if (enumValueIds[i] == persistedValue) return static_cast<int>(i);
+    }
+    return -1;
   }
 
   static SettingInfo Toggle(StrId nameId, uint8_t CrossPointSettings::* ptr, const char* key = nullptr,

@@ -302,15 +302,25 @@ inline const ToneProfile& renderProfileFor(const Mode mode, const ToneProfile& v
 inline constexpr const char* SLEEP_SLIDESHOW_DIR = "/.sleep";
 inline constexpr const char* SLEEP_SLIDESHOW_DIR_LEGACY = "/sleep";
 
-// Sleep-screen picker/value-list sizing (pure): a board advertises exactly
-// the modes it supports — the full SLEEP_SCREEN_MODE table on a
-// sleep-slideshow-capable board, the table minus the appended SLIDESHOW entry
-// elsewhere. Sizing the label list this way keeps the picker free of a
-// phantom entry AND makes CrossPointSettings::fromJson()'s enum clamp
-// (enumLabels().size()) fold a stored SLIDESHOW value back to the default on
-// incapable boards — without renumbering anything.
-inline constexpr size_t advertisedSleepScreenValueCount(const bool sleepSlideshowCapable, const size_t fullCount) {
-  return sleepSlideshowCapable ? fullCount : fullCount - 1;
+// Sleep-screen advertisement policy (pure, host-tested): a board advertises
+// exactly the modes it supports — the full append-only SLEEP_SCREEN_MODE table
+// on a sleep-slideshow-capable board; elsewhere ONLY the fork-only SLIDESHOW
+// entry is omitted, while every other value (including later appended ones
+// like COVER_TRANSPARENT, a board-independent static mode) stays advertised.
+// SLIDESHOW's numeric slot stays reserved: persisted numbers never move. out
+// receives the advertised persisted values in display order, the return value
+// is the advertised count, and the caller's buffer must hold fullCount
+// entries. The settings entry pairs labels with these ids (SettingInfo
+// enumValueIds), so the load clamp, the picker and the web API all share this
+// ONE mapping — no positional prefix assumption anywhere.
+inline constexpr size_t advertisedSleepScreenValueIds(const bool sleepSlideshowCapable, const size_t fullCount,
+                                                      const uint8_t slideshowValue, uint8_t* const out) {
+  size_t count = 0;
+  for (size_t value = 0; value < fullCount; ++value) {
+    if (!sleepSlideshowCapable && value == slideshowValue) continue;
+    out[count++] = static_cast<uint8_t>(value);
+  }
+  return count;
 }
 
 // Image Viewer Slideshow page rows (pure policy): row 0 = Start slideshow;

@@ -53,7 +53,9 @@ struct HalGPIO {
   bool isXteinkDevice() const { return true; }
 };
 struct HalPowerManager {
-  void startDeepSleep(HalGPIO&, uint64_t = 0) const;
+  // Upstream PR #3820 argument order; a permutation against SleepSource.inc
+  // fails to link, and the four-form asserts below fail the behavior.
+  void startDeepSleep(HalGPIO&, bool = false, uint64_t = 0) const;
 };
 namespace BoardConfig {
 enum class Board { XteinkX4, XteinkX3 };
@@ -77,6 +79,11 @@ void digitalWrite(int, int) {}
 namespace freeink {
 struct PowerManager {
   static void powerDownRailsForSleep() { trace.push_back("rails-down"); }
+  static void armPowerButtonWakeup() { trace.push_back("arm-button-wake"); }
+  [[noreturn]] static void deepSleep() {
+    trace.push_back("sleep");
+    throw Slept{};
+  }
   [[noreturn]] static void deepSleepUntilPowerButton() {
     trace.push_back("sleep");
     throw Slept{};
@@ -94,15 +101,16 @@ static void reset() {
   errors.clear();
   trace.clear();
 }
-static bool sleep(uint64_t interval) {
+static bool sleepForm(const bool wakeOnHeldButton, const uint64_t interval) {
   HalGPIO gpio;
   try {
-    HalPowerManager{}.startDeepSleep(gpio, interval);
+    HalPowerManager{}.startDeepSleep(gpio, wakeOnHeldButton, interval);
   } catch (const Slept&) {
     return true;
   }
   return false;
 }
+static bool sleep(uint64_t interval) { return sleepForm(false, interval); }
 static bool rejectedRequest() {
   reset();
   armResult = ESP_ERR_INVALID_ARG;
@@ -113,6 +121,26 @@ static bool rejectedRequest() {
 }
 int main(int argc, char**) {
   if (argc > 1) return rejectedRequest() ? 0 : 42;
+  // Contract call forms (upstream PR #3820 argument order: gpio,
+  // wakeOnHeldButton, timerWakeUs). Each form's OBSERVABLE effect is pinned so
+  // a header/caller permutation fails these asserts, not just a signature
+  // match: (gpio,false,us) must arm the TIMER, (gpio,true) must arm the
+  // button wake and sleep immediately, (gpio) and (gpio,false) must be
+  // button-only sleeps with no wake source armed.
+  reset();
+  assert(sleepForm(true, 0) && timerArmed == false && armCalls == 0 && clearCalls == 0);
+  assert(trace == std::vector<std::string>({"serial-end", "rails-down", "arm-button-wake", "sleep"}));
+  reset();
+  assert(sleepForm(false, 60000000) && timerArmed && armCalls == 1 && clearCalls == 0);
+  assert(trace == std::vector<std::string>({"arm", "serial-end", "rails-down", "sleep"}));
+  assert(trace.front() == "arm");  // timer armed FIRST, before any teardown
+  reset();
+  assert(sleepForm(true, 60000000) && timerArmed && armCalls == 1);
+  assert(trace == std::vector<std::string>({"arm", "serial-end", "rails-down", "arm-button-wake", "sleep"}));
+  reset();
+  assert(sleepForm(false, 0) && armCalls == 0 && clearCalls == 0);
+  assert(trace == std::vector<std::string>({"serial-end", "rails-down", "sleep"}));
+
   reset();
   assert(sleep(0) && armCalls == 0 && clearCalls == 0 && errors.empty());
   assert(trace == std::vector<std::string>({"serial-end", "rails-down", "sleep"}));

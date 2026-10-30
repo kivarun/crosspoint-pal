@@ -41,10 +41,22 @@ class HalPowerManager {
   // Setup wake up GPIO and enter deep sleep
   // Should be called inside main loop() to handle the currentLockMode
   //
-  // timerWakeUs requests an ESP-IDF one-shot timer in microseconds; zero adds
-  // no timer. Existing board shutdown and button-wake behavior is unchanged.
-  // Timer wake requires ESP power through sleep and an IDF-accepted duration.
-  void startDeepSleep(HalGPIO& gpio, uint64_t timerWakeUs = 0) const;
+  // Upstream contract (PR #3820): wakeOnHeldButton arms the wake without
+  // waiting for the power button's release, so a press that is still down
+  // wakes the device straight back up through the normal power-button wake
+  // path. timerWakeUs (fork) requests an ESP-IDF one-shot timer in
+  // microseconds; zero adds no timer. Existing board shutdown and
+  // button-wake behavior is unchanged. Timer wake requires ESP power through
+  // sleep and an IDF-accepted duration.
+  void startDeepSleep(HalGPIO& gpio, bool wakeOnHeldButton = false, uint64_t timerWakeUs = 0) const;
+
+#if FREEINK_DEVICE_PICCO
+  // While USB powers the device, light-sleep instead of deep sleep (deep sleep
+  // cannot observe the charger), calling onStatus whenever the charging state
+  // or percentage changes. Returns true when the power button ended the hold,
+  // false when USB went away or was never present.
+  bool holdWhileUsbPowered(HalGPIO& gpio, void (*onStatus)(bool charging, uint16_t percent)) const;
+#endif
 
   // Get battery percentage (range 0-100)
   uint16_t getBatteryPercentage() const;

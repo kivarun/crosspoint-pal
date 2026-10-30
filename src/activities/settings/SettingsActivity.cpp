@@ -59,7 +59,6 @@ bool showOnDevice(const SettingInfo& setting) {
   }
   // Merged into the Text Settings screen.
   if (setting.category == StrId::STR_CAT_READER && setting.inTextSettings) return false;
-  if (BoardConfig::hasHomeKey() && setting.valuePtr == &CrossPointSettings::longPressMenuFunction) return false;
   if (setting.valuePtr == &CrossPointSettings::pwrBtnFootnoteBack &&
       SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::FOOTNOTES) {
     return false;
@@ -164,9 +163,13 @@ void SettingsActivity::rebuildSettings() {
   addAction(SettingsSection::Network, StrId::STR_PLUGINS, SettingAction::Plugins);
 
   // OTA fetches this board's own release asset (see OtaUpdater); boards whose
-  // asset isn't published yet just report no update available.
-  addAction(SettingsSection::General, StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates);
-  addAction(SettingsSection::General, StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate);
+  // asset isn't published yet just report no update available. The Picco's
+  // stock layout has one app slot (partitions_picco.csv), so it cannot update
+  // itself either way.
+  if (!BoardConfig::isPicco()) {
+    addAction(SettingsSection::General, StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates);
+    addAction(SettingsSection::General, StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate);
+  }
   addAction(SettingsSection::General, StrId::STR_ABOUT, SettingAction::About);
   rebuildRowItems();
 }
@@ -260,11 +263,18 @@ void SettingsActivity::toggleSelectedSetting() {
   } else if (setting.type == SettingType::ENUM && setting.valuePtr != nullptr) {
     const uint8_t currentValue = SETTINGS.*(setting.valuePtr);
     const auto enumLabels = setting.enumLabels();
-    if (enumLabels.size() > 2) {
+    if (enumLabels.size() > 2 || !setting.enumValueIds.empty()) {
       const auto valuePtr = setting.valuePtr;
-      optionPopup.show(setting.nameId, enumLabels.data(), static_cast<int>(enumLabels.size()), currentValue,
-                       [this, valuePtr, sleepScreenChanged, quickResumeTimeoutChanged](int idx) {
-                         SETTINGS.*valuePtr = idx;
+      // Highlight the row whose PERSISTED value equals the field (identity
+      // for positional enums); write back through the same mapping, so a
+      // gapped advertised list never shifts persisted values.
+      const int currentIndex = setting.advertisedIndexFor(currentValue);
+      // Copy: the ids must outlive the popup regardless of later list rebuilds.
+      const std::vector<uint8_t> advertisedIds = setting.enumValueIds;
+      optionPopup.show(setting.nameId, enumLabels.data(), static_cast<int>(enumLabels.size()),
+                       currentIndex < 0 ? 0 : currentIndex,
+                       [this, valuePtr, advertisedIds, sleepScreenChanged, quickResumeTimeoutChanged](int idx) {
+                         SETTINGS.*valuePtr = advertisedIds.empty() ? static_cast<uint8_t>(idx) : advertisedIds[idx];
                          syncQuickResumeTimeoutForSleepScreen(sleepScreenChanged, quickResumeTimeoutChanged);
                          SETTINGS.saveToFile();
                          rebuildSettings();
@@ -493,11 +503,13 @@ std::string SettingsActivity::settingValueText(const SettingInfo& setting) {
   if (setting.action == SettingAction::Plugins) return SETTINGS.pluginsEnabled ? tr(STR_ENABLED) : tr(STR_DISABLED);
   if (setting.type == SettingType::ENUM && setting.valuePtr != nullptr) {
     // Guard like the valueGetter branch below: a corrupt/migrated settings
-    // byte must not index past the enum table.
+    // byte must not index past the enum table. Non-positional lists map the
+    // persisted value through the advertised ids first.
     const uint8_t value = SETTINGS.*(setting.valuePtr);
     const auto enumLabels = setting.enumLabels();
-    if (value >= enumLabels.size()) return "";
-    return I18N.get(enumLabels[value]);
+    const int labelIndex = setting.advertisedIndexFor(value);
+    if (labelIndex < 0 || static_cast<size_t>(labelIndex) >= enumLabels.size()) return "";
+    return I18N.get(enumLabels[labelIndex]);
   }
   if (setting.type == SettingType::ENUM && setting.valueGetter) {
     const uint8_t value = setting.valueGetter();
@@ -591,8 +603,7 @@ void SettingsActivity::drawFooter() {
       selected >= 0 && selected < static_cast<int>(settings.size()) && !settingsRowEnabled(settings[selected]);
   // A disabled row promises no Toggle: Confirm is a no-op there.
   const char* confirmLabel = disabled ? "" : (picker ? tr(STR_SELECT) : tr(STR_TOGGLE));
-  const auto labels =
-      mappedInput.mapLabels(tr(STR_BACK), confirmLabel, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   // Only the Confirm slot can go empty (Back/Up/Down always draw); the
   // opt-in erase clears a stale Toggle frame when the selection lands on a
   // disabled row.

@@ -41,6 +41,22 @@ std::string baseNameOf(const std::string& path) {
 
 constexpr uint8_t GRAYSCALE_PALETTE[] = {0, 0, 0, 0, 85, 85, 85, 0, 170, 170, 170, 0, 255, 255, 255, 0};
 
+RenderConfig fitImage(const ImageDimensions& dimensions, const GfxRenderer& renderer) {
+  const float scale = std::min({static_cast<float>(renderer.getScreenWidth()) / dimensions.width,
+                                static_cast<float>(renderer.getScreenHeight()) / dimensions.height, 1.0f});
+  const int width = std::max(1, std::min(renderer.getScreenWidth(), static_cast<int>(dimensions.width * scale)));
+  const int height = std::max(1, std::min(renderer.getScreenHeight(), static_cast<int>(dimensions.height * scale)));
+  RenderConfig config{(renderer.getScreenWidth() - width) / 2, (renderer.getScreenHeight() - height) / 2, width,
+                      height};
+  config.useExactDimensions = true;
+  return config;
+}
+
+bool overlaySleepMode() {
+  const uint8_t mode = SETTINGS.sleepScreen;
+  return mode == CrossPointSettings::SLEEP_SCREEN_MODE::TRANSPARENT_CUSTOM ||
+         mode == CrossPointSettings::SLEEP_SCREEN_MODE::COVER_TRANSPARENT;
+}
 }  // namespace
 
 BmpViewerActivity::BmpViewerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string path,
@@ -73,8 +89,7 @@ void BmpViewerActivity::loadSiblingImages() {
 
 bool BmpViewerActivity::canSetSleepCover() const {
   return FsHelpers::hasBmpExtension(filePath) || FsHelpers::hasJpgExtension(filePath) ||
-         (SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::TRANSPARENT_CUSTOM &&
-          FsHelpers::hasPngExtension(filePath));
+         (overlaySleepMode() && FsHelpers::hasPngExtension(filePath));
 }
 
 // ---------------------------------------------------------------------------
@@ -721,9 +736,10 @@ void BmpViewerActivity::menuAction(ViewerAction action) {
       // Options row: the modal closes, the confirmation runs over the image,
       // cancel re-renders the panel, Confirm enters the sleep-cover flow.
       viewerPage = ViewerPage::Viewer;
-      auto confirmation =
-          makeUniqueNoThrow<ConfirmationActivity>(renderer, mappedInput, tr(STR_SET_SLEEP_COVER) + std::string("?"),
-                                                  baseNameOf(filePath));
+      // The complete question key (not a concatenated label) — the
+      // confirmation-translations contract and non-English word order.
+      auto confirmation = makeUniqueNoThrow<ConfirmationActivity>(
+          renderer, mappedInput, tr(STR_SET_SLEEP_COVER_CONFIRM), baseNameOf(filePath));
       if (!confirmation) {
         LOG_ERR("BMP", "OOM: sleep cover confirmation (%zu bytes)", sizeof(ConfirmationActivity));
         renderCurrentImage(false);
@@ -1769,8 +1785,7 @@ void BmpViewerActivity::doSetSleepCover() {
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
 
   const bool jpeg = FsHelpers::hasJpgExtension(filePath);
-  const bool transparentMode =
-      !jpeg && SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::TRANSPARENT_CUSTOM;
+  const bool transparentMode = !jpeg && overlaySleepMode();
   if (!canSetSleepCover()) return;
 
   const char* destination =
@@ -1868,17 +1883,37 @@ void BmpViewerActivity::loop() {
     return;
   }
 
-  if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
-    openSibling(-1);
-    return;
-  }
-
+  // Confirm opens the options modal; the sleep cover action also lives on
+  // its Options page. Touch boards draw no button hints: long-press keeps
+  // the direct set-sleep-cover shortcut (the confirmation protects a
+  // long-lived setting from a stray gesture).
+  int touchX = 0;
+  int touchY = 0;
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     openOptionsMenu();
     return;
   }
+  if (mappedInput.wasScreenLongPress(touchX, touchY)) {
+    if (!canSetSleepCover()) return;
 
-  if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+    auto confirmation = makeUniqueNoThrow<ConfirmationActivity>(renderer, mappedInput, tr(STR_SET_SLEEP_COVER_CONFIRM),
+                                                                filePath.substr(filePath.find_last_of('/') + 1));
+    if (!confirmation) {
+      LOG_ERR("BMP", "OOM: sleep cover confirmation (%zu bytes)", sizeof(ConfirmationActivity));
+      return;
+    }
+    startActivityForResult(std::move(confirmation), [this](const ActivityResult& result) {
+      if (result.isCancelled) {
+        onEnter();
+        return;
+      }
+      doSetSleepCover();
+    });
+    return;
+  }
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Left) ||
+      mappedInput.wasReleased(MappedInputManager::Button::Up)) {
     openSibling(-1);
     return;
   }

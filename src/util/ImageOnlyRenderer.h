@@ -20,8 +20,12 @@
 // BmpViewerActivity; the next content arrives with the next wake/frame
 // paint). Both decode through the same Bitmap / PngToFramebufferConverter
 // primitives — this module adds no second decoder and no third grayscale
-// policy: the presentation below is the verbatim sleep-image contract of
-// SleepActivity::renderBitmapSleepScreen().
+// policy. The sleep-image transfer sequence has two conscious variants: this
+// seam (no overlay compositing, gray mode parameterized — the image-only and
+// slideshow presentations) and SleepActivity::renderBitmapSleepScreen() (the
+// overlay-aware superset with the BW-frame keeper). SleepActivity imports the
+// policy constants below; waveform and gray-mode changes belong here and must
+// be mirrored deliberately in the activity's variant.
 namespace imageonly {
 
 // Center an image on the page (shared by every BMP render path).
@@ -57,8 +61,10 @@ HalDisplay::GrayscaleMode sleepGrayscaleMode(const GfxRenderer& renderer);
 // display, no text. False when the file cannot be read/decoded.
 bool renderPngToFramebuffer(GfxRenderer& renderer, const std::string& path);
 
-// The sleep-image presentation policy, extracted verbatim from
-// SleepActivity::renderBitmapSleepScreen(): one drawBitmap pass into the
+// The sleep-image presentation policy, the image-only/slideshow variant of
+// SleepActivity::renderBitmapSleepScreen() (no overlay compositing, no BW
+// framebuffer rebuild; the gray mode is the CALLER's policy): one drawBitmap
+// pass into the
 // cleared framebuffer, then the panel transfer the sleep pipeline uses —
 // grayscale sources get the gray base + LSB/MSB plane transfers + the gray
 // buffer (the gray base mode is the CALLER's policy: Direct, Absolute or the
