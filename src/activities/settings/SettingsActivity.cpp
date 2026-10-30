@@ -1,5 +1,6 @@
 #include "SettingsActivity.h"
 
+#include <BleCompanion.h>
 #include <BlePageTurner.h>
 #include <BoardConfig.h>
 #include <GfxRenderer.h>
@@ -33,6 +34,7 @@
 #include "SilentRestart.h"
 #include "StatusBarSettingsActivity.h"
 #include "TextSettingsActivity.h"
+#include "activities/network/CompanionActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/IntervalSelectionActivity.h"
 #include "components/ListRowPresentation.h"
@@ -157,6 +159,9 @@ void SettingsActivity::rebuildSettings() {
   addAction(SettingsSection::Network, StrId::STR_WIFI_NETWORKS, SettingAction::Network);
   if (bleturner::status().compiledIn) {
     addAction(SettingsSection::Network, StrId::STR_BT_PAGE_TURNER, SettingAction::Bluetooth);
+  }
+  if (blecompanion::compiledIn()) {
+    addAction(SettingsSection::Network, StrId::STR_COMPANION, SettingAction::Companion);
   }
   addAction(SettingsSection::Network, StrId::STR_KOREADER_SYNC, SettingAction::KOReaderSync);
   addAction(SettingsSection::Network, StrId::STR_OPDS_SERVERS, SettingAction::OPDSBrowser);
@@ -377,6 +382,15 @@ void SettingsActivity::toggleSelectedSetting() {
           return;
         }
         startActivityForResult(std::move(activity), resultHandler);
+        break;
+      }
+      case SettingAction::Companion: {
+        auto activity = makeUniqueNoThrow<CompanionActivity>(renderer, mappedInput);
+        if (!activity) {
+          LOG_ERR("SETTINGS", "OOM: CompanionActivity");
+          return;
+        }
+        startActivityForResult(std::move(activity), nullptr);
         break;
       }
       case SettingAction::ClearCache:

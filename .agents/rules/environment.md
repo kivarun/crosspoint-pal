@@ -16,6 +16,8 @@ Diagnose that failure first and repair only the affected component.
 [Getting-started setup](../../docs/contributing/getting-started.md#first-time-toolchain-setup)
 is for first-time setup or an identified environment failure, not routine builds.
 Build output follows [compact logging](testing-debugging.md#compact-build-output).
+On Linux hosts, run builds under `nice -n 19` so compilation does not starve
+interactive work; combine with `ionice -c3` when storage pressure matters.
 
 ## Local Development Configuration
 
