@@ -114,6 +114,7 @@ class BleCompanion::Impl {
              void (*forgetPeerAddr)());
   void stop();
   bool forgetBond();
+  bool storedIdentityBonded() const { return storedPeer_.set() && bondIsSecure(storedPeer_); }
 
   bool sendButtonEvent(const uint8_t button, const bool pressed) {
     if (state_ != RadioState::Connected || sessionHandle_ == kNoSessionHandle || event_ == nullptr ||
@@ -701,6 +702,10 @@ void BleCompanion::stop() {
 
 bool BleCompanion::forgetBond() { return impl_ != nullptr && impl_->forgetBond(); }
 
+bool BleCompanion::storedIdentityBonded() const {
+  return impl_ != nullptr && impl_->storedIdentityBonded();
+}
+
 bool BleCompanion::sendButtonEvent(const uint8_t button, const bool pressed) {
   return impl_ != nullptr && impl_->sendButtonEvent(button, pressed);
 }
@@ -724,6 +729,7 @@ bool BleCompanion::begin(const char*, uint8_t, void (*)(const char*, uint8_t), v
 void BleCompanion::loop() {}
 void BleCompanion::stop() {}
 bool BleCompanion::forgetBond() { return false; }
+bool BleCompanion::storedIdentityBonded() const { return false; }
 bool BleCompanion::sendButtonEvent(uint8_t, bool) { return false; }
 Status BleCompanion::status() const { return Status{}; }
 ContentView BleCompanion::content() const { return {}; }

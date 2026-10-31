@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <BleCompanion.h>
 #include <BlePageTurner.h>
 #include <BoardConfig.h>
 #include <Epub.h>
@@ -50,6 +51,9 @@
 #include "fontIds.h"
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
+#include "util/CompanionGatePolicy.h"
+#include "util/CompanionGateState.h"
+#include "util/CompanionIdentityMirror.h"
 #include "util/PluginEvents.h"
 #include "util/ScreenshotUtil.h"
 #include "util/SlideSwitch.h"
@@ -542,6 +546,83 @@ void enterHardwareDeepSleep(uint64_t timerWakeUs) {
   powerManager.startDeepSleep(gpio, wakeOnHeldButton, timerWakeUs);
 }
 
+// Diagnostic cap for the headless companion gate window. The production
+// deadline and wake schedule come from the M1–M8 measurements
+// (p1-companion-gate preflight §4); nothing here is a production interval.
+constexpr unsigned long GATE_WINDOW_MS = 15000;
+
+// The ghost-wake sleep shape, safe before Storage.begin() and any display
+// init: SDCard.shutdown() no-ops when never mounted, the display controller
+// stays in its retained deep sleep, and the ESP rail keep-alive keys on the
+// (zero) timer argument. Never returns.
+static void sleepAfterGate() {
+  Storage.prepareForDeepSleep();
+  powerManager.startDeepSleep(gpio, false, 0);
+}
+
+// The bounded BLE window between a timer wake and the next deep sleep. Runs
+// before Storage.begin(): no SD, no display, no fonts, no ActivityManager, no
+// Wi-Fi, no page-turner runtime. Slice A performs no work — the window exists
+// to measure wake→session latency and heap cost, and every exit is
+// deterministic: back to sleep (timeout / error / no identity / no bond), or
+// a Power abort that continues the ordinary interactive boot. The arm was
+// already consumed by the dispatcher; no exit ever re-arms a timer.
+static void runCompanionGate(const bool diagnostic) {
+  companionidentity::StoredIdentity identity{};
+  if (!companionidentity::load(identity)) {
+    LOG_INF("GATE", "No stored companion identity; the radio stays off");
+    sleepAfterGate();
+  }
+
+  blecompanion::BleCompanion gate;
+  // Persistence no-ops: a headless window must never write SETTINGS (the SD
+  // is not mounted here); identity changes happen only in real sessions.
+  if (!gate.begin(identity.addr, identity.type, [](const char*, uint8_t) {}, []() {})) {
+    LOG_ERR("GATE", "The companion radio did not start; returning to sleep");
+    gate.stop();
+    sleepAfterGate();
+  }
+
+  // mirror ∩ bond: a named peer without a secure bond record cannot
+  // authenticate — end the window instead of advertising pointlessly.
+  if (!companionidentity::gateMayProceed(true, gate.storedIdentityBonded())) {
+    LOG_INF("GATE", "No secure bond for the stored identity; returning to sleep");
+    gate.stop();
+    sleepAfterGate();
+  }
+
+  LOG_INF("GATE", "Gate window open for %lu ms%s", GATE_WINDOW_MS, diagnostic ? " (diagnostic USB override)" : "");
+  const unsigned long deadline = millis() + GATE_WINDOW_MS;
+  bool sessionLogged = false;
+  while (millis() < deadline) {
+    gate.loop();
+    if (!sessionLogged && gate.status().sessionActive) {
+      sessionLogged = true;
+      LOG_INF("GATE", "Session established (M3 measurement point)");
+    }
+    if (gpio.isPowerButtonPhysicallyPressed()) {
+      LOG_INF("GATE", "Power pressed: aborting the gate window");
+      gate.stop();
+      // The ordinary boot consumes the release frame (the loop's wake-release
+      // handling); the press must never act as a button event.
+      wakePowerReleasePending = true;
+      return;
+    }
+    delay(2);
+  }
+
+  gate.stop();
+  // Physical Power re-check immediately before the sleep handoff, to shrink
+  // the race between the last poll and startDeepSleep().
+  if (gpio.isPowerButtonPhysicallyPressed()) {
+    LOG_INF("GATE", "Power pressed at the sleep handoff: aborting the gate window");
+    wakePowerReleasePending = true;
+    return;
+  }
+  LOG_INF("GATE", "Gate window closed; returning to sleep");
+  sleepAfterGate();
+}
+
 void setupDisplayAndFonts(bool seamless = false) {
 #if !FREEINK_MCU_C3
   // C3 resolves its controller in HalGPIO::begin() before SPI claims the
@@ -644,6 +725,52 @@ void setup() {
   const bool recoveryFirmwareMode = wakeupReason == HalGPIO::WakeupReason::PowerButton && !BoardConfig::isPaperMono() &&
                                     !BoardConfig::isPicco() && mappedInputManager.isPressed(recoveryButton);
 
+  // Sleep Companion gate (p1-companion-gate preflight, Slice A): the single
+  // early dispatch decision, taken before Storage.begin() so a dispatching
+  // wake never mounts the SD, touches the display, or starts any radio except
+  // the gate's own BLE window. The policy is pure and host-tested; the arm is
+  // one-shot and every non-dispatching wake clears it (fail closed).
+  // companion-gate-begin
+  const companiongate::WakeKind gateWake = wakeupReason == HalGPIO::WakeupReason::Timer
+                                               ? companiongate::WakeKind::Timer
+                                               : companiongate::WakeKind::Other;
+  const bool gateArmed = companiongate::hasArmedWork();
+  const bool gateUsbConnected = gpio.isUsbConnected();
+  // The cheap-input guard below is deliberately BROADER than the policy's Run
+  // precondition (it omits slideshowHeld and boardSupported): drifting apart
+  // can then only waste an NVS read and an ADC sample, never misclassify a
+  // runnable gate as a sleep.
+  bool gateIdentityValid = false;
+  bool gateBatteryOk = false;
+  if (gateArmed && gateWake == companiongate::WakeKind::Timer && !recoveryFirmwareMode) {
+    companionidentity::StoredIdentity gateIdentity{};
+    gateIdentityValid = companionidentity::load(gateIdentity);
+    gateBatteryOk = slideshow::allowedByBattery(powerManager.getBatteryPercentage(), gateUsbConnected);
+  }
+  companiongate::Inputs gateInputs{};
+  gateInputs.wake = gateWake;
+  gateInputs.recoveryMode = recoveryFirmwareMode;
+  gateInputs.boardSupported = BoardConfig::isX4Classic();
+  gateInputs.slideshowHeld = slideshow::hasValidRetainedState();
+  gateInputs.gateArmed = gateArmed;
+  gateInputs.identityValid = gateIdentityValid;
+  gateInputs.batteryOk = gateBatteryOk;
+  gateInputs.usbConnected = gateUsbConnected;
+#ifdef CROSSPOINT_WAIT_FOR_USB_SERIAL
+  gateInputs.diagnosticOverride = companiongate::armedIsDiagnostic();
+#else
+  gateInputs.diagnosticOverride = false;
+#endif
+  const companiongate::Action gateAction = companiongate::dispatch(gateInputs);
+  if (gateAction == companiongate::Action::Run) {
+    bool gateDiagnostic = false;
+    companiongate::takeArmedWork(gateDiagnostic);
+    runCompanionGate(gateDiagnostic);
+  } else if (gateArmed) {
+    companiongate::clearArm();
+  }
+  // companion-gate-end
+
   halTiltSensor.begin();
   halClock.begin();
 
@@ -693,6 +820,10 @@ void setup() {
   UITheme::getInstance().reload();
   ButtonNavigator::setMappedInputManager(mappedInputManager);
   pluginevents::refreshSubscriptions();
+  // Sleep Companion identity mirror: migrate mirror-if-absent (the gate reads
+  // NVS only; SETTINGS stays the user-visible record — a valid mirror is
+  // never overwritten from it).
+  companionidentity::migrateFromSettings(SETTINGS.companionPeerAddr, SETTINGS.companionPeerAddrType);
   // Seed the system clock from the battery-backed RTC: on RTC boards it is the
   // only real clock across power-off, and time() is what plugin event
   // timestamps, TLS and file dates read. Placed before trustedtime::init(),
@@ -983,6 +1114,31 @@ void loop() {
     if (line.startsWith("CMD:")) {
       String cmd = line.substring(4);
       cmd.trim();
+#ifdef CROSSPOINT_WAIT_FOR_USB_SERIAL
+      if (cmd.startsWith("GATEARM")) {
+        // Dev-only diagnostic arm (p1-companion-gate §5): sleep with an
+        // explicit test timer so the next timer wake dispatches the gate.
+        // Usage: CMD:GATEARM <seconds in [5,3600]> [diag]. The diag byte
+        // rides in the RTC arm record and disables the production USB bypass
+        // for that single run; plain builds never read it.
+        String args = cmd.length() > 7 ? cmd.substring(7) : String();
+        args.trim();
+        const int spaceIndex = args.indexOf(' ');
+        const String secondsToken = spaceIndex < 0 ? args : args.substring(0, spaceIndex);
+        const bool diagnostic = spaceIndex >= 0 && args.substring(spaceIndex + 1) == "diag";
+        const long seconds = secondsToken.toInt();
+        if (seconds < 5 || seconds > 3600) {
+          logSerial.printf("GATEARM ERR: seconds must be in [5, 3600]\n");
+        } else {
+          companiongate::arm(diagnostic);
+          logSerial.printf("GATEARM OK: %ld s%s\n", seconds, diagnostic ? " diag" : "");
+          // Minimal diagnostic sleep: no sleep-screen render and no plugin
+          // events — the point is a clean timer wake into the gate.
+          bleturner::beforeSleep(2000);
+          enterHardwareDeepSleep(static_cast<uint64_t>(seconds) * 1000000ULL);
+        }
+      }
+#endif
       if (cmd == "SCREENSHOT") {
         const uint32_t bufferSize = display.getBufferSize();
         logSerial.printf("SCREENSHOT_START:%d\n", bufferSize);

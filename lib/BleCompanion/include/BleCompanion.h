@@ -74,6 +74,12 @@ class BleCompanion {
   // an already-absent bond counts as reset. No other bond is ever touched,
   // and the whole store is never cleared.
   bool forgetBond();
+  // True when the identity this instance was begun with currently holds a
+  // secure bond record (an LTK marked LE Secure Connections). The headless
+  // gate checks this right after begin(): a named peer without a matching
+  // bond cannot authenticate, so the window ends instead of advertising
+  // pointlessly. Main-task call, false in stub builds.
+  bool storedIdentityBonded() const;
   // One physical button edge to the phone. `button` is a Button enum value.
   bool sendButtonEvent(uint8_t button, bool pressed);
 

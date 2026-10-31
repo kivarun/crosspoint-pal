@@ -114,6 +114,11 @@ add_subdirectory(ble_chapter_build_gate)
 add_subdirectory(ble_remote_turn_gate)
 add_subdirectory(ble_companion)
 
+add_subdirectory(companion_gate_state)
+add_subdirectory(companion_gate_policy)
+add_subdirectory(companion_identity_mirror)
+add_subdirectory(companion_gate_contract)
+
 add_subdirectory(${REPO_ROOT}/lib/BlePageTurner/test BlePageTurnerTests)
 
 add_test(NAME selection_buttons COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_selection_buttons.py)

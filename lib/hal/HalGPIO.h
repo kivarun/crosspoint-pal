@@ -83,6 +83,11 @@ class HalGPIO {
   bool wasAnyReleased() const;
   unsigned long getHeldTime() const;
   unsigned long getPowerButtonHeldTime() const;
+  // The power button's physical level right now, independent of the
+  // update()-sampled state: isPressed() reports the cached bitmask, which
+  // never changes between update() passes. Code running outside the main
+  // loop (the sleep companion gate) polls this instead.
+  bool isPowerButtonPhysicallyPressed() const;
   // True when any button contact is closed right now, read straight from the
   // hardware (ADC ladder off its idle rail, the power GPIO asserted, or the T5S3
   // expander key, one I2C read), without going through the debounced state.

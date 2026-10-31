@@ -10,6 +10,7 @@
 
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/CompanionIdentityMirror.h"
 
 namespace {
 
@@ -92,15 +93,30 @@ void CompanionActivity::beginSession() {
     const bool started = ble_.begin(
         SETTINGS.companionPeerAddr, SETTINGS.companionPeerAddrType,
         [](const char* addr, uint8_t type) {
+          // Mirror first: the NVS mirror is the background-commit (the headless
+          // gate reads it without SD); SETTINGS is the user-visible record. A
+          // failed mirror write persists nothing, so no divergence can exist.
+          if (!companionidentity::save(addr, type)) {
+            LOG_ERR("BLECOMP", "Identity mirror write failed; identity not persisted");
+            return;
+          }
           strncpy(SETTINGS.companionPeerAddr, addr, sizeof(SETTINGS.companionPeerAddr) - 1);
           SETTINGS.companionPeerAddr[sizeof(SETTINGS.companionPeerAddr) - 1] = '\0';
           SETTINGS.companionPeerAddrType = type;
-          SETTINGS.saveToFile();
+          if (!SETTINGS.saveToFile()) {
+            LOG_ERR("BLECOMP", "Settings write failed; the identity mirror stays authoritative");
+          }
         },
         []() {
+          // Best-effort mirror clear first: the bond is already deleted at
+          // this point, so even a leftover mirror fails the gate's
+          // mirror-and-bond check.
+          companionidentity::clear();
           SETTINGS.companionPeerAddr[0] = '\0';
           SETTINGS.companionPeerAddrType = blecompanion::CompanionAddrTypeUnset;
-          SETTINGS.saveToFile();
+          if (!SETTINGS.saveToFile()) {
+            LOG_ERR("BLECOMP", "Settings write failed during identity forget");
+          }
         });
     if (!started) {
       LOG_ERR("BLECOMP", "Could not start the companion radio");
