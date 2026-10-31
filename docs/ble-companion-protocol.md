@@ -58,7 +58,14 @@ reader → phone:
 
 ## Security and identity
 
-- The bond is encrypted with a six-digit passkey shown on the reader.
+- The bond is encrypted with a six-digit passkey shown on the reader
+  (bond + MITM; Secure Connections negotiated when both sides support it).
+- The session gate requires an **authenticated** (MITM) persistent bond
+  established with **LE Secure Connections**: the reader checks the peer's
+  bond-store record (`sc` flag) and disconnects an unencrypted,
+  unauthenticated, or legacy-MITM link (fail-closed). The GATT control write
+  is additionally gated by the stack (WRITE_ENC), so unencrypted writes fail
+  before any session logic runs.
 - One phone at a time: the reader accepts only the persisted companion
   identity, adopts the first bonded peer, and disconnects any other bonded
   peer. The identity is the **bonded ID address plus its address type** —

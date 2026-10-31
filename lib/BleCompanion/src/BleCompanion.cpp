@@ -74,6 +74,22 @@ ble_addr_t bleAddress(const PeerId& peer) {
   return addr;
 }
 
+// The bond store is the only place NimBLE records whether a pairing used LE
+// Secure Connections (ble_store_value_sec.sc); the connection's sec_state
+// carries no SC indicator. Reading OUR record for the peer's identity
+// address therefore distinguishes an SC bond from a legacy MITM bond, for
+// fresh pairings and restored LTKs alike: NimBLE persists the bond before
+// the ENC_CHANGE that delivers Authenticated (ble_sm_process_result calls
+// ble_sm_persist_keys before ble_gap_enc_event; the fresh-pairing enc event
+// is deferred until the key exchange completes). A missing record, a store
+// error, no LTK, or sc=0 all read as "not secure" — the caller disconnects.
+bool bondIsSecure(const PeerId& peer) {
+  ble_store_key_sec key{};
+  key.peer_addr = bleAddress(peer);
+  ble_store_value_sec value{};
+  return ble_store_read_our_sec(&key, &value) == 0 && value.ltk_present == 1 && value.sc == 1;
+}
+
 }  // namespace
 
 class BleCompanion::Impl {
@@ -84,11 +100,12 @@ class BleCompanion::Impl {
 
   struct Entry {
     Kind kind = Kind::Control;
-    uint16_t length = 0;      // Control: payload bytes
-    uint16_t connHandle = 0;  // the connection the entry belongs to
-    bool encrypted = false;   // Authenticated
-    bool bonded = false;      // Authenticated: a persistent bond was established
-    PeerId peer{};            // Authenticated: the bonded ID address
+    uint16_t length = 0;         // Control: payload bytes
+    uint16_t connHandle = 0;     // the connection the entry belongs to
+    bool encrypted = false;      // Authenticated
+    bool authenticated = false;  // Authenticated: MITM pairing backs the link
+    bool bonded = false;         // Authenticated: a persistent bond was established
+    PeerId peer{};               // Authenticated: the bonded ID address
     uint8_t data[MAX_CONTROL_BYTES] = {};
   };
 
@@ -190,6 +207,7 @@ class BleCompanion::Impl {
     entry.kind = Kind::Authenticated;
     entry.connHandle = info.getConnHandle();
     entry.encrypted = info.isEncrypted();
+    entry.authenticated = info.isAuthenticated();
     entry.bonded = info.isBonded();
     // The bonded IDENTITY (stable across Android RPA changes), never the
     // over-the-air address. Bind getIdAddress()'s return value to a local
@@ -333,12 +351,19 @@ class BleCompanion::Impl {
     LOG_DBG(TAG, "Peer connected, handle %u", entry.connHandle);
     setState(RadioState::AwaitingAuthentication);
   }
-
   void handleAuthenticated(const Entry& entry) {
-    if (!entry.encrypted || !entry.bonded) {
-      // The policy requires an encrypted persistent bond: a paired-only link
-      // has no stable identity, so it can never be adopted.
-      LOG_ERR(TAG, "Rejecting a %s connection", entry.bonded ? "unencrypted" : "unbonded");
+    if (!entry.encrypted || !entry.bonded || !entry.authenticated || !bondIsSecure(entry.peer)) {
+      // The policy requires an authenticated persistent bond established
+      // with LE Secure Connections: a paired-only link has no stable
+      // identity, so it can never be adopted, encryption without
+      // authentication is a downgrade, and a legacy bond is weaker than the
+      // companion session needs. The check runs before the identity
+      // decision, so nothing is accepted or saved on the way out.
+      const char* why = !entry.bonded          ? "unbonded"
+                        : !entry.encrypted     ? "unencrypted"
+                        : !entry.authenticated ? "unauthenticated"
+                                               : "non-SC bond";
+      LOG_ERR(TAG, "Rejecting a %s connection", why);
       if (server_ != nullptr) server_->disconnect(entry.connHandle);
       return;
     }

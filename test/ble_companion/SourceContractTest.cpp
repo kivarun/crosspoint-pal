@@ -108,6 +108,81 @@ TEST(BleCompanionSourceContractTest, SessionHandleUsesNimBLEsSentinel) {
       << "cleared sessions must reset to the sentinel";
 }
 
+TEST(BleCompanionSourceContractTest, SessionGateRequiresAnAuthenticatedSCBond) {
+  const std::string adapter = readAll(fs::path(BLECOMPANION_ROOT_PATH) / "src" / "BleCompanion.cpp");
+  // The F4/F5 security audits: the ATT layer enforces only encryption
+  // (WRITE_ENC, ble_att_svr.c), so the session gate must itself require a
+  // MITM-authenticated bond established with LE Secure Connections. The
+  // Authenticated event records NimBLEConnInfo::isAuthenticated(), and the
+  // SC level is read from the peer's bond-store record
+  // (ble_store_value_sec.sc — the connection's sec_state has no SC
+  // indicator). NimBLE persists the bond before the ENC_CHANGE that
+  // delivers the Authenticated event (ble_sm_process_result calls
+  // ble_sm_persist_keys before ble_gap_enc_event; the fresh-pairing enc
+  // event is deferred until the key exchange completes), so the read is
+  // deterministic for fresh pairings and restored LTKs alike.
+  const size_t entryStart = adapter.find("struct Entry {");
+  ASSERT_NE(entryStart, std::string::npos);
+  const size_t entryEnd = adapter.find("};", entryStart);
+  ASSERT_NE(entryEnd, std::string::npos);
+  const std::string entry = adapter.substr(entryStart, entryEnd - entryStart);
+  EXPECT_NE(entry.find("bool authenticated = false;"), std::string::npos)
+      << "the Authenticated event must carry the MITM flag (default-off: fail-closed)";
+  const size_t radioStart = adapter.find("void radioAuthenticated(NimBLEConnInfo& info)");
+  ASSERT_NE(radioStart, std::string::npos);
+  const size_t radioEnd = adapter.find("}", radioStart);
+  ASSERT_NE(radioEnd, std::string::npos);
+  const std::string radio = adapter.substr(radioStart, radioEnd - radioStart);
+  EXPECT_NE(radio.find("entry.authenticated = info.isAuthenticated();"), std::string::npos)
+      << "the recorded link state must include NimBLE's authenticated flag";
+  // The store lookup keys on the peer's IDENTITY address (bleAddress
+  // translation), not the over-the-air address, so a wrong identity address
+  // or type fails the lookup and reads as "not secure".
+  const size_t helperStart = adapter.find("bool bondIsSecure(const PeerId& peer)");
+  ASSERT_NE(helperStart, std::string::npos) << "the SC check must live in one auditable helper";
+  const size_t helperEnd = adapter.find("}  // namespace", helperStart);
+  ASSERT_NE(helperEnd, std::string::npos);
+  const std::string helper = adapter.substr(helperStart, helperEnd - helperStart);
+  EXPECT_NE(helper.find("ble_store_read_our_sec(&key, &value) == 0"), std::string::npos)
+      << "a missing record or a store read error must read as not secure (fail-closed)";
+  EXPECT_NE(helper.find("value.ltk_present == 1"), std::string::npos)
+      << "a record without an LTK must read as not secure";
+  EXPECT_NE(helper.find("value.sc == 1"), std::string::npos)
+      << "only a Secure Connections bond may pass the session gate";
+  EXPECT_NE(helper.find("key.peer_addr = bleAddress(peer);"), std::string::npos)
+      << "the lookup must key on the identity address, never the OTA address";
+  const size_t gateStart = adapter.find("void handleAuthenticated(const Entry& entry)");
+  ASSERT_NE(gateStart, std::string::npos);
+  const size_t gateEnd = adapter.find("void handleDisconnected(const Entry& entry)", gateStart);
+  ASSERT_NE(gateEnd, std::string::npos);
+  const std::string gate = adapter.substr(gateStart, gateEnd - gateStart);
+  EXPECT_NE(gate.find("!entry.encrypted || !entry.bonded || !entry.authenticated || !bondIsSecure(entry.peer)"),
+            std::string::npos)
+      << "an unauthenticated link or a legacy MITM bond must not be accepted";
+  const size_t reject = gate.find("Rejecting a");
+  ASSERT_NE(reject, std::string::npos);
+  const size_t disconnect = gate.find("disconnect(entry.connHandle)", reject);
+  ASSERT_NE(disconnect, std::string::npos) << "the rejection must disconnect the peer (fail-closed)";
+  const size_t earlyReturn = gate.find("return;", disconnect);
+  ASSERT_NE(earlyReturn, std::string::npos) << "a rejected link must leave before any state change";
+  // Identity handling sits after the gate: a rejected link must never reach
+  // the adoption path (which saves the peer identity) or the accepted state.
+  const size_t adopt = gate.find("AuthDecision::Adopt", earlyReturn);
+  ASSERT_NE(adopt, std::string::npos) << "an accepted link is adopted after the gate";
+  EXPECT_LT(disconnect, adopt);
+  const size_t accept = gate.find("setState(RadioState::Connected)", adopt);
+  ASSERT_NE(accept, std::string::npos) << "an accepted link still ends in the accepted-session state";
+  // Companion-only enforcement: the gate must not touch global NimBLE
+  // security configuration — the page turner pairs HID keyboards with the
+  // stack defaults and must keep doing so.
+  EXPECT_EQ(adapter.find("sm_sc_only"), std::string::npos) << "no global SC-only flag from the companion";
+  EXPECT_EQ(adapter.find("MYNEWT_VAL_BLE_SM_LEGACY"), std::string::npos)
+      << "no global legacy-pairing override from the companion";
+  const std::string pio = readAll(fs::path(REPO_ROOT_PATH) / "platformio.ini");
+  EXPECT_EQ(pio.find("MYNEWT_VAL_BLE_SM_SC_ONLY"), std::string::npos);
+  EXPECT_EQ(pio.find("MYNEWT_VAL_BLE_SM_LEGACY"), std::string::npos);
+}
+
 TEST(BleCompanionSourceContractTest, ProtocolEgressIsAlwaysHandleScoped) {
   const std::string adapter = readAll(fs::path(BLECOMPANION_ROOT_PATH) / "src" / "BleCompanion.cpp");
   size_t pos = 0;
