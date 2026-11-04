@@ -24,26 +24,14 @@ RTC_NOINIT_ATTR GatePowerRecord record;
 
 // esp_pm_dump_locks writes to a stdio FILE*, and this core's stdio routes to
 // the primary console (UART0), not the USJ monitor the UAT reads. The capture
-// cookie appends into a fixed buffer; the Sleep stats and SLEEP mode rows sit
-// at the dump tail, so a truncation fails the sample instead of reporting a
-// partial one.
-struct Capture {
-  char buf[2048];
-  size_t len;
-  bool truncated;
-};
-
+// cookie appends into the fixed bounded buffer (always NUL-terminated within
+// its bounds); the Sleep stats and SLEEP mode rows sit at the dump tail, so a
+// truncation fails the sample instead of reporting a partial one.
 Capture capture;
 FILE* captureFile = nullptr;
 
 ssize_t captureWrite(void* cookie, const char* buf, size_t len) {
-  auto* cap = static_cast<Capture*>(cookie);
-  const size_t room = cap->len < sizeof(cap->buf) ? sizeof(cap->buf) - cap->len : 0;
-  if (len > room) cap->truncated = true;
-  if (room > 0) {
-    memcpy(cap->buf + cap->len, buf, len < room ? len : room);
-    cap->len += len < room ? len : room;
-  }
+  captureAppend(*static_cast<Capture*>(cookie), buf, len);
   return static_cast<ssize_t>(len);
 }
 
@@ -111,8 +99,7 @@ namespace {
 SleepSample captureSample(bool& ok) {
   ok = false;
   SleepSample sample{};
-  capture.len = 0;
-  capture.truncated = false;
+  captureReset(capture);
   FILE* file = captureStream();
   if (file != nullptr) {
     esp_pm_dump_locks(file);

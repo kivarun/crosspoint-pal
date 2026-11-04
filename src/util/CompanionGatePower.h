@@ -88,14 +88,49 @@ inline bool parseSleepStats(const char* text, SleepSample& out) {
   return true;
 }
 
+// The bounded capture buffer for one esp_pm_dump_locks pass. The parser
+// reads the buffer with strstr/sscanf, so the buffer is always NUL-terminated
+// within its own bounds: no stale tail of a previous, longer capture is ever
+// visible, and the scan can never run past the buffer.
+inline constexpr size_t kCaptureBufSize = 2048;
+// One byte of the buffer is permanently reserved for the terminator.
+inline constexpr size_t kCaptureCapacity = kCaptureBufSize - 1;
+
+struct Capture {
+  char buf[kCaptureBufSize];
+  size_t len = 0;
+  bool truncated = false;
+};
+
+inline void captureReset(Capture& capture) {
+  capture.len = 0;
+  capture.truncated = false;
+  capture.buf[0] = '\0';
+}
+
+// Appends one write() chunk. An exact-capacity capture is not truncated: the
+// terminator takes the reserved byte. A chunk that does not fit marks the
+// capture truncated but still leaves the buffer terminated.
+inline void captureAppend(Capture& capture, const char* data, const size_t len) {
+  const size_t room = capture.len < kCaptureCapacity ? kCaptureCapacity - capture.len : 0;
+  if (len > room) capture.truncated = true;
+  if (room > 0) {
+    const size_t copied = len < room ? len : room;
+    memcpy(capture.buf + capture.len, data, copied);
+    capture.len += copied;
+  }
+  capture.buf[capture.len] = '\0';
+}
+
 // The persistent accounting record (RTC_NOINIT, SlideshowState pattern: a
 // magic written last is the only validity proof). RTC stores accumulated
 // results only — the per-window baseline lives in the Guard's RAM, so the
 // boot-relative esp_pm counters of different boots are never subtracted.
-// A record written by an older firmware shares offsets 0-15 (windows,
-// entries, rejects carry over) but decodes a wrong noSleepRuns and tail
-// until the first commit overwrites them; the deltas are unaffected because
-// they never derive from the record.
+//
+// The magic versions the layout: 'GAP2' is the 28-byte accumulated-results
+// record. The retired 'GAPW' record (32 bytes) held the cross-boot baseline
+// at offsets 16-27, so reinterpreting it would seed noSleepRuns and sleepUs
+// with garbage that no commit ever corrects; such records are reset instead.
 struct GatePowerRecord {
   uint32_t magic;        // kGatePowerMagic, written LAST
   uint32_t windows;      // completed sleep-capable gate windows counted
@@ -110,7 +145,8 @@ static_assert(sizeof(GatePowerRecord) == 28, "rtc_slow_seg headroom");
 static_assert(offsetof(GatePowerRecord, magic) == 0, "record layout: magic first");
 static_assert(offsetof(GatePowerRecord, lastBleState) == 24, "record layout: byte tail");
 
-inline constexpr uint32_t kGatePowerMagic = 0x47415057u;  // 'GAPW'
+inline constexpr uint32_t kGatePowerMagicV1 = 0x47415057u;  // 'GAPW', retired with the pre-B2h layout
+inline constexpr uint32_t kGatePowerMagic = 0x47415032u;    // 'GAP2'
 
 inline bool recordValid(const GatePowerRecord& record) { return record.magic == kGatePowerMagic; }
 

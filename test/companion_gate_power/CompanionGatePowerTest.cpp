@@ -1,15 +1,21 @@
 #include <gtest/gtest.h>
 
+#include <string>
+
 #include "util/CompanionGatePower.h"
 
-// The pure core of CompanionGatePower: the PM-dump parse, the window
-// accounting, and the RTC record layout. The device side (esp_pm configure,
-// the dump capture, the serial command) runs only in the experimental env.
+// The pure core of CompanionGatePower: the PM-dump parse, the bounded capture
+// buffer, the window accounting, and the RTC record layout. The device side
+// (esp_pm configure, the dump capture, the serial command) runs only in the
+// experimental env.
 
 namespace {
 
+using companiongatepower::Capture;
 using companiongatepower::GatePowerRecord;
+using companiongatepower::kCaptureCapacity;
 using companiongatepower::kGatePowerMagic;
+using companiongatepower::kGatePowerMagicV1;
 using companiongatepower::SleepSample;
 using companiongatepower::WindowDelta;
 
@@ -64,6 +70,26 @@ TEST(GatePowerRecord, GarbageFailsClosed) {
   EXPECT_TRUE(companiongatepower::recordValid(record));  // a garbage byte in a data field reads as data
 }
 
+TEST(GatePowerRecord, OldLayoutRecordIsReset) {
+  // The regression this test pins: the pre-B2h 32-byte 'GAPW' record shared
+  // the old magic, so reinterpreting it as the 28-byte 'GAP2' record seeded
+  // noSleepRuns and sleepUs with the old cross-boot baseline — garbage no
+  // commit ever corrects. The retired magic must fail recordValid so
+  // ensureValidRecord resets the diagnostics instead.
+  GatePowerRecord old = fresh();
+  old.magic = kGatePowerMagicV1;
+  old.windows = 1;
+  old.entries = 4;
+  old.rejects = 2;
+  old.noSleepRuns = 0x3039;  // the old lastEntries lands here under reinterpretation
+  old.sleepUs = 0x2710;      // the old lastRejects lands here under reinterpretation
+  old.lastBleState = 3;
+  old.lastOutcome = 1;
+  EXPECT_NE(kGatePowerMagicV1, kGatePowerMagic);
+  EXPECT_FALSE(companiongatepower::recordValid(old));
+  EXPECT_TRUE(companiongatepower::recordValid(fresh()));
+}
+
 TEST(ParseSleepStats, ReadsCountsAndSleepModeTime) {
   SleepSample sample;
   ASSERT_TRUE(companiongatepower::parseSleepStats(kDump, sample));
@@ -95,6 +121,65 @@ TEST(ParseSleepStats, MissingSleepStatsLineFails) {
   SleepSample sample;
   EXPECT_FALSE(companiongatepower::parseSleepStats("Mode stats:\nSLEEP     40 M   100   1%\n", sample));
   EXPECT_FALSE(companiongatepower::parseSleepStats(nullptr, sample));
+}
+
+namespace {
+Capture filledCapture(const char* text) {
+  Capture capture;
+  companiongatepower::captureReset(capture);
+  companiongatepower::captureAppend(capture, text, strlen(text));
+  return capture;
+}
+}  // namespace
+
+TEST(PmDumpCapture, RepeatedCapturesLeaveNoStaleTail) {
+  // The regression this test pins: the capture buffer is read with
+  // strstr/sscanf and was not NUL-terminated, so a shorter capture after a
+  // longer one let the parser scan past the new content into the previous
+  // capture's stale tail. captureAppend re-terminates at the new length.
+  const Capture longCapture = filledCapture(kDump);  // entries=1
+  EXPECT_FALSE(longCapture.truncated);
+  const Capture shortCapture = filledCapture(kNoSleepRow);  // entries=0, shorter text
+  EXPECT_EQ(shortCapture.buf[shortCapture.len], '\0');
+  EXPECT_EQ(shortCapture.len, strlen(shortCapture.buf));
+  SleepSample sample;
+  ASSERT_TRUE(companiongatepower::parseSleepStats(shortCapture.buf, sample));
+  EXPECT_EQ(sample.entries, 0);
+  EXPECT_EQ(sample.rejects, 0);
+}
+
+TEST(PmDumpCapture, ExactCapacityIsNotTruncated) {
+  // A dump that fills the buffer exactly dropped nothing: the terminator
+  // takes the reserved byte and the capture is not flagged truncated.
+  Capture capture;
+  companiongatepower::captureReset(capture);
+  const std::string dump(kCaptureCapacity, 'x');
+  companiongatepower::captureAppend(capture, dump.data(), dump.size());
+  EXPECT_FALSE(capture.truncated);
+  EXPECT_EQ(capture.len, kCaptureCapacity);
+  EXPECT_EQ(capture.buf[capture.len], '\0');
+}
+
+TEST(PmDumpCapture, OverflowMarksTruncatedAndStaysTerminated) {
+  Capture capture = filledCapture(kDump);
+  const std::string more(kCaptureCapacity + 16, 'y');
+  companiongatepower::captureAppend(capture, more.data(), more.size());
+  EXPECT_TRUE(capture.truncated);
+  EXPECT_EQ(capture.len, kCaptureCapacity);
+  EXPECT_EQ(capture.buf[capture.len], '\0');
+}
+
+TEST(PmDumpCapture, ResetClearsStaleContent) {
+  // A reset must terminate at offset 0: an empty dump after a longer one
+  // must not leave the previous capture visible to the parser.
+  const Capture capture = filledCapture(kDump);
+  EXPECT_EQ(capture.len, strlen(kDump));
+  Capture reset = capture;
+  companiongatepower::captureReset(reset);
+  EXPECT_EQ(reset.len, 0u);
+  EXPECT_EQ(reset.buf[0], '\0');
+  SleepSample sample;
+  EXPECT_FALSE(companiongatepower::parseSleepStats(reset.buf, sample));
 }
 
 TEST(GateAccounting, PerBootDeltaCountsOneWindow) {
