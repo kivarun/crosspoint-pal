@@ -14,11 +14,11 @@
 // The pure decision core is inline here and host-testable; the Preferences
 // I/O lives in the .cpp and is device-side only.
 
+#include <CompanionPeer.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-
-#include <CompanionPeer.h>
 
 namespace companionidentity {
 
@@ -65,8 +65,27 @@ inline Migration migrationDecision(const bool mirrorValid, const char* settingsA
 // treats the window as productive. The bond-presence half is evaluated by
 // BleCompanion::storedIdentityBonded() (device-side); this predicate keeps
 // the composition host-testable.
-inline bool gateMayProceed(const bool identityValid, const bool bondPresent) {
-  return identityValid && bondPresent;
+inline bool gateMayProceed(const bool identityValid, const bool bondPresent) { return identityValid && bondPresent; }
+
+// Pure read-back acceptance — the core of load(). save() writes a 17-character
+// address; the Arduino core's getString(key, char*, maxLen) reports the stored
+// length including the zero terminator on IDF >= 5.x (18), so the reported
+// length is core-version dependent and must never be required to be exactly
+// 17. Contract: accepts exactly what save() wrote, under either reporting
+// semantics, and fails closed on everything else:
+//   - read must be 17 or 18 — the only reported lengths getString can produce
+//     for a save() record; arbitrary non-zero lengths are foreign records
+//     (a core bump re-verifies the reported length against this pair);
+//   - the buffer must be NUL-terminated within its 18 bytes (checked before
+//     any strlen, which would run past the buffer otherwise);
+//   - textValid enforces the 17-character format and the address type.
+inline bool decodeMirrorRecord(const size_t read, const char (&addr)[18], const uint8_t type, StoredIdentity& out) {
+  if (read != 17 && read != 18) return false;
+  if (memchr(addr, '\0', sizeof(addr)) == nullptr) return false;
+  if (!textValid(addr, type)) return false;
+  memcpy(out.addr, addr, sizeof(out.addr));
+  out.type = type;
+  return true;
 }
 
 // Device-side NVS I/O (namespace "cpgate"). load() validates before

@@ -18,10 +18,7 @@ bool load(StoredIdentity& out) {
   const size_t read = prefs.getString(KEY_ADDR, addr, sizeof(addr));
   const uint8_t type = prefs.getUChar(KEY_TYPE, 0xFF);
   prefs.end();
-  if (read != 17 || !textValid(addr, type)) return false;
-  memcpy(out.addr, addr, sizeof(out.addr));
-  out.type = type;
-  return true;
+  return decodeMirrorRecord(read, addr, type, out);
 }
 
 bool save(const char* addr, const uint8_t type) {

@@ -347,7 +347,13 @@ class BleCompanion::Impl {
       return;
     }
     if (server_ != nullptr) {
+#ifdef CROSSPOINT_BLE_LIGHT_SLEEP_DIAG
+      // P1-B0a diagnostic: a 500 ms connection interval so the controller can
+      // spend most of each interval in modem sleep. Never shipped.
+      server_->updateConnParams(entry.connHandle, 400, 400, 0, 300);
+#else
       server_->updateConnParams(entry.connHandle, 12, 24, 0, 300);
+#endif
     }
     LOG_DBG(TAG, "Peer connected, handle %u", entry.connHandle);
     setState(RadioState::AwaitingAuthentication);
@@ -509,6 +515,13 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
   void onDisconnect(NimBLEServer*, NimBLEConnInfo& info, int) override { owner_.radioDisconnected(info); }
   uint32_t onPassKeyDisplay() override { return owner_.passkeyForDisplay(); }
   void onAuthenticationComplete(NimBLEConnInfo& info) override { owner_.radioAuthenticated(info); }
+#ifdef CROSSPOINT_BLE_LIGHT_SLEEP_DIAG
+  void onConnParamsUpdate(NimBLEConnInfo& info) override {
+    // Log the NEGOTIATED parameters, not the request (P1-B0a).
+    LOG_INF(TAG, "Conn params: interval %.2f ms latency %u timeout %u ms", info.getConnInterval() * 1.25f,
+            info.getConnLatency(), info.getConnTimeout() * 10);
+  }
+#endif
 
  private:
   BleCompanion::Impl& owner_;
@@ -702,9 +715,7 @@ void BleCompanion::stop() {
 
 bool BleCompanion::forgetBond() { return impl_ != nullptr && impl_->forgetBond(); }
 
-bool BleCompanion::storedIdentityBonded() const {
-  return impl_ != nullptr && impl_->storedIdentityBonded();
-}
+bool BleCompanion::storedIdentityBonded() const { return impl_ != nullptr && impl_->storedIdentityBonded(); }
 
 bool BleCompanion::sendButtonEvent(const uint8_t button, const bool pressed) {
   return impl_ != nullptr && impl_->sendButtonEvent(button, pressed);

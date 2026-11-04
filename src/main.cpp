@@ -50,11 +50,15 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "platform/UsbSerialJtagHandoff.h"
+#include "util/BleLightSleepDiag.h"
 #include "util/ButtonNavigator.h"
 #include "util/CompanionGatePolicy.h"
+#include "util/CompanionGatePower.h"
 #include "util/CompanionGateState.h"
 #include "util/CompanionIdentityMirror.h"
 #include "util/PluginEvents.h"
+#include "util/PmOnlyDiag.h"
+#include "util/RtcClockDiag.h"
 #include "util/ScreenshotUtil.h"
 #include "util/SlideSwitch.h"
 #include "util/SlideshowCapability.h"
@@ -571,6 +575,7 @@ static void runCompanionGate(const bool diagnostic) {
   companionidentity::StoredIdentity identity{};
   if (!companionidentity::load(identity)) {
     LOG_INF("GATE", "No stored companion identity; the radio stays off");
+    companiongate::updateRunOutcome(companiongate::RunOutcome::NoIdentity);
     sleepAfterGate();
   }
 
@@ -579,6 +584,7 @@ static void runCompanionGate(const bool diagnostic) {
   // is not mounted here); identity changes happen only in real sessions.
   if (!gate.begin(identity.addr, identity.type, [](const char*, uint8_t) {}, []() {})) {
     LOG_ERR("GATE", "The companion radio did not start; returning to sleep");
+    companiongate::updateRunOutcome(companiongate::RunOutcome::RadioStartFailed);
     gate.stop();
     sleepAfterGate();
   }
@@ -587,11 +593,20 @@ static void runCompanionGate(const bool diagnostic) {
   // authenticate — end the window instead of advertising pointlessly.
   if (!companionidentity::gateMayProceed(true, gate.storedIdentityBonded())) {
     LOG_INF("GATE", "No secure bond for the stored identity; returning to sleep");
+    companiongate::updateRunOutcome(companiongate::RunOutcome::NoBond);
     gate.stop();
     sleepAfterGate();
   }
 
   LOG_INF("GATE", "Gate window open for %lu ms%s", GATE_WINDOW_MS, diagnostic ? " (diagnostic USB override)" : "");
+  // P1-B2a (experimental build flag): automatic light sleep across the
+  // window. The guard pairs the configure with the sample-and-restore on
+  // every exit; the poll period below follows whether the window can sleep.
+  companiongatepower::Guard gateWindow(gate);
+#ifdef CROSSPOINT_COMPANION_GATE_AUTOLS
+  LOG_INF("GATE", "Gate window automatic light sleep on, poll %u ms",
+          companiongatepower::gatePollMs(gateWindow.configured()));
+#endif
   const unsigned long deadline = millis() + GATE_WINDOW_MS;
   bool sessionLogged = false;
   while (millis() < deadline) {
@@ -602,20 +617,25 @@ static void runCompanionGate(const bool diagnostic) {
     }
     if (gpio.isPowerButtonPhysicallyPressed()) {
       LOG_INF("GATE", "Power pressed: aborting the gate window");
+      companiongate::updateRunOutcome(companiongate::RunOutcome::PowerAbort);
+      gateWindow.finish(companiongatepower::WindowPowerAbort);
       gate.stop();
       // The ordinary boot consumes the release frame (the loop's wake-release
       // handling); the press must never act as a button event.
       wakePowerReleasePending = true;
       return;
     }
-    delay(2);
+    delay(companiongatepower::gatePollMs(gateWindow.configured()));
   }
 
+  companiongate::updateRunOutcome(companiongate::RunOutcome::WindowTimeout);
+  gateWindow.finish(companiongatepower::WindowTimeout);
   gate.stop();
   // Physical Power re-check immediately before the sleep handoff, to shrink
   // the race between the last poll and startDeepSleep().
   if (gpio.isPowerButtonPhysicallyPressed()) {
     LOG_INF("GATE", "Power pressed at the sleep handoff: aborting the gate window");
+    companiongate::updateRunOutcome(companiongate::RunOutcome::PowerAbort);
     wakePowerReleasePending = true;
     return;
   }
@@ -731,9 +751,8 @@ void setup() {
   // the gate's own BLE window. The policy is pure and host-tested; the arm is
   // one-shot and every non-dispatching wake clears it (fail closed).
   // companion-gate-begin
-  const companiongate::WakeKind gateWake = wakeupReason == HalGPIO::WakeupReason::Timer
-                                               ? companiongate::WakeKind::Timer
-                                               : companiongate::WakeKind::Other;
+  const companiongate::WakeKind gateWake =
+      wakeupReason == HalGPIO::WakeupReason::Timer ? companiongate::WakeKind::Timer : companiongate::WakeKind::Other;
   const bool gateArmed = companiongate::hasArmedWork();
   const bool gateUsbConnected = gpio.isUsbConnected();
   // The cheap-input guard below is deliberately BROADER than the policy's Run
@@ -762,14 +781,64 @@ void setup() {
   gateInputs.diagnosticOverride = false;
 #endif
   const companiongate::Action gateAction = companiongate::dispatch(gateInputs);
+  // One-line dispatch trace: every input the policy saw plus its decision, so
+  // a refused wake names its cause instead of returning to sleep unexplained.
+  LOG_INF("GATE", "dispatch: wake=%s armed=%d diag=%d recovery=%d usb=%d slideshow=%d identity=%d battery=%d -> %s",
+          gateWake == companiongate::WakeKind::Timer ? "timer" : "other", gateArmed, gateInputs.diagnosticOverride,
+          gateInputs.recoveryMode, gateInputs.usbConnected, gateInputs.slideshowHeld, gateInputs.identityValid,
+          gateInputs.batteryOk, companiongate::gateActionName(gateAction));
+  // The verdict rides in the consumed arm record and is only stored on timer
+  // wakes, so the last timer-wake decision survives the interactive boots that
+  // follow it. The stores compile in every build; GATESTAT, the only reader,
+  // exists in the AUTOLS diagnostic builds.
+  const companiongate::DispatchVerdict verdict{gateWake == companiongate::WakeKind::Timer,
+                                               gateArmed,
+                                               gateInputs.diagnosticOverride,
+                                               gateInputs.recoveryMode,
+                                               gateInputs.usbConnected,
+                                               gateInputs.slideshowHeld,
+                                               gateInputs.identityValid,
+                                               gateInputs.batteryOk,
+                                               gateAction,
+                                               companiongate::RunOutcome::NotRun};
   if (gateAction == companiongate::Action::Run) {
     bool gateDiagnostic = false;
     companiongate::takeArmedWork(gateDiagnostic);
+    companiongate::storeDispatchVerdict(verdict);
     runCompanionGate(gateDiagnostic);
-  } else if (gateArmed) {
+  } else if (gateAction == companiongate::Action::SleepNoRadio) {
+    // Policy contract (p1-companion-gate): armed but unsafe to run — no
+    // identity or a low battery. Consume the arm and go straight back to
+    // sleep, power-button-only; never the ordinary boot.
     companiongate::clearArm();
+    companiongate::storeDispatchVerdict(verdict);
+    sleepAfterGate();
+  } else {
+    if (gateArmed) companiongate::clearArm();
+    // StandDown/SlideshowWins/Ordinary: only a timer wake stores here, so a
+    // button or USB wake never overwrites the preserved timer-wake verdict.
+    if (gateWake == companiongate::WakeKind::Timer) companiongate::storeDispatchVerdict(verdict);
   }
   // companion-gate-end
+
+  // Dev-only RTC slow-clock diagnostic (p0-rtc-clock): re-applies the
+  // scratch-selected clock on every boot and, when a measurement loop is
+  // armed, logs the finished cycle and sleeps again instead of booting.
+#ifdef CROSSPOINT_RTC_CLK_DIAG
+  rtcclockdiag::begin(powerManager, gpio, wakeupReason);
+#endif
+
+  // Dev-only BLE light-sleep diagnostic (P1-B0a): controller sleep clock,
+  // RTC confirmation, and esp_pm automatic light sleep.
+#ifdef CROSSPOINT_BLE_LIGHT_SLEEP_DIAG
+  blelightsleepdiag::begin();
+#endif
+
+  // Dev-only PM diagnostic (p1-b1k/b1l/b1n): DFS range with automatic light
+  // sleep per CROSSPOINT_PM_AUTOLS — the minimal PM initialization.
+#ifdef CROSSPOINT_PM_ONLY_DIAG
+  pmonlydiag::begin();
+#endif
 
   halTiltSensor.begin();
   halClock.begin();
@@ -1107,8 +1176,26 @@ void loop() {
     lastMemPrint = millis();
   }
 
+#ifdef CROSSPOINT_PM_LSTEST
+  // Own 10 s tick, 5 s off the MEM tick (mechanism and history in
+  // PmOnlyDiag.cpp): RX1's heartbeat died as the third line of the MEM
+  // burst, the only one that had to wait for TX-ring drain. 0UL-5000UL
+  // starts the phase ~5 s after boot; a >5 s loop stall coalesces the
+  // ticks, which txShort makes visible.
+  static unsigned long lastRxHbPrint = 0UL - 5000UL;
+  if (millis() - lastRxHbPrint >= 10000) {
+    lastRxHbPrint = millis();
+    pmonlydiag::rxHeartbeat();
+  }
+#endif
+
   // Handle incoming serial commands,
   // nb: we use logSerial from logging to avoid deprecation warnings
+#ifdef CROSSPOINT_RTC_CLK_DIAG
+  // p0-rtc-clock: drain the RTC-retained diagnostic history once the USB
+  // console is back after a wake.
+  rtcclockdiag::flushBufferedLog();
+#endif
   if (logSerial.available() > 0) {
     String line = logSerial.readStringUntil('\n');
     if (line.startsWith("CMD:")) {
@@ -1138,6 +1225,42 @@ void loop() {
           enterHardwareDeepSleep(static_cast<uint64_t>(seconds) * 1000000ULL);
         }
       }
+#endif
+#ifdef CROSSPOINT_RTC_CLK_DIAG
+      if (cmd.startsWith("RTCCLK") || cmd.startsWith("RTCLOOP") || cmd.startsWith("RTCCAL")) {
+        // p0-rtc-clock diagnostic.
+        rtcclockdiag::handleCommand(powerManager, gpio, cmd.c_str());
+      }
+#endif
+#ifdef CROSSPOINT_BLE_LIGHT_SLEEP_DIAG
+      if (cmd == "PMSTAT") {
+        // P1-B0a diagnostic: esp_pm lock dump.
+        blelightsleepdiag::handleCommand(cmd.c_str());
+      }
+#endif
+#ifdef CROSSPOINT_COMPANION_GATE_AUTOLS
+      if (cmd == "GATESTAT") {
+        // P1-B2a: gate-window sleep accounting and a PM-lock snapshot.
+        companiongatepower::handleCommand(cmd.c_str());
+      }
+#endif
+#ifdef CROSSPOINT_PM_ONLY_DIAG
+      if (cmd == "PMSTAT") {
+        // PM diagnostic (p1-b1k/b1l/b1n): esp_pm lock and mode dump.
+        pmonlydiag::handleCommand(cmd.c_str());
+      }
+#endif
+#ifdef CROSSPOINT_PM_LSTEST
+      if (cmd == "RXSTAT") {
+        // p1-b1o: RX-path counters and USJ register snapshot.
+        pmonlydiag::handleCommand(cmd.c_str());
+      }
+      if (cmd == "LSTEST") {
+        // p1-b1o: the controlled automatic-light-sleep window. The USB-drive
+        // exclusive-storage state decides the precondition inside the test.
+        pmonlydiag::handleLsTest(activityManager.requiresExclusiveStorageLoop());
+      }
+      pmonlydiag::ackUnknownCommand(cmd.c_str());
 #endif
       if (cmd == "SCREENSHOT") {
         const uint32_t bufferSize = display.getBufferSize();

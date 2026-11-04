@@ -115,9 +115,12 @@ add_subdirectory(ble_remote_turn_gate)
 add_subdirectory(ble_companion)
 
 add_subdirectory(companion_gate_state)
+add_subdirectory(companion_gate_power)
 add_subdirectory(companion_gate_policy)
 add_subdirectory(companion_identity_mirror)
 add_subdirectory(companion_gate_contract)
+add_subdirectory(rtcclk_diag_core)
+add_subdirectory(msc_diag_core)
 
 add_subdirectory(${REPO_ROOT}/lib/BlePageTurner/test BlePageTurnerTests)
 

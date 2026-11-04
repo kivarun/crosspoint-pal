@@ -1,0 +1,210 @@
+#include "CompanionGatePower.h"
+
+#ifdef CROSSPOINT_COMPANION_GATE_AUTOLS
+
+#include <BleCompanion.h>
+#include <Logging.h>
+#include <esp_attr.h>
+#include <esp_pm.h>
+#include <sys/types.h>
+
+#include <cstdio>
+#include <cstring>
+
+#include "CompanionGateState.h"
+
+namespace companiongatepower {
+namespace {
+
+constexpr const char* TAG = "GATEPWR";
+
+// RTC_NOINIT: survives deep sleep, garbage on a cold boot — the magic guards
+// every read (the SlideshowState pattern).
+RTC_NOINIT_ATTR GatePowerRecord record;
+
+// esp_pm_dump_locks writes to a stdio FILE*, and this core's stdio routes to
+// the primary console (UART0), not the USJ monitor the UAT reads. The capture
+// cookie appends into a fixed buffer; the Sleep stats and SLEEP mode rows sit
+// at the dump tail, so a truncation fails the sample instead of reporting a
+// partial one.
+struct Capture {
+  char buf[2048];
+  size_t len;
+  bool truncated;
+};
+
+Capture capture;
+FILE* captureFile = nullptr;
+
+ssize_t captureWrite(void* cookie, const char* buf, size_t len) {
+  auto* cap = static_cast<Capture*>(cookie);
+  const size_t room = cap->len < sizeof(cap->buf) ? sizeof(cap->buf) - cap->len : 0;
+  if (len > room) cap->truncated = true;
+  if (room > 0) {
+    memcpy(cap->buf + cap->len, buf, len < room ? len : room);
+    cap->len += len < room ? len : room;
+  }
+  return static_cast<ssize_t>(len);
+}
+
+FILE* captureStream() {
+  if (captureFile == nullptr) {
+    static const cookie_io_functions_t io = {nullptr, captureWrite, nullptr, nullptr};
+    captureFile = fopencookie(&capture, "w", io);
+  }
+  return captureFile;
+}
+
+ssize_t logCookieWrite(void*, const char* buf, size_t len) {
+  logSerial.write(reinterpret_cast<const uint8_t*>(buf), len);
+  return static_cast<ssize_t>(len);
+}
+
+FILE* logFile() {
+  static FILE* file = nullptr;
+  if (file == nullptr) {
+    static const cookie_io_functions_t io = {nullptr, logCookieWrite, nullptr, nullptr};
+    file = fopencookie(nullptr, "w", io);
+  }
+  return file;
+}
+
+const char* stateName(const uint8_t state) {
+  switch (state) {
+    case static_cast<uint8_t>(blecompanion::RadioState::Advertising):
+      return "advertising";
+    case static_cast<uint8_t>(blecompanion::RadioState::AwaitingAuthentication):
+      return "awaiting-auth";
+    case static_cast<uint8_t>(blecompanion::RadioState::Connected):
+      return "connected";
+    default:
+      return "stopped";
+  }
+}
+
+const char* outcomeName(const uint8_t outcome) { return outcome == WindowPowerAbort ? "power-abort" : "timeout"; }
+
+void ensureValidRecord() {
+  if (recordValid(record)) return;
+  record = GatePowerRecord{};
+  record.magic = kGatePowerMagic;  // LAST: the record is valid only now
+}
+
+}  // namespace
+
+bool beginWindow() {
+  ensureValidRecord();
+  esp_pm_config_t pm = {};
+  pm.max_freq_mhz = kGateMaxFreqMhz;
+  pm.min_freq_mhz = kGateMinFreqMhz;
+  pm.light_sleep_enable = true;
+  const esp_err_t err = esp_pm_configure(&pm);
+  if (err != ESP_OK) {
+    LOG_ERR(TAG, "esp_pm_configure(240/80, ON) failed: %s — the window keeps the stock cadence", esp_err_to_name(err));
+    return false;
+  }
+  return true;
+}
+
+Guard::Guard(blecompanion::BleCompanion& gate) : gate_(&gate), configured_(beginWindow()) {}
+
+void Guard::finish(const uint8_t outcome) {
+  outcome_ = outcome;
+  bleState_ = static_cast<uint8_t>(gate_->status().state);
+  finished_ = true;
+}
+
+Guard::~Guard() {
+  if (!configured_) return;
+  if (!finished_) {
+    // An exit path that never called finish(): count it as an abort so the
+    // restore and the accounting still run exactly once.
+    outcome_ = WindowPowerAbort;
+    bleState_ = static_cast<uint8_t>(blecompanion::RadioState::Stopped);
+  }
+  // The sample must be taken while automatic light sleep is still enabled:
+  // the profiling dump prints the SLEEP mode row and the Sleep stats block
+  // only then.
+  SleepSample sample{};
+  bool sampled = false;
+  capture.len = 0;
+  capture.truncated = false;
+  FILE* file = captureStream();
+  if (file != nullptr) {
+    esp_pm_dump_locks(file);
+    fflush(file);
+    if (!capture.truncated) {
+      sampled = parseSleepStats(capture.buf, sample);
+    }
+  }
+  ensureValidRecord();
+  WindowDelta delta{};
+  SampleRole role = SampleRole::Skip;
+  if (sampled) {
+    if (record.primed == 0) {
+      role = SampleRole::Prime;  // the first sample is the baseline, not a delta
+    } else if (windowDelta(record, sample, delta)) {
+      role = SampleRole::Count;
+    }
+  }
+  commitWindow(record, sample, role, delta, bleState_, outcome_);
+  if (role == SampleRole::Count && delta.entries == 0 && delta.rejects == 0) {
+    LOG_INF(TAG, "window %u: no light sleep entry (rejects 0) — sleep never engaged",
+            static_cast<unsigned>(record.windows));
+  }
+  esp_pm_config_t pm = {};
+  pm.max_freq_mhz = kGateMaxFreqMhz;
+  pm.min_freq_mhz = kGateMinFreqMhz;
+  pm.light_sleep_enable = false;
+  const esp_err_t err = esp_pm_configure(&pm);
+  if (err != ESP_OK) LOG_ERR(TAG, "esp_pm_configure(OFF) failed: %s", esp_err_to_name(err));
+}
+
+void handleCommand(const char* command) {
+  if (command == nullptr || strcmp(command, "GATESTAT") != 0) return;
+  ensureValidRecord();
+  const long long modeUsBaseline = record.lastModeUs;
+  LOG_INF(TAG, "windows=%u entries=%u rejects=%u noSleep=%u modeUsBaseline=%llu", static_cast<unsigned>(record.windows),
+          static_cast<unsigned>(record.entries), static_cast<unsigned>(record.rejects),
+          static_cast<unsigned>(record.noSleepRuns), modeUsBaseline);
+  LOG_INF(TAG, "last window: ble=%s end=%s", stateName(record.lastBleState), outcomeName(record.lastOutcome));
+  // The persisted dispatch verdict of the last timer wake: the inputs the
+  // policy saw, its decision, and (for Run) why the window attempt ended.
+  // Bond presence is derived, never stored: a completed window or a power
+  // abort implies the bond held, the no-bond outcome implies it did not.
+  companiongate::DispatchVerdict verdict{};
+  if (companiongate::readDispatchVerdict(verdict)) {
+    const char* bond = "n/a";
+    if (verdict.decision == companiongate::Action::Run) {
+      bond = verdict.outcome == companiongate::RunOutcome::NoBond ? "no"
+             : (verdict.outcome == companiongate::RunOutcome::WindowTimeout ||
+                verdict.outcome == companiongate::RunOutcome::PowerAbort)
+                 ? "yes"
+                 : "n/a";
+    }
+    LOG_INF(TAG,
+            "last timer-wake dispatch: wake=%s armed=%d diag=%d recovery=%d usb=%d slideshow=%d identity=%d "
+            "battery=%d -> %s run=%s bond=%s",
+            verdict.wakeTimer ? "timer" : "other", verdict.armValid, verdict.diagnostic, verdict.recovery, verdict.usb,
+            verdict.slideshow, verdict.identity, verdict.battery, companiongate::gateActionName(verdict.decision),
+            companiongate::runOutcomeName(verdict.outcome), bond);
+    if (!verdict.armValid) {
+      LOG_INF(TAG, "  identity/battery not sampled: the wake carried no arm");
+    }
+  } else {
+    LOG_INF(TAG, "last timer-wake dispatch: none (cold boot, GATEARM pending, or never armed)");
+  }
+  // The live PM-lock snapshot: with automatic light sleep off at boot the
+  // dump carries the lock table (the SLEEP mode row stays hidden), which is
+  // the "why would the next window sleep" answer on demand.
+  FILE* file = logFile();
+  if (file == nullptr) {
+    LOG_ERR(TAG, "GATESTAT: could not create the serial dump stream");
+    return;
+  }
+  esp_pm_dump_locks(file);
+  fflush(file);
+}
+
+}  // namespace companiongatepower
+#endif  // CROSSPOINT_COMPANION_GATE_AUTOLS

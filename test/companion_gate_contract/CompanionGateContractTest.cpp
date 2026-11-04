@@ -78,8 +78,7 @@ TEST(CompanionGateContract, GateWindowPollsThePhysicalPowerButton) {
       << "isPressed reads the cached update() state and is useless here";
   EXPECT_EQ(window.find("rawInputActive"), std::string::npos)
       << "rawInputActive ORs in board-conditional buttons; never a Power equivalent";
-  EXPECT_EQ(window.find("gpio.update()"), std::string::npos)
-      << "update() would fabricate edges into the ordinary boot";
+  EXPECT_EQ(window.find("gpio.update()"), std::string::npos) << "update() would fabricate edges into the ordinary boot";
 }
 
 TEST(CompanionGateContract, GateWindowPersistsNothingAndNeverReArms) {
@@ -99,7 +98,8 @@ TEST(CompanionGateContract, GateWindowPersistsNothingAndNeverReArms) {
   // Every exit sleeps power-button-only through the shared helper: no timer
   // re-arm, and never the full hardware sleep path (no display/SD here).
   size_t exits = 0;
-  for (auto pos = window.find("sleepAfterGate();"); pos != std::string::npos; pos = window.find("sleepAfterGate();", pos + 1)) {
+  for (auto pos = window.find("sleepAfterGate();"); pos != std::string::npos;
+       pos = window.find("sleepAfterGate();", pos + 1)) {
     ++exits;
   }
   EXPECT_GE(exits, 3u) << "the deterministic sleep exits must go through the shared helper";
@@ -116,4 +116,94 @@ TEST(CompanionGateContract, MirrorBondCheckGuardsTheWindow) {
   ASSERT_NE(bondPos, std::string::npos);
   ASSERT_NE(openPos, std::string::npos);
   EXPECT_LT(bondPos, openPos) << "the bond check must precede the productive window";
+}
+
+TEST(CompanionGateContract, SleepNoRadioGoesStraightBackToSleep) {
+  const std::string main = readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp");
+  const std::string block = between(main, "// companion-gate-begin", "// companion-gate-end");
+  const auto sleepPos = block.find("Action::SleepNoRadio");
+  ASSERT_NE(sleepPos, std::string::npos) << "the caller must implement the SleepNoRadio contract";
+  const auto nextElse = block.find("else if", sleepPos);
+  const std::string branch =
+      block.substr(sleepPos, nextElse == std::string::npos ? std::string::npos : nextElse - sleepPos);
+  EXPECT_NE(branch.find("companiongate::clearArm()"), std::string::npos) << "the arm must be consumed before the sleep";
+  EXPECT_LT(branch.find("clearArm"), branch.find("sleepAfterGate();"))
+      << "the arm must be consumed before the sleep, not after";
+  EXPECT_NE(branch.find("sleepAfterGate();"), std::string::npos)
+      << "an unsafe armed wake must sleep, not continue the ordinary boot";
+  EXPECT_EQ(branch.find("enterHardwareDeepSleep"), std::string::npos)
+      << "the pre-Storage sleep shape must stay the shared helper";
+}
+
+TEST(CompanionGateContract, DispatchDecisionIsLoggedWithItsInputs) {
+  const std::string main = readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp");
+  const std::string block = between(main, "// companion-gate-begin", "// companion-gate-end");
+  EXPECT_NE(block.find("LOG_INF(\"GATE\", \"dispatch:"), std::string::npos)
+      << "every wake must log the dispatch decision";
+  EXPECT_NE(block.find("gateActionName(gateAction)"), std::string::npos)
+      << "the logged decision must be the named action";
+}
+
+TEST(CompanionGateContract, EveryGateExitNamesItsCause) {
+  const std::string window = gateWindowSource(readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp"));
+  ASSERT_FALSE(window.empty());
+  // Each deterministic exit of the window must be distinguishable in the log.
+  EXPECT_NE(window.find("No stored companion identity"), std::string::npos);
+  EXPECT_NE(window.find("The companion radio did not start"), std::string::npos);
+  EXPECT_NE(window.find("No secure bond for the stored identity"), std::string::npos);
+  EXPECT_NE(window.find("Power pressed: aborting the gate window"), std::string::npos);
+  EXPECT_NE(window.find("Power pressed at the sleep handoff"), std::string::npos);
+  EXPECT_NE(window.find("Gate window closed"), std::string::npos);
+}
+
+size_t countOccurrences(const std::string& text, const std::string& needle) {
+  size_t count = 0;
+  for (auto pos = text.find(needle); pos != std::string::npos; pos = text.find(needle, pos + 1)) ++count;
+  return count;
+}
+
+// The dispatch verdict must be stored in every dispatch branch, and only a
+// timer wake may store it in the fall-through branch: a button or USB wake
+// must never overwrite the preserved timer-wake verdict.
+TEST(CompanionGateContract, DispatchVerdictStoredOnTimerWakesOnly) {
+  const std::string main = readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp");
+  const std::string block = between(main, "// companion-gate-begin", "// companion-gate-end");
+  EXPECT_EQ(countOccurrences(block, "companiongate::storeDispatchVerdict("), 3u)
+      << "Run, SleepNoRadio, and the fall-through branch must each store the verdict";
+  const auto sleepPos = block.find("Action::SleepNoRadio");
+  ASSERT_NE(sleepPos, std::string::npos);
+  const auto sleepCall = block.find("sleepAfterGate();", sleepPos);
+  ASSERT_NE(sleepCall, std::string::npos);
+  EXPECT_LT(block.find("storeDispatchVerdict", sleepPos), sleepCall)
+      << "the SleepNoRadio verdict must be stored before the sleep";
+  const auto fallThrough = block.rfind("} else {");
+  ASSERT_NE(fallThrough, std::string::npos);
+  const auto guardPos = block.find("gateWake == companiongate::WakeKind::Timer", fallThrough);
+  ASSERT_NE(guardPos, std::string::npos);
+  const auto storePos = block.find("companiongate::storeDispatchVerdict(", guardPos);
+  ASSERT_NE(storePos, std::string::npos);
+  EXPECT_LT(guardPos, storePos) << "the fall-through store must sit inside the timer-wake guard";
+}
+
+// A Run that is refused before or inside the window must remain visible as a
+// distinct run outcome, not masked as a completed window.
+TEST(CompanionGateContract, RunOutcomeRecordedAtEveryGateExit) {
+  const std::string window = gateWindowSource(readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp"));
+  ASSERT_FALSE(window.empty());
+  EXPECT_GE(countOccurrences(window, "companiongate::updateRunOutcome("), 6u)
+      << "every deterministic exit must update the run outcome";
+  EXPECT_NE(window.find("RunOutcome::NoIdentity"), std::string::npos);
+  EXPECT_NE(window.find("RunOutcome::RadioStartFailed"), std::string::npos);
+  EXPECT_NE(window.find("RunOutcome::NoBond"), std::string::npos);
+  EXPECT_NE(window.find("RunOutcome::WindowTimeout"), std::string::npos);
+  EXPECT_GE(countOccurrences(window, "RunOutcome::PowerAbort"), 2u) << "both power-abort exits must record the outcome";
+}
+
+// GATESTAT is the only readback interface for the persisted verdict.
+TEST(CompanionGateContract, GatestatExposesThePersistedVerdict) {
+  const std::string power = readAll(fs::path(REPO_ROOT_PATH) / "src" / "util" / "CompanionGatePower.cpp");
+  EXPECT_NE(power.find("companiongate::readDispatchVerdict"), std::string::npos)
+      << "GATESTAT must read the persisted dispatch verdict";
+  EXPECT_NE(power.find("last timer-wake dispatch"), std::string::npos)
+      << "GATESTAT must name the verdict line distinctly from the window stats";
 }
