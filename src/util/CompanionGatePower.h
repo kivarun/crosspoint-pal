@@ -89,77 +89,66 @@ inline bool parseSleepStats(const char* text, SleepSample& out) {
 }
 
 // The persistent accounting record (RTC_NOINIT, SlideshowState pattern: a
-// magic written last is the only validity proof). 32 B — the rtc_slow_seg of
-// the rebuilt-core envs has 36 B of headroom (MscDiag.h), so the mode-time
-// baseline is a 32-bit microsecond counter whose wrap skips one sample.
+// magic written last is the only validity proof). RTC stores accumulated
+// results only — the per-window baseline lives in the Guard's RAM, so the
+// boot-relative esp_pm counters of different boots are never subtracted.
+// A record written by an older firmware shares offsets 0-15 (windows,
+// entries, rejects carry over) but decodes a wrong noSleepRuns and tail
+// until the first commit overwrites them; the deltas are unaffected because
+// they never derive from the record.
 struct GatePowerRecord {
   uint32_t magic;        // kGatePowerMagic, written LAST
   uint32_t windows;      // completed sleep-capable gate windows counted
   uint32_t entries;      // accumulated light-sleep entries
   uint32_t rejects;      // accumulated rejected sleep attempts
-  uint32_t lastEntries;  // previous cumulative sample (the window baseline)
-  uint32_t lastRejects;
-  uint32_t lastModeUs;   // previous cumulative LIGHT_SLEEP mode time (wraps ~71.6 min of sleep)
+  uint32_t noSleepRuns;  // windows that counted but produced neither entry nor reject
+  uint32_t sleepUs;      // accumulated LIGHT_SLEEP mode time across counted windows
   uint8_t lastBleState;  // blecompanion::RadioState at the window's last poll
   uint8_t lastOutcome;   // WindowOutcome
-  uint8_t noSleepRuns;   // windows that counted but produced neither entry nor reject
-  uint8_t primed;        // a baseline sample exists
 };
-static_assert(sizeof(GatePowerRecord) == 32, "rtc_slow_seg headroom");
+static_assert(sizeof(GatePowerRecord) == 28, "rtc_slow_seg headroom");
 static_assert(offsetof(GatePowerRecord, magic) == 0, "record layout: magic first");
-static_assert(offsetof(GatePowerRecord, lastBleState) == 28, "record layout: byte tail");
+static_assert(offsetof(GatePowerRecord, lastBleState) == 24, "record layout: byte tail");
 
 inline constexpr uint32_t kGatePowerMagic = 0x47415057u;  // 'GAPW'
 
 inline bool recordValid(const GatePowerRecord& record) { return record.magic == kGatePowerMagic; }
 
-// The delta of one window against the record's baseline. Returns false when
-// the sample must not count: the record was never primed (the baseline is
-// boot-relative, so the first sample only establishes it), or a counter went
-// backwards (wrap or RTC garbage; skipped, p1-b1q semantics — the baseline
-// stays as it was).
+// The delta of one window against the sample captured at window entry — both
+// samples are boot-relative counters from the SAME boot, so the subtraction
+// never crosses a deep-sleep reset. Returns false when a counter went
+// backwards within the boot (wrap or garbage): the caller then does not count
+// the window. Sample failures (a dump that did not parse) never reach this
+// function — the caller excludes them through its counted condition.
 struct WindowDelta {
   long entries = 0;
   long rejects = 0;
   long long modeUs = 0;
 };
 
-inline bool windowDelta(const GatePowerRecord& record, const SleepSample& sample, WindowDelta& out) {
+inline bool windowDelta(const SleepSample& start, const SleepSample& end, WindowDelta& out) {
   out = WindowDelta{};
-  if (record.primed == 0) return false;
-  if (sample.entries < 0 || sample.entries < static_cast<long>(record.lastEntries)) return false;
-  if (sample.rejects < static_cast<long>(record.lastRejects)) return false;
-  out.entries = sample.entries - static_cast<long>(record.lastEntries);
-  out.rejects = sample.rejects - static_cast<long>(record.lastRejects);
-  if (sample.modeUs >= 0 && sample.modeUs >= static_cast<long long>(record.lastModeUs)) {
-    out.modeUs = sample.modeUs - static_cast<long long>(record.lastModeUs);
+  if (end.entries < start.entries || end.rejects < start.rejects) return false;
+  out.entries = end.entries - start.entries;
+  out.rejects = end.rejects - start.rejects;
+  if (start.modeUs >= 0 && end.modeUs >= start.modeUs) {
+    out.modeUs = end.modeUs - start.modeUs;
   }
   return true;
 }
 
-// How a sampled window commits: Prime stores the first baseline without
-// counting (the counters are boot-relative), Count applies the delta, Skip
-// records only the end state — a dump that failed, or a backwards counter
-// (wrap or RTC garbage) whose baseline must stay as it was (p1-b1q
-// semantics: excluded from the sums, not summed as a wrap).
-enum class SampleRole : uint8_t { Prime, Count, Skip };
-
-inline void commitWindow(GatePowerRecord& record, const SleepSample& sample, const SampleRole role,
-                         const WindowDelta& delta, const uint8_t bleState, const uint8_t outcome) {
-  if (role == SampleRole::Prime) {
-    record.lastEntries = static_cast<uint32_t>(sample.entries);
-    record.lastRejects = static_cast<uint32_t>(sample.rejects);
-    record.lastModeUs = sample.modeUs >= 0 ? static_cast<uint32_t>(sample.modeUs) : 0xFFFFFFFFu;
-    record.primed = 1;
-  } else if (role == SampleRole::Count) {
+// How a window commits: a counted window adds its delta to the accumulated
+// totals; an uncounted one (failed samples or backwards counters) records only
+// the end state. Either way the window ends the record's lastBleState /
+// lastOutcome — an accounting failure is visible, not silent.
+inline void commitWindow(GatePowerRecord& record, const WindowDelta& delta, const bool counted, const uint8_t bleState,
+                         const uint8_t outcome) {
+  if (counted) {
     record.windows = record.windows + 1;
     record.entries = record.entries + static_cast<uint32_t>(delta.entries);
     record.rejects = record.rejects + static_cast<uint32_t>(delta.rejects);
-    if (delta.entries == 0 && delta.rejects == 0 && record.noSleepRuns != 0xFF)
-      record.noSleepRuns = record.noSleepRuns + 1;
-    record.lastEntries = static_cast<uint32_t>(sample.entries);
-    record.lastRejects = static_cast<uint32_t>(sample.rejects);
-    if (sample.modeUs >= 0) record.lastModeUs = static_cast<uint32_t>(sample.modeUs);
+    if (delta.entries == 0 && delta.rejects == 0) record.noSleepRuns = record.noSleepRuns + 1;
+    if (delta.modeUs > 0) record.sleepUs = record.sleepUs + static_cast<uint32_t>(delta.modeUs);
   }
   record.lastBleState = bleState;
   record.lastOutcome = outcome;
@@ -174,10 +163,14 @@ inline void commitWindow(GatePowerRecord& record, const SleepSample& sample, con
 // cadence and the window records nothing.
 bool beginWindow();
 
-// One exit of the gate window. The guard reads the gate's live radio state at
-// finish() (before the caller stops the radio) and the destructor records the
-// sample — while automatic light sleep is still on, so the profiling dump
-// carries the SLEEP row — and restores the OFF state.
+// One exit of the gate window. finish() is the finalization point: it reads
+// the gate's live radio state (before the caller stops the radio), captures
+// the exit sample while automatic light sleep is still on (the profiling dump
+// carries the SLEEP row only then), commits the window's delta against the
+// entry sample, and restores the OFF state — so a window that ends in the
+// non-returning deep-sleep handoff is accounted before the sleep. The
+// destructor only finalizes windows whose exit path never called finish()
+// (returning abort paths); finalization is idempotent.
 class Guard {
  public:
   explicit Guard(blecompanion::BleCompanion& gate);
@@ -190,11 +183,15 @@ class Guard {
   void finish(uint8_t outcome);
 
  private:
+  void finalize();
   blecompanion::BleCompanion* gate_;
   bool configured_ = false;
   bool finished_ = false;
+  bool finalized_ = false;
+  bool entrySampled_ = false;
   uint8_t outcome_ = WindowTimeout;
   uint8_t bleState_ = 0;
+  SleepSample start_{};
 };
 
 // Serial diagnostic ("GATESTAT"): accumulated totals, the last window's BLE

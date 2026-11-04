@@ -106,49 +106,60 @@ bool beginWindow() {
   return true;
 }
 
-Guard::Guard(blecompanion::BleCompanion& gate) : gate_(&gate), configured_(beginWindow()) {}
+namespace {
 
-void Guard::finish(const uint8_t outcome) {
-  outcome_ = outcome;
-  bleState_ = static_cast<uint8_t>(gate_->status().state);
-  finished_ = true;
-}
-
-Guard::~Guard() {
-  if (!configured_) return;
-  if (!finished_) {
-    // An exit path that never called finish(): count it as an abort so the
-    // restore and the accounting still run exactly once.
-    outcome_ = WindowPowerAbort;
-    bleState_ = static_cast<uint8_t>(blecompanion::RadioState::Stopped);
-  }
-  // The sample must be taken while automatic light sleep is still enabled:
-  // the profiling dump prints the SLEEP mode row and the Sleep stats block
-  // only then.
+SleepSample captureSample(bool& ok) {
+  ok = false;
   SleepSample sample{};
-  bool sampled = false;
   capture.len = 0;
   capture.truncated = false;
   FILE* file = captureStream();
   if (file != nullptr) {
     esp_pm_dump_locks(file);
     fflush(file);
-    if (!capture.truncated) {
-      sampled = parseSleepStats(capture.buf, sample);
-    }
+    if (!capture.truncated) ok = parseSleepStats(capture.buf, sample);
   }
+  return sample;
+}
+
+}  // namespace
+
+Guard::Guard(blecompanion::BleCompanion& gate) : gate_(&gate), configured_(beginWindow()) {
+  if (!configured_) return;
+  // The entry sample anchors the window's delta in THIS boot: the esp_pm
+  // counters are boot-relative, so the window must be measured against a
+  // sample taken at window entry, never against a previous boot's record.
+  start_ = captureSample(entrySampled_);
+}
+
+void Guard::finish(const uint8_t outcome) {
+  outcome_ = outcome;
+  bleState_ = static_cast<uint8_t>(gate_->status().state);
+  finished_ = true;
+  finalize();
+}
+
+Guard::~Guard() { finalize(); }
+
+void Guard::finalize() {
+  if (!configured_ || finalized_) return;
+  finalized_ = true;
+  if (!finished_) {
+    // An exit path that never called finish(): count it as an abort so the
+    // accounting still runs exactly once.
+    outcome_ = WindowPowerAbort;
+    bleState_ = static_cast<uint8_t>(blecompanion::RadioState::Stopped);
+  }
+  // The exit sample must be captured while automatic light sleep is still
+  // enabled: the profiling dump prints the SLEEP mode row and the Sleep stats
+  // block only then.
+  bool sampled = false;
+  const SleepSample end = captureSample(sampled);
   ensureValidRecord();
   WindowDelta delta{};
-  SampleRole role = SampleRole::Skip;
-  if (sampled) {
-    if (record.primed == 0) {
-      role = SampleRole::Prime;  // the first sample is the baseline, not a delta
-    } else if (windowDelta(record, sample, delta)) {
-      role = SampleRole::Count;
-    }
-  }
-  commitWindow(record, sample, role, delta, bleState_, outcome_);
-  if (role == SampleRole::Count && delta.entries == 0 && delta.rejects == 0) {
+  const bool counted = entrySampled_ && sampled && windowDelta(start_, end, delta);
+  commitWindow(record, delta, counted, bleState_, outcome_);
+  if (counted && delta.entries == 0 && delta.rejects == 0) {
     LOG_INF(TAG, "window %u: no light sleep entry (rejects 0) — sleep never engaged",
             static_cast<unsigned>(record.windows));
   }
@@ -163,10 +174,9 @@ Guard::~Guard() {
 void handleCommand(const char* command) {
   if (command == nullptr || strcmp(command, "GATESTAT") != 0) return;
   ensureValidRecord();
-  const long long modeUsBaseline = record.lastModeUs;
-  LOG_INF(TAG, "windows=%u entries=%u rejects=%u noSleep=%u modeUsBaseline=%llu", static_cast<unsigned>(record.windows),
+  LOG_INF(TAG, "windows=%u entries=%u rejects=%u noSleep=%u sleepUs=%u", static_cast<unsigned>(record.windows),
           static_cast<unsigned>(record.entries), static_cast<unsigned>(record.rejects),
-          static_cast<unsigned>(record.noSleepRuns), modeUsBaseline);
+          static_cast<unsigned>(record.noSleepRuns), static_cast<unsigned>(record.sleepUs));
   LOG_INF(TAG, "last window: ble=%s end=%s", stateName(record.lastBleState), outcomeName(record.lastOutcome));
   // The persisted dispatch verdict of the last timer wake: the inputs the
   // policy saw, its decision, and (for Run) why the window attempt ended.

@@ -49,9 +49,9 @@ GatePowerRecord fresh() {
 }  // namespace
 
 TEST(GatePowerRecord, LayoutIsPinned) {
-  static_assert(sizeof(GatePowerRecord) == 32, "RTC budget");
+  static_assert(sizeof(GatePowerRecord) == 28, "RTC budget");
   EXPECT_EQ(offsetof(GatePowerRecord, magic), 0u);
-  EXPECT_EQ(offsetof(GatePowerRecord, lastBleState), 28u);
+  EXPECT_EQ(offsetof(GatePowerRecord, lastBleState), 24u);
 }
 
 TEST(GatePowerRecord, GarbageFailsClosed) {
@@ -97,42 +97,26 @@ TEST(ParseSleepStats, MissingSleepStatsLineFails) {
   EXPECT_FALSE(companiongatepower::parseSleepStats(nullptr, sample));
 }
 
-TEST(GateAccounting, FirstSamplePrimesWithoutCounting) {
+TEST(GateAccounting, PerBootDeltaCountsOneWindow) {
+  // The window is measured against the sample captured at window entry, both
+  // from the same boot: the entry sample establishes nothing in the record.
   GatePowerRecord record = fresh();
-  SleepSample sample;
-  ASSERT_TRUE(companiongatepower::parseSleepStats(kDump, sample));
+  SleepSample entry;
+  ASSERT_TRUE(companiongatepower::parseSleepStats(kDump, entry));  // entries=1 rejects=0 modeUs=5545
   WindowDelta delta;
-  EXPECT_FALSE(companiongatepower::windowDelta(record, sample, delta));
-  companiongatepower::commitWindow(record, sample, companiongatepower::SampleRole::Prime, delta, 1,
-                                   companiongatepower::WindowTimeout);
-  EXPECT_EQ(record.windows, 0u);
-  EXPECT_EQ(record.entries, 0u);
-  EXPECT_EQ(record.primed, 1u);
-  EXPECT_EQ(record.lastEntries, 1u);
-  EXPECT_EQ(record.lastModeUs, 5545u);
-}
-
-TEST(GateAccounting, SecondSampleCountsTheDelta) {
-  GatePowerRecord record = fresh();
-  SleepSample first;
-  ASSERT_TRUE(companiongatepower::parseSleepStats(kDump, first));
-  WindowDelta delta;
-  companiongatepower::commitWindow(record, first, companiongatepower::SampleRole::Prime, delta, 1,
-                                   companiongatepower::WindowTimeout);
-
   constexpr const char* kLater =
       "\nSleep stats:\n"
       "light_sleep_counts:9  light_sleep_reject_counts:2\n"
       "\nSLEEP     40 M         12000        0%\n";
-  SleepSample second;
-  ASSERT_TRUE(companiongatepower::parseSleepStats(kLater, second));
-  EXPECT_TRUE(companiongatepower::windowDelta(record, second, delta));
+  SleepSample exit;
+  ASSERT_TRUE(companiongatepower::parseSleepStats(kLater, exit));
+  ASSERT_TRUE(companiongatepower::windowDelta(entry, exit, delta));
   EXPECT_EQ(delta.entries, 8);
   EXPECT_EQ(delta.rejects, 2);
   EXPECT_EQ(delta.modeUs, 12000 - 5545);
-  companiongatepower::commitWindow(record, second, companiongatepower::SampleRole::Count, delta, 3,
-                                   companiongatepower::WindowPowerAbort);
+  companiongatepower::commitWindow(record, delta, true, 3, companiongatepower::WindowPowerAbort);
   EXPECT_EQ(record.windows, 1u);
+  EXPECT_EQ(record.sleepUs, 12000u - 5545u);
   EXPECT_EQ(record.entries, 8u);
   EXPECT_EQ(record.rejects, 2u);
   EXPECT_EQ(record.lastBleState, 3u);
@@ -140,62 +124,121 @@ TEST(GateAccounting, SecondSampleCountsTheDelta) {
   EXPECT_EQ(record.noSleepRuns, 0u);
 }
 
-TEST(GateAccounting, BackwardsCounterIsSkipped) {
+TEST(GateAccounting, TwoWindowsAcrossDeepSleepBootsStayIndependent) {
+  // The defect this test pins: the old accounting subtracted the previous
+  // boot's stored counters from the current boot's boot-relative sample. With
+  // the per-boot baseline the second boot's delta is independent of whatever
+  // the record accumulated before.
   GatePowerRecord record = fresh();
-  record.primed = 1;
-  record.lastEntries = 100;
-  record.lastRejects = 1;
+  SleepSample boot1Entry;
+  boot1Entry.entries = 0;
+  boot1Entry.rejects = 0;
+  boot1Entry.modeUs = 0;
+  SleepSample boot1Exit;
+  boot1Exit.entries = 5;
+  boot1Exit.rejects = 2;
+  boot1Exit.modeUs = 40000;
+  WindowDelta delta;
+  ASSERT_TRUE(companiongatepower::windowDelta(boot1Entry, boot1Exit, delta));
+  companiongatepower::commitWindow(record, delta, true, 1, companiongatepower::WindowTimeout);
+  EXPECT_EQ(record.windows, 1u);
+  EXPECT_EQ(record.entries, 5u);
+  EXPECT_EQ(record.rejects, 2u);
+
+  // The device deep-sleeps and reboots: the record persists, the esp_pm
+  // counters restart near zero.
+  SleepSample boot2Entry;
+  boot2Entry.entries = 1;
+  boot2Entry.rejects = 0;
+  boot2Entry.modeUs = 3000;
+  SleepSample boot2Exit;
+  boot2Exit.entries = 7;
+  boot2Exit.rejects = 3;
+  boot2Exit.modeUs = 44000;
+  ASSERT_TRUE(companiongatepower::windowDelta(boot2Entry, boot2Exit, delta));
+  EXPECT_EQ(delta.entries, 6);
+  EXPECT_EQ(delta.rejects, 3);
+  EXPECT_EQ(delta.modeUs, 41000);
+  companiongatepower::commitWindow(record, delta, true, 2, companiongatepower::WindowTimeout);
+  EXPECT_EQ(record.windows, 2u);
+  EXPECT_EQ(record.entries, 11u);
+  EXPECT_EQ(record.rejects, 5u);
+  EXPECT_EQ(record.sleepUs, 40000u + 41000u);  // accumulated across boots, per-window deltas only
+}
+
+TEST(GateAccounting, BackwardsCounterIsSkipped) {
+  // A counter going backwards inside one boot is a wrap or garbage: the
+  // window contributes nothing, the end state is still recorded.
+  SleepSample entry;
+  entry.entries = 100;
+  entry.rejects = 1;
+  entry.modeUs = 90000;
   SleepSample backwards;
-  backwards.entries = 4;  // RTC garbage or a wrap: less than the baseline
+  backwards.entries = 4;
   backwards.rejects = 5;
   backwards.modeUs = 1000;
   WindowDelta delta;
-  EXPECT_FALSE(companiongatepower::windowDelta(record, backwards, delta));
-  companiongatepower::commitWindow(record, backwards, companiongatepower::SampleRole::Skip, delta, 1,
-                                   companiongatepower::WindowTimeout);
-  EXPECT_EQ(record.lastEntries, 100u);  // the baseline stays as it was
+  EXPECT_FALSE(companiongatepower::windowDelta(entry, backwards, delta));
+  GatePowerRecord record = fresh();
+  companiongatepower::commitWindow(record, delta, false, 1, companiongatepower::WindowTimeout);
   EXPECT_EQ(record.windows, 0u);
+  EXPECT_EQ(record.entries, 0u);
+  EXPECT_EQ(record.rejects, 0u);
+  EXPECT_EQ(record.lastBleState, 1u);
+  EXPECT_EQ(record.lastOutcome, companiongatepower::WindowTimeout);
+}
+
+TEST(GateAccounting, FailedSamplesAreNotCounted) {
+  // A missing entry or exit sample (dump failure) records the end state only.
+  SleepSample entry;
+  entry.entries = 3;
+  entry.rejects = 0;
+  entry.modeUs = 100;
+  WindowDelta delta;
+  ASSERT_TRUE(companiongatepower::windowDelta(entry, entry, delta));
+  GatePowerRecord record = fresh();
+  companiongatepower::commitWindow(record, delta, false, 1, companiongatepower::WindowTimeout);
+  EXPECT_EQ(record.windows, 0u);
+  EXPECT_EQ(record.lastOutcome, companiongatepower::WindowTimeout);
 }
 
 TEST(GateAccounting, NoSleepWindowIsCounted) {
+  // A counted window with neither entry nor reject is flagged as no-sleep.
   GatePowerRecord record = fresh();
-  record.primed = 1;
-  record.lastEntries = 10;
-  record.lastRejects = 0;
   SleepSample same;
   same.entries = 10;
   same.rejects = 0;
   same.modeUs = 500;
   WindowDelta delta;
-  EXPECT_TRUE(companiongatepower::windowDelta(record, same, delta));
-  companiongatepower::commitWindow(record, same, companiongatepower::SampleRole::Count, delta, 1,
-                                   companiongatepower::WindowTimeout);
+  ASSERT_TRUE(companiongatepower::windowDelta(same, same, delta));
+  companiongatepower::commitWindow(record, delta, true, 1, companiongatepower::WindowTimeout);
   EXPECT_EQ(record.windows, 1u);
   EXPECT_EQ(record.noSleepRuns, 1u);
-  record.noSleepRuns = 0xFF;  // saturates instead of wrapping
-  companiongatepower::commitWindow(record, same, companiongatepower::SampleRole::Count, delta, 1,
-                                   companiongatepower::WindowTimeout);
-  EXPECT_EQ(record.noSleepRuns, 0xFFu);
+  companiongatepower::commitWindow(record, delta, true, 1, companiongatepower::WindowTimeout);
+  EXPECT_EQ(record.noSleepRuns, 2u);
 }
 
-TEST(GateAccounting, ModeTimeBaselineIsThirtyTwoBit) {
-  GatePowerRecord record = fresh();
-  record.primed = 1;
-  record.lastModeUs = 4000000000u;  // wraps after ~71.6 min of accumulated sleep
-  SleepSample later;
-  later.entries = 1;
-  later.rejects = 0;
-  later.modeUs = 4000000000u + 6000;
-  WindowDelta delta;
-  EXPECT_TRUE(companiongatepower::windowDelta(record, later, delta));
-  EXPECT_EQ(delta.modeUs, 6000);
+TEST(GateAccounting, ModeTimeWrapContributesNothing) {
   // A wrap-suspected mode delta contributes nothing but still counts entries.
+  SleepSample entry;
+  entry.entries = 1;
+  entry.rejects = 0;
+  entry.modeUs = 4000000000;  // wraps after ~71.6 min of accumulated sleep
+  SleepSample later;
+  later.entries = 2;
+  later.rejects = 0;
+  later.modeUs = entry.modeUs + 6000;
+  WindowDelta delta;
+  EXPECT_TRUE(companiongatepower::windowDelta(entry, later, delta));
+  EXPECT_EQ(delta.entries, 1);
+  EXPECT_EQ(delta.modeUs, 6000);
   SleepSample wrapped;
-  wrapped.entries = 2;
+  wrapped.entries = 3;
   wrapped.rejects = 0;
   wrapped.modeUs = 1000;
-  EXPECT_TRUE(companiongatepower::windowDelta(record, wrapped, delta));
+  EXPECT_TRUE(companiongatepower::windowDelta(entry, wrapped, delta));
   EXPECT_EQ(delta.modeUs, 0);
+  EXPECT_EQ(delta.entries, 2);
 }
 
 TEST(GatePowerPoll, CadenceFollowsTheWindow) {

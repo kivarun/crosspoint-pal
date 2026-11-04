@@ -162,9 +162,10 @@ size_t countOccurrences(const std::string& text, const std::string& needle) {
   return count;
 }
 
-// The dispatch verdict must be stored in every dispatch branch, and only a
-// timer wake may store it in the fall-through branch: a button or USB wake
-// must never overwrite the preserved timer-wake verdict.
+// The dispatch verdict must be stored in every dispatch branch, and only an
+// armed timer wake may store it in the fall-through branch: a button or USB
+// wake, and an unarmed timer wake (e.g. the sleep-screen slideshow), must
+// never overwrite the preserved verdict of the last armed gate.
 TEST(CompanionGateContract, DispatchVerdictStoredOnTimerWakesOnly) {
   const std::string main = readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp");
   const std::string block = between(main, "// companion-gate-begin", "// companion-gate-end");
@@ -178,10 +179,13 @@ TEST(CompanionGateContract, DispatchVerdictStoredOnTimerWakesOnly) {
       << "the SleepNoRadio verdict must be stored before the sleep";
   const auto fallThrough = block.rfind("} else {");
   ASSERT_NE(fallThrough, std::string::npos);
+  const auto armedGuard = block.find("gateArmed &&", fallThrough);
+  ASSERT_NE(armedGuard, std::string::npos);
   const auto guardPos = block.find("gateWake == companiongate::WakeKind::Timer", fallThrough);
   ASSERT_NE(guardPos, std::string::npos);
   const auto storePos = block.find("companiongate::storeDispatchVerdict(", guardPos);
   ASSERT_NE(storePos, std::string::npos);
+  EXPECT_LT(armedGuard, guardPos) << "the fall-through store must require an armed wake";
   EXPECT_LT(guardPos, storePos) << "the fall-through store must sit inside the timer-wake guard";
 }
 
@@ -206,4 +210,47 @@ TEST(CompanionGateContract, GatestatExposesThePersistedVerdict) {
       << "GATESTAT must read the persisted dispatch verdict";
   EXPECT_NE(power.find("last timer-wake dispatch"), std::string::npos)
       << "GATESTAT must name the verdict line distinctly from the window stats";
+}
+
+// The window must be finalized explicitly at finish(), before the
+// non-returning deep-sleep handoff: a destructor-only finalize loses the
+// statistics of every window that ends in sleepAfterGate().
+TEST(CompanionGateContract, WindowFinalizesAtFinishBeforeTheSleepHandoff) {
+  const std::string power = readAll(fs::path(REPO_ROOT_PATH) / "src" / "util" / "CompanionGatePower.cpp");
+  const auto finishBody = power.find("void Guard::finish(const uint8_t outcome) {");
+  ASSERT_NE(finishBody, std::string::npos);
+  const auto finalizeCall = power.find("finalize();", finishBody);
+  ASSERT_NE(finalizeCall, std::string::npos);
+  EXPECT_LT(finalizeCall, power.find("}", finishBody)) << "finish() must finalize before returning";
+  const auto dtor = power.find("Guard::~Guard() { finalize(); }");
+  EXPECT_NE(dtor, std::string::npos) << "the destructor must stay the defensive finalize for returning paths";
+  const auto finalizeBody = power.find("void Guard::finalize() {");
+  ASSERT_NE(finalizeBody, std::string::npos);
+  EXPECT_NE(power.find("if (!configured_ || finalized_) return;", finalizeBody), std::string::npos)
+      << "finalization must be idempotent";
+  EXPECT_NE(power.find("const bool counted = entrySampled_ && sampled && windowDelta(start_, end, delta);"),
+            std::string::npos)
+      << "a window counts only with an entry sample, an exit sample, and a monotonic delta";
+  const std::string window = gateWindowSource(readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp"));
+  ASSERT_FALSE(window.empty());
+  const auto timeoutFinish = window.find("gateWindow.finish(companiongatepower::WindowTimeout);");
+  ASSERT_NE(timeoutFinish, std::string::npos);
+  const auto handoff = window.find("sleepAfterGate();", timeoutFinish);
+  ASSERT_NE(handoff, std::string::npos);
+  EXPECT_LT(timeoutFinish, handoff) << "the timeout window must be finalized before the non-returning sleep";
+}
+
+// The refusal exits run before the window opens: no identity, radio failure,
+// or missing bond must never create a Guard or touch the window accounting.
+TEST(CompanionGateContract, RefusalExitsPrecedeTheWindowGuard) {
+  const std::string window = gateWindowSource(readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp"));
+  ASSERT_FALSE(window.empty());
+  const auto identityLoad = window.find("companionidentity::load(");
+  const auto bondCheck = window.find("gateMayProceed(");
+  const auto guardCtor = window.find("companiongatepower::Guard gateWindow");
+  ASSERT_NE(identityLoad, std::string::npos);
+  ASSERT_NE(bondCheck, std::string::npos);
+  ASSERT_NE(guardCtor, std::string::npos);
+  EXPECT_LT(identityLoad, guardCtor);
+  EXPECT_LT(bondCheck, guardCtor);
 }

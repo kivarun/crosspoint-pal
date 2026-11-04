@@ -815,9 +815,11 @@ void setup() {
     sleepAfterGate();
   } else {
     if (gateArmed) companiongate::clearArm();
-    // StandDown/SlideshowWins/Ordinary: only a timer wake stores here, so a
-    // button or USB wake never overwrites the preserved timer-wake verdict.
-    if (gateWake == companiongate::WakeKind::Timer) companiongate::storeDispatchVerdict(verdict);
+    // StandDown/SlideshowWins/Ordinary: only an ARMED timer wake stores here —
+    // an unarmed timer wake (e.g. the sleep-screen slideshow) must not
+    // overwrite the preserved verdict of the last armed gate, and a button or
+    // USB wake never stores at all.
+    if (gateArmed && gateWake == companiongate::WakeKind::Timer) companiongate::storeDispatchVerdict(verdict);
   }
   // companion-gate-end
 

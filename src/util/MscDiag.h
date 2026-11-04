@@ -15,7 +15,8 @@
 namespace mscdiag {
 
 // Fixed capacity: 30 events x 16 B plus a 12 B header (492 B of RTC_NOINIT;
-// the rtc_slow_seg had ~1 KB headroom after the P0 diagnostic, ~530 B remains).
+// the rtc_slow_seg headroom shrinks with every RTC diagnostic added to the
+// diagnostic envs — check the .map before growing any of them).
 inline constexpr size_t kRingEntries = 30;
 
 // The RTC_SLOW headroom is a hard linker budget; keep the whole storage
