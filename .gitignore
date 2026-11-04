@@ -26,6 +26,8 @@ lib/EpdFont/scripts/output/
 # locks, settings.local, scout CLEANUP.md).
 .claude/*
 /managed_components
+# Fetched IDF components for custom_sdkconfig builds (scripts/fetch_arduino_tinyusb.sh)
+/components/
 /.dummy
 /CMakeLists.txt
 /dependencies.lock

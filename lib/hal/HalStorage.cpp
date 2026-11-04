@@ -7,6 +7,9 @@
 #if FREEINK_CAP_USB_MSC
 #include <UsbMassStorage.h>
 #endif
+#ifdef CROSSPOINT_USB_SESSION_PM_LOCK
+#include <esp_pm.h>
+#endif
 
 #include <cassert>
 
@@ -15,6 +18,46 @@
 namespace {
 #if FREEINK_CAP_USB_MSC
 freeink::UsbMassStorage usbMassStorage;
+#endif
+#ifdef CROSSPOINT_USB_SESSION_PM_LOCK
+// NO_LIGHT_SLEEP for the whole USB OTG lifetime: from stack bring-up in
+// beginUsbDrive() through the synchronous teardown drain in endUsbDrive(),
+// so automatic light sleep cannot stop the USB clocks while a host is (or may
+// still be) connected. Sessions are fail-closed: without the lock, USB Drive
+// does not start. Creation fails with CONFIG_PM_ENABLE off.
+esp_pm_lock_handle_t usbSessionLock() {
+  static esp_pm_lock_handle_t lock = nullptr;
+  if (lock == nullptr) {
+    if (esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "usb-session", &lock) != ESP_OK) {
+      lock = nullptr;
+      LOG_ERR("USB", "USB session PM lock creation failed");
+    }
+  }
+  return lock;
+}
+
+// Held tracks a live acquire so release pairs with acquire exactly, across
+// the begin/end call pair; both callers run under the HalStorage mutex.
+bool sUsbSessionNoLightSleepHeld = false;
+
+bool acquireUsbSessionNoLightSleep() {
+  esp_pm_lock_handle_t lock = usbSessionLock();
+  if (lock == nullptr) return false;
+  if (esp_pm_lock_acquire(lock) != ESP_OK) {
+    LOG_ERR("USB", "USB session PM lock acquire failed");
+    return false;
+  }
+  sUsbSessionNoLightSleepHeld = true;
+  return true;
+}
+
+void releaseUsbSessionNoLightSleep() {
+  if (!sUsbSessionNoLightSleepHeld) return;
+  sUsbSessionNoLightSleepHeld = false;
+  if (esp_pm_lock_release(usbSessionLock()) != ESP_OK) {
+    LOG_ERR("USB", "USB session PM lock release failed");
+  }
+}
 #endif
 }  // namespace
 
@@ -59,7 +102,21 @@ bool HalStorage::beginUsbDrive() {
     return false;
   }
 
+#ifdef CROSSPOINT_USB_SESSION_PM_LOCK
+  // Fail-closed: without the session lock, automatic light sleep would stop
+  // the USB clocks mid-session, so refuse to bring the stack up at all.
+  if (!acquireUsbSessionNoLightSleep()) {
+    LOG_ERR("USB", "USB Drive requires the session PM lock; refusing to start");
+    if (!SDCard.begin()) {
+      LOG_ERR("USB", "Unable to remount SD card after PM lock failure");
+    }
+    return false;
+  }
+#endif
   if (!usbMassStorage.begin(blockDevice)) {
+#ifdef CROSSPOINT_USB_SESSION_PM_LOCK
+    releaseUsbSessionNoLightSleep();
+#endif
     LOG_ERR("USB", "USB Drive MSC initialization failed");
     if (!SDCard.begin()) {
       LOG_ERR("USB", "Unable to remount SD card after USB Drive startup failure");
@@ -94,6 +151,12 @@ void HalStorage::endUsbDrive() {
 #if FREEINK_CAP_USB_MSC
   StorageLock lock;
   usbMassStorage.end();
+#ifdef CROSSPOINT_USB_SESSION_PM_LOCK
+  // usbMassStorage.end() completes the host disconnect and its drain
+  // synchronously; release only after that has finished. The held flag keeps
+  // the release paired with the begin-side acquire on every path.
+  releaseUsbSessionNoLightSleep();
+#endif
 #endif
 }
 
