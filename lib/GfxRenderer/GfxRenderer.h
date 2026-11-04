@@ -23,6 +23,7 @@ class TtfEpdFont;
 
 #include "Bitmap.h"
 #include "FontVariantProvider.h"
+#include "PanelCoordinates.h"
 
 namespace glyphBitmap {
 struct Frame;
@@ -36,13 +37,13 @@ class GfxRenderer {
  public:
   enum RenderMode { BW, GRAYSCALE_LSB, GRAYSCALE_MSB };
 
-  // Logical screen orientation from the perspective of callers
-  enum Orientation {
-    Portrait,                  // 480x800 logical coordinates (current default)
-    LandscapeClockwise,        // 800x480 logical coordinates, rotated 180° (swap top/bottom)
-    PortraitInverted,          // 480x800 logical coordinates, inverted
-    LandscapeCounterClockwise  // 800x480 logical coordinates, native panel orientation
-  };
+  // Logical screen orientation from the perspective of callers. The values
+  // live in PanelCoordinates.h so host tests share the exact transform.
+  using Orientation = panelCoordinates::Orientation;
+  using panelCoordinates::LandscapeClockwise;
+  using panelCoordinates::LandscapeCounterClockwise;
+  using panelCoordinates::Portrait;
+  using panelCoordinates::PortraitInverted;
 
  private:
   static constexpr size_t BW_BUFFER_CHUNK_SIZE = 8000;  // 8KB chunks to allow for non-contiguous memory

@@ -1,0 +1,3 @@
+add_executable(PanelCoordinatesTest PanelCoordinatesTest.cpp)
+target_link_libraries(PanelCoordinatesTest PRIVATE crosspoint_test_common GTest::gtest_main)
+gtest_discover_tests(PanelCoordinatesTest)

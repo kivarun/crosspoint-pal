@@ -133,19 +133,25 @@ Capture filledCapture(const char* text) {
 }  // namespace
 
 TEST(PmDumpCapture, RepeatedCapturesLeaveNoStaleTail) {
-  // The regression this test pins: the capture buffer is read with
-  // strstr/sscanf and was not NUL-terminated, so a shorter capture after a
-  // longer one let the parser scan past the new content into the previous
-  // capture's stale tail. captureAppend re-terminates at the new length.
-  const Capture longCapture = filledCapture(kDump);  // entries=1
-  EXPECT_FALSE(longCapture.truncated);
-  const Capture shortCapture = filledCapture(kNoSleepRow);  // entries=0, shorter text
-  EXPECT_EQ(shortCapture.buf[shortCapture.len], '\0');
-  EXPECT_EQ(shortCapture.len, strlen(shortCapture.buf));
+  // The regression this test pins, in the shape the defect happens: ONE
+  // capture buffer, a longer capture first, then a shorter one. The buffer is
+  // read with strstr/sscanf and the terminator is what stops the parser; the
+  // un-terminated old captureWrite let it scan past the new content into the
+  // previous capture's stale tail — the kDump SLEEP mode row that kNoSleepRow
+  // does not have — and report the previous window's mode time.
+  Capture capture;
+  companiongatepower::captureReset(capture);
+  companiongatepower::captureAppend(capture, kDump, strlen(kDump));  // entries=1, modeUs=5545
+  EXPECT_FALSE(capture.truncated);
+  companiongatepower::captureReset(capture);
+  companiongatepower::captureAppend(capture, kNoSleepRow, strlen(kNoSleepRow));  // shorter, no SLEEP row
+  EXPECT_EQ(capture.buf[capture.len], '\0');
+  EXPECT_EQ(capture.len, strlen(capture.buf));
   SleepSample sample;
-  ASSERT_TRUE(companiongatepower::parseSleepStats(shortCapture.buf, sample));
+  ASSERT_TRUE(companiongatepower::parseSleepStats(capture.buf, sample));
   EXPECT_EQ(sample.entries, 0);
   EXPECT_EQ(sample.rejects, 0);
+  EXPECT_EQ(sample.modeUs, -1);  // the stale kDump SLEEP row must stay invisible
 }
 
 TEST(PmDumpCapture, ExactCapacityIsNotTruncated) {

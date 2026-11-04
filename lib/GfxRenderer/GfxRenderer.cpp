@@ -365,40 +365,6 @@ void GfxRenderer::ensureSdGlyphsResident(const int fontId, const char* text, con
   sdIt->second->prewarm(text, styleMask, metadataOnly, /*loadKernLig=*/false);
 }
 
-// Translate logical (x,y) coordinates to physical panel coordinates based on current orientation
-// This should always be inlined for better performance
-static inline void rotateCoordinates(const GfxRenderer::Orientation orientation, const int x, const int y, int* phyX,
-                                     int* phyY, const uint16_t panelWidth, const uint16_t panelHeight) {
-  switch (orientation) {
-    case GfxRenderer::Portrait: {
-      // Logical portrait (480x800) → panel (800x480)
-      // Rotation: 90 degrees clockwise
-      *phyX = y;
-      *phyY = panelHeight - 1 - x;
-      break;
-    }
-    case GfxRenderer::LandscapeClockwise: {
-      // Logical landscape (800x480) rotated 180 degrees (swap top/bottom and left/right)
-      *phyX = panelWidth - 1 - x;
-      *phyY = panelHeight - 1 - y;
-      break;
-    }
-    case GfxRenderer::PortraitInverted: {
-      // Logical portrait (480x800) → panel (800x480)
-      // Rotation: 90 degrees counter-clockwise
-      *phyX = panelWidth - 1 - y;
-      *phyY = x;
-      break;
-    }
-    case GfxRenderer::LandscapeCounterClockwise: {
-      // Logical landscape (800x480) aligned with panel orientation
-      *phyX = x;
-      *phyY = y;
-      break;
-    }
-  }
-}
-
 // Output of screenRectToAlignedMemRect: a rectangle in panel-memory
 // coordinates whose x and width are guaranteed to be multiples of 8 (the
 // SDK's EInkDisplay::displayWindow alignment requirement). `valid == false`
@@ -1375,26 +1341,17 @@ void GfxRenderer::fillRoundedRect(const int x, const int y, const int width, con
 }
 
 void GfxRenderer::drawImage(const uint8_t bitmap[], const int x, const int y, const int width, const int height) const {
-  int rotatedX = 0;
-  int rotatedY = 0;
-  rotateCoordinates(orientation, x, y, &rotatedX, &rotatedY, panelWidth, panelHeight);
-  // Rotate origin corner
-  switch (orientation) {
-    case Portrait:
-      rotatedY = rotatedY - height;
-      break;
-    case PortraitInverted:
-      rotatedX = rotatedX - width;
-      break;
-    case LandscapeClockwise:
-      rotatedY = rotatedY - height;
-      rotatedX = rotatedX - width;
-      break;
-    case LandscapeCounterClockwise:
-      break;
+  // The bitmap is authored in logical orientation (1bpp MSB-first, white=1,
+  // black=0), so each of its pixels goes through drawPixel — the same
+  // logical→physical transform every other primitive uses. The old blit
+  // (display.drawImage) transformed only the placement corner and wrote the
+  // bytes unrotated into panel memory, which showed as a 90°-rotated image
+  // next to correctly-rotated text (the retired "TODO: Rotate bits").
+  for (int row = 0; row < height; row++) {
+    for (int col = 0; col < width; col++) {
+      drawPixel(x + col, y + row, panelCoordinates::imagePixelIsInk(bitmap, width, col, row));
+    }
   }
-  // TODO: Rotate bits
-  display.drawImage(bitmap, rotatedX, rotatedY, width, height);
 }
 
 void GfxRenderer::drawIcon(const uint8_t bitmap[], const int x, const int y, const int size) const {
