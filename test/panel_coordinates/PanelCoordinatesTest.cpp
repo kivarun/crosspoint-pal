@@ -6,9 +6,9 @@
 
 // The panel-coordinate transform shared by GfxRenderer::drawImage and every
 // other renderer primitive, pinned with asymmetric images so the rotation
-// direction is observable. The boot-logo defect was drawImage blitting raw
-// bitmap bytes into panel memory — placement was rotated, pixels were not —
-// which showed the logo turned 90° against correctly-rotated text in Portrait.
+// direction is observable. The regression this suite pins: a drawImage that
+// places pixels without rotating them shows the image turned 90° against
+// correctly-rotated text in Portrait.
 
 namespace {
 

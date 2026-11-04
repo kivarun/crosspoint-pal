@@ -1342,11 +1342,9 @@ void GfxRenderer::fillRoundedRect(const int x, const int y, const int width, con
 
 void GfxRenderer::drawImage(const uint8_t bitmap[], const int x, const int y, const int width, const int height) const {
   // The bitmap is authored in logical orientation (1bpp MSB-first, white=1,
-  // black=0), so each of its pixels goes through drawPixel — the same
-  // logical→physical transform every other primitive uses. The old blit
-  // (display.drawImage) transformed only the placement corner and wrote the
-  // bytes unrotated into panel memory, which showed as a 90°-rotated image
-  // next to correctly-rotated text (the retired "TODO: Rotate bits").
+  // black=0), so each pixel goes through drawPixel — the same logical→physical
+  // transform every other primitive uses — and lands upright relative to the
+  // text in every orientation.
   for (int row = 0; row < height; row++) {
     for (int col = 0; col < width; col++) {
       drawPixel(x + col, y + row, panelCoordinates::imagePixelIsInk(bitmap, width, col, row));
