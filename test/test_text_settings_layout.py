@@ -48,8 +48,8 @@ preview_caption = preview_caption.replace(
     "  assert((renderer.clip == std::array<int, 4>{bounds.x, bounds.y, bounds.width, bounds.height}));\n",
     1,
 )
-orientation = (ROOT / "lib/GfxRenderer/GfxRenderer.h").read_text()
-orientation = "enum Orientation {" + orientation.split("enum Orientation {", 1)[1].split("\n  };", 1)[0] + "\n  };"
+panel_coordinates = (ROOT / "lib/GfxRenderer/PanelCoordinates.h").read_text()
+orientation = "enum Orientation {" + panel_coordinates.split("enum Orientation {", 1)[1].split("\n};", 1)[0] + "\n  };"
 
 harness = r"""
 #include <FreeInkApp.h>
