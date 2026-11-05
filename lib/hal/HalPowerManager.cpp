@@ -88,18 +88,7 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio, const bool wakeOnHeldButton,
   // and an uncleanable wake-source state never sleeps (it restarts instead).
   bool timerWakeArmed = false;
   if (timerWakeUs > 0) {
-    const auto result = esp_sleep_enable_timer_wakeup(timerWakeUs);
-    if (result == ESP_OK) {
-      timerWakeArmed = true;
-    } else {
-      LOG_ERR("PWR", "Timer wake arming failed: %d", static_cast<int>(result));
-      const auto disabled = esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
-      if (disabled != ESP_OK && disabled != ESP_ERR_INVALID_STATE) {
-        // Do not sleep with a wake source whose state could not be cleared.
-        LOG_ERR("PWR", "Timer wake disable failed: %d; restarting", static_cast<int>(disabled));
-        esp_restart();
-      }
-    }
+    timerWakeArmed = armTimerWake(timerWakeUs);
   }
 
 #if FREEINK_DEVICE_EEGO_A4 || FREEINK_DEVICE_PICCO
@@ -184,6 +173,19 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio, const bool wakeOnHeldButton,
   // Waits for the power button to be physically released (so holding it doesn't
   // immediately wake the device again), then arms the wake source and sleeps.
   freeink::PowerManager::deepSleepUntilPowerButton();
+}
+
+bool HalPowerManager::armTimerWake(const uint64_t timerWakeUs) const {
+  const auto result = esp_sleep_enable_timer_wakeup(timerWakeUs);
+  if (result == ESP_OK) return true;
+  LOG_ERR("PWR", "Timer wake arming failed: %d", static_cast<int>(result));
+  const auto disabled = esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+  if (disabled != ESP_OK && disabled != ESP_ERR_INVALID_STATE) {
+    // Do not sleep with a wake source whose state could not be cleared.
+    LOG_ERR("PWR", "Timer wake disable failed: %d; restarting", static_cast<int>(disabled));
+    esp_restart();
+  }
+  return false;
 }
 
 #if FREEINK_DEVICE_PICCO

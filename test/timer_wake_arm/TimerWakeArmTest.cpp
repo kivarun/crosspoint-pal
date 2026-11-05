@@ -56,6 +56,8 @@ struct HalPowerManager {
   // Upstream PR #3820 argument order; a permutation against SleepSource.inc
   // fails to link, and the four-form asserts below fail the behavior.
   void startDeepSleep(HalGPIO&, bool = false, uint64_t = 0) const;
+  // P1-B8: the pre-arm API the pilot gates its RTC record on.
+  bool armTimerWake(uint64_t) const;
 };
 namespace BoardConfig {
 enum class Board { XteinkX4, XteinkX3 };
@@ -111,6 +113,38 @@ static bool sleepForm(const bool wakeOnHeldButton, const uint64_t interval) {
   return false;
 }
 static bool sleep(uint64_t interval) { return sleepForm(false, interval); }
+static bool arm(uint64_t interval) {
+  try {
+    return HalPowerManager{}.armTimerWake(interval);
+  } catch (const Restarted&) {
+    throw;
+  }
+}
+static bool timerArmSuccess() {
+  reset();
+  timerArmed = false;
+  return arm(60000000) && timerArmed && armCalls == 1 && clearCalls == 0 && errors.empty() &&
+         trace == std::vector<std::string>({"arm"});
+}
+static bool timerArmRejected() {
+  reset();
+  armResult = ESP_ERR_INVALID_ARG;
+  timerArmed = true;  // A rejected request must not leave a usable source armed.
+  return !arm(60000000) && armCalls == 1 && clearCalls == 1 && !timerArmed &&
+         errors == std::vector<int>{ESP_ERR_INVALID_ARG} &&
+         trace == std::vector<std::string>({"arm", "error", "clear"});
+}
+static bool timerArmUncleanable() {
+  reset();
+  armResult = ESP_ERR_INVALID_ARG;
+  clearResult = 9;
+  try {
+    arm(60000000);
+    return false;
+  } catch (const Restarted&) {
+  }
+  return errors == std::vector<int>({ESP_ERR_INVALID_ARG, 9}) && trace.back() == "restart" && !timerArmed;
+}
 static bool rejectedRequest() {
   reset();
   armResult = ESP_ERR_INVALID_ARG;
@@ -172,5 +206,13 @@ int main(int argc, char**) {
   }
   assert(errors == std::vector<int>({ESP_ERR_INVALID_ARG, 9}));
   assert(!serialEnded && latchWrites == 0 && trace.back() == "restart");
-  std::cout << "Timer arm failure/cleanup, C3 latch, and EXT1 paths passed\n";
+
+  reset();
+  assert(timerArmSuccess());
+  reset();
+  assert(timerArmRejected());
+  assert(trace == std::vector<std::string>({"arm", "error", "clear"}));
+  reset();
+  assert(timerArmUncleanable());
+  std::cout << "Timer arm failure/cleanup, C3 latch, EXT1, and pre-arm paths passed\n";
 }

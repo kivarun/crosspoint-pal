@@ -52,6 +52,7 @@
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/BleLightSleepDiag.h"
 #include "util/ButtonNavigator.h"
+#include "util/CompanionGatePilot.h"
 #include "util/CompanionGatePolicy.h"
 #include "util/CompanionGatePower.h"
 #include "util/CompanionGateState.h"
@@ -480,6 +481,40 @@ static bool holdSleepWhileUsbPowered() {
 #endif
 
 // Enter deep sleep mode
+#ifdef CROSSPOINT_COMPANION_PILOT_AUTOWAKE
+// P1-B8 (experimental): the one-shot autonomous BLE wake pilot. An ordinary
+// sleep entry may arm ONE delayed headless gate window. The hardware timer is
+// pre-armed BEFORE the RTC arm record is written, so a rejected timer request
+// can never leave an armed record without its wake source (fail closed); the
+// record is written only once the timer is installed. startDeepSleep re-issues
+// the identical arming request at sleep entry, and the IDF result for one
+// request is deterministic. The pilot wake dispatches through the unchanged
+// companion-gate block; no exit of the window re-arms.
+static uint64_t armCompanionPilot(const bool slideshowSleep) {
+  companionpilot::Inputs pilotInputs{};
+  pilotInputs.boardSupported = BoardConfig::isX4Classic();
+  pilotInputs.usbConnected = gpio.isUsbConnected();
+  // The same slideshow condition the wake dispatch pre-empts on, plus the
+  // interval timer this very sleep may arm.
+  pilotInputs.slideshowSleep = slideshowSleep || slideshow::hasValidRetainedState();
+  companionidentity::StoredIdentity pilotIdentity{};
+  pilotInputs.identityValid = companionidentity::load(pilotIdentity);
+  pilotInputs.batteryOk = slideshow::allowedByBattery(powerManager.getBatteryPercentage(), pilotInputs.usbConnected);
+  const companionpilot::Decision pilotDecision = companionpilot::evaluate(pilotInputs);
+  if (pilotDecision.action != companionpilot::Action::Arm) {
+    LOG_INF("GATE", "pilot not armed: %s", companionpilot::skipReasonName(pilotDecision.reason));
+    return 0;
+  }
+  if (!powerManager.armTimerWake(companionpilot::kPilotTimerSeconds * 1000000ULL)) {
+    LOG_ERR("GATE", "pilot timer wake rejected; the pilot stays off");
+    return 0;
+  }
+  companiongate::arm(false);  // one non-diagnostic arm; overwrites the shared RTC verdict bytes
+  LOG_INF("GATE", "pilot armed: one BLE window in %u s", static_cast<unsigned>(companionpilot::kPilotTimerSeconds));
+  return static_cast<uint64_t>(companionpilot::kPilotTimerSeconds) * 1000000ULL;
+}
+#endif
+
 void enterDeepSleep(bool fromTimeout = false) {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
   APP_STATE.lastSleepFromReader = activityManager.isReaderActivity();
@@ -524,7 +559,11 @@ void enterDeepSleep(bool fromTimeout = false) {
                               SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::SLIDESHOW &&
                               slideshow::hasValidRetainedState() &&
                               slideshow::getRetainedMode() == slideshow::Mode::Sleep;
-  enterHardwareDeepSleep(slideshowSleep ? slideshow::intervalMicros(SETTINGS.slideshowInterval) : 0);
+  uint64_t pilotTimerUs = 0;
+#ifdef CROSSPOINT_COMPANION_PILOT_AUTOWAKE
+  pilotTimerUs = armCompanionPilot(slideshowSleep);
+#endif
+  enterHardwareDeepSleep(slideshowSleep ? slideshow::intervalMicros(SETTINGS.slideshowInterval) : pilotTimerUs);
 }
 
 void enterHardwareDeepSleep(uint64_t timerWakeUs) {

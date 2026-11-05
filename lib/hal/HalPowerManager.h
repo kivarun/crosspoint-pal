@@ -50,6 +50,15 @@ class HalPowerManager {
   // sleep and an IDF-accepted duration.
   void startDeepSleep(HalGPIO& gpio, bool wakeOnHeldButton = false, uint64_t timerWakeUs = 0) const;
 
+  // Arms the deep-sleep timer wake WITHOUT entering sleep, so a caller can
+  // gate persistent state (e.g. an RTC arm record) on the timer actually
+  // being installed. False when the IDF rejected the request; the timer wake
+  // source is then left disabled (an uncleanable source state restarts
+  // instead of sleeping). startDeepSleep re-issues the identical arming
+  // request at sleep entry, and the IDF result for one request is
+  // deterministic, so a true here cannot turn into a rejected re-arm.
+  bool armTimerWake(uint64_t timerWakeUs) const;
+
 #if FREEINK_DEVICE_PICCO
   // While USB powers the device, light-sleep instead of deep sleep (deep sleep
   // cannot observe the charger), calling onStatus whenever the charging state
