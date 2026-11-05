@@ -1341,15 +1341,12 @@ void GfxRenderer::fillRoundedRect(const int x, const int y, const int width, con
 }
 
 void GfxRenderer::drawImage(const uint8_t bitmap[], const int x, const int y, const int width, const int height) const {
-  // The bitmap is authored in logical orientation (1bpp MSB-first, white=1,
-  // black=0), so each pixel goes through drawPixel — the same logical→physical
-  // transform every other primitive uses — and lands upright relative to the
-  // text in every orientation.
-  for (int row = 0; row < height; row++) {
-    for (int col = 0; col < width; col++) {
-      drawPixel(x + col, y + row, panelCoordinates::imagePixelIsInk(bitmap, width, col, row));
-    }
-  }
+  // The bitmap is authored in logical orientation, so each pixel goes through
+  // drawPixel — the same logical→physical transform every other primitive
+  // uses — and lands upright relative to the text in every orientation.
+  panelCoordinates::drawLogicalImage(
+      bitmap, width, height, x, y,
+      [this](const int logicalX, const int logicalY, const bool ink) { drawPixel(logicalX, logicalY, ink); });
 }
 
 void GfxRenderer::drawIcon(const uint8_t bitmap[], const int x, const int y, const int size) const {

@@ -39,11 +39,13 @@ class GfxRenderer {
 
   // Logical screen orientation from the perspective of callers. The values
   // live in PanelCoordinates.h so host tests share the exact transform.
+  // Enumerator using-declarations need C++20; the constants below re-export
+  // the same values within the C++17 rules the tree builds with.
   using Orientation = panelCoordinates::Orientation;
-  using panelCoordinates::LandscapeClockwise;
-  using panelCoordinates::LandscapeCounterClockwise;
-  using panelCoordinates::Portrait;
-  using panelCoordinates::PortraitInverted;
+  static constexpr Orientation LandscapeClockwise = panelCoordinates::LandscapeClockwise;
+  static constexpr Orientation LandscapeCounterClockwise = panelCoordinates::LandscapeCounterClockwise;
+  static constexpr Orientation Portrait = panelCoordinates::Portrait;
+  static constexpr Orientation PortraitInverted = panelCoordinates::PortraitInverted;
 
  private:
   static constexpr size_t BW_BUFFER_CHUNK_SIZE = 8000;  // 8KB chunks to allow for non-contiguous memory

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <tuple>
 #include <vector>
 
 #include "lib/GfxRenderer/PanelCoordinates.h"
@@ -140,4 +141,31 @@ TEST(ImageRotation, ImagePixelIsInkDecodesMsbFirstRowsBeyondOneByte) {
   EXPECT_FALSE(imagePixelIsInk(bitmap, kW, 7, 2));
   EXPECT_TRUE(imagePixelIsInk(bitmap, kW, 8, 3));
   EXPECT_TRUE(imagePixelIsInk(bitmap, kW, 11, 3));
+}
+
+TEST(ImageRotation, DrawLogicalImageMatchesTheDrawImageContract) {
+  // drawImage delegates its loop to drawLogicalImage and plots each reported
+  // call through drawPixel. The test drives the same pure loop with a
+  // recording sink, so the placement/polarity contract of the production path
+  // itself is pinned, not just the helpers it calls.
+  const std::vector<uint8_t> bitmap = diagonalInkImage();
+  std::vector<std::tuple<int, int, bool>> calls;
+  panelCoordinates::drawLogicalImage(bitmap.data(), kImageW, kImageH, kImageX, kImageY,
+                                     [&calls](const int logicalX, const int logicalY, const bool ink) {
+                                       calls.emplace_back(logicalX, logicalY, ink);
+                                     });
+  ASSERT_EQ(calls.size(), static_cast<size_t>(kImageW * kImageH));  // every pixel reported exactly once
+  // Row-major scan order: position (row, col) reports logical (x+col, y+row).
+  const size_t topLeft = 0;
+  const size_t oneRight = 1;
+  const size_t bottomRight = static_cast<size_t>(9 * kImageW + 15);
+  EXPECT_EQ(std::get<0>(calls[topLeft]), kImageX);
+  EXPECT_EQ(std::get<1>(calls[topLeft]), kImageY);
+  EXPECT_EQ(std::get<2>(calls[topLeft]), true);
+  EXPECT_EQ(std::get<0>(calls[oneRight]), kImageX + 1);
+  EXPECT_EQ(std::get<1>(calls[oneRight]), kImageY);
+  EXPECT_EQ(std::get<2>(calls[oneRight]), false);  // white stays white
+  EXPECT_EQ(std::get<0>(calls[bottomRight]), kImageX + 15);
+  EXPECT_EQ(std::get<1>(calls[bottomRight]), kImageY + 9);
+  EXPECT_EQ(std::get<2>(calls[bottomRight]), true);
 }

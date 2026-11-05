@@ -59,4 +59,18 @@ inline bool imagePixelIsInk(const uint8_t* bitmap, const int width, const int co
   return ((byte >> (7 - (col & 7))) & 1) == 0;
 }
 
+// The image-drawing contract: every pixel of a 1bpp logical-orientation bitmap
+// placed at the logical rect (x, y, width, height) is plotted at the logical
+// position (x+col, y+row) with its decoded polarity, in row-major scan order.
+// GfxRenderer::drawImage plots through drawPixel; host tests record the calls.
+template <typename Plot>
+inline void drawLogicalImage(const uint8_t* bitmap, const int width, const int height, const int x, const int y,
+                             Plot&& plot) {
+  for (int row = 0; row < height; row++) {
+    for (int col = 0; col < width; col++) {
+      plot(x + col, y + row, imagePixelIsInk(bitmap, width, col, row));
+    }
+  }
+}
+
 }  // namespace panelCoordinates
