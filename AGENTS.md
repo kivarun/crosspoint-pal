@@ -12,6 +12,32 @@ Use the [SDK documentation](freeink-sdk/docs/README.md) and
 Check `git submodule status`: a different local SDK revision must be accounted
 for, not silently treated as the pinned firmware dependency.
 
+## Upstream-first development
+
+CrossPoint Pal is a downstream fork of CrossPoint Reader. Preserve compatibility
+with upstream and minimize long-term divergence.
+
+Classify non-trivial firmware changes before implementation and at final handoff:
+
+- **CrossPoint Reader upstream candidate:** Generic firmware fixes, infrastructure,
+  or functionality useful beyond CrossPoint Pal.
+- **FreeInk SDK upstream candidate:** Reusable board support, drivers, HAL,
+  or power-management improvements.
+- **Downstream only:** Companion-specific BLE behavior, protocol, product policy,
+  and fork-specific experiments or UI.
+
+Before implementing an upstream candidate, check whether the mechanism already
+exists in CrossPoint Reader or the SDK revision pinned by this repository. Prefer
+extending existing abstractions over creating parallel implementations. Keep
+reusable infrastructure separate from downstream product policy, and never
+introduce CrossPoint Pal dependencies into generic upstream-facing code.
+
+Preflights and final handoffs must identify upstream candidates, dependencies,
+and any reason for retaining broadly useful changes downstream. An upstream
+candidate is not approval to publish: do not push to upstream, open PRs, or
+modify upstream repositories without explicit human authorization. Existing
+human-ownership and Git workflow rules remain in force.
+
 ## Start here
 
 At session start, run `uname -s`, `git branch --show-current`, `git remote -v`, and `git status --short`. Integration work targets `develop`.
