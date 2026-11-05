@@ -228,9 +228,14 @@ TEST(CompanionGateContract, WindowFinalizesAtFinishBeforeTheSleepHandoff) {
   ASSERT_NE(finalizeBody, std::string::npos);
   EXPECT_NE(power.find("if (!configured_ || finalized_) return;", finalizeBody), std::string::npos)
       << "finalization must be idempotent";
-  EXPECT_NE(power.find("const bool counted = entrySampled_ && sampled && windowDelta(start_, end, delta);"),
+  EXPECT_NE(power.find("const bool deltaValid = entrySampled_ && sampled && windowDelta(start_, end, delta);"),
             std::string::npos)
-      << "a window counts only with an entry sample, an exit sample, and a monotonic delta";
+      << "a window's delta needs an entry sample, an exit sample, and monotonic counters";
+  EXPECT_NE(
+      power.find("const bool counted = windowCounts(kGateLightSleepEnabled, entrySampled_, sampled, deltaValid);"),
+      std::string::npos)
+      << "counting goes through windowCounts: a control window (light sleep off) and a metrics failure never "
+         "accumulate";
   const std::string window = gateWindowSource(readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp"));
   ASSERT_FALSE(window.empty());
   const auto timeoutFinish = window.find("gateWindow.finish(companiongatepower::WindowTimeout);");

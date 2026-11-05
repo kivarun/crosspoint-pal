@@ -40,6 +40,28 @@ inline constexpr unsigned kStockPollMs = 2;
 inline constexpr unsigned kAutolsPollMs = 15;
 inline unsigned gatePollMs(const bool autolsWindow) { return autolsWindow ? kAutolsPollMs : kStockPollMs; }
 
+// P1-B3 control twin: the gate window keeps the identical flow, cadence and
+// GATESTAT, but esp_pm_configure runs with light sleep disabled, so the BLE
+// connection test isolates the single light-sleep variable. Defined only by
+// the x4c-bleautols-control environment; the experimental build leaves it
+// unset.
+#ifdef CROSSPOINT_COMPANION_GATE_NO_LIGHT_SLEEP
+inline constexpr bool kGateLightSleepEnabled = false;
+#else
+inline constexpr bool kGateLightSleepEnabled = true;
+#endif
+inline bool autoLightSleepEnabled() { return kGateLightSleepEnabled; }
+
+// Whether one window accumulates into the sleep totals. A control window
+// (light sleep off by design) counts nothing — its zero delta must not be
+// mistaken for the experimental build's "sleep never engaged" signal — and a
+// metrics failure (missing samples or an invalid delta) records only the end
+// state.
+inline bool windowCounts(const bool lightSleepEnabled, const bool entrySampled, const bool exitSampled,
+                         const bool deltaValid) {
+  return lightSleepEnabled && entrySampled && exitSampled && deltaValid;
+}
+
 // Why the gate window ended. Values are stable across builds (stored in RTC).
 enum WindowOutcome : uint8_t {
   WindowTimeout = 1,     // the full window ran out

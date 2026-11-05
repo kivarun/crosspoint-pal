@@ -85,12 +85,13 @@ bool beginWindow() {
   esp_pm_config_t pm = {};
   pm.max_freq_mhz = kGateMaxFreqMhz;
   pm.min_freq_mhz = kGateMinFreqMhz;
-  pm.light_sleep_enable = true;
+  pm.light_sleep_enable = kGateLightSleepEnabled;
   const esp_err_t err = esp_pm_configure(&pm);
   if (err != ESP_OK) {
-    LOG_ERR(TAG, "esp_pm_configure(240/80, ON) failed: %s — the window keeps the stock cadence", esp_err_to_name(err));
+    LOG_ERR(TAG, "esp_pm_configure(240/80) failed: %s — the window keeps the stock cadence", esp_err_to_name(err));
     return false;
   }
+  if (!kGateLightSleepEnabled) LOG_INF(TAG, "Gate automatic light sleep OFF");
   return true;
 }
 
@@ -144,9 +145,13 @@ void Guard::finalize() {
   const SleepSample end = captureSample(sampled);
   ensureValidRecord();
   WindowDelta delta{};
-  const bool counted = entrySampled_ && sampled && windowDelta(start_, end, delta);
+  const bool deltaValid = entrySampled_ && sampled && windowDelta(start_, end, delta);
+  const bool counted = windowCounts(kGateLightSleepEnabled, entrySampled_, sampled, deltaValid);
   commitWindow(record, delta, counted, bleState_, outcome_);
-  if (counted && delta.entries == 0 && delta.rejects == 0) {
+  if (!kGateLightSleepEnabled) {
+    LOG_INF(TAG, "window ended: ble=%s end=%s (light sleep off — counters not accumulated)", stateName(bleState_),
+            outcomeName(outcome_));
+  } else if (counted && delta.entries == 0 && delta.rejects == 0) {
     LOG_INF(TAG, "window %u: no light sleep entry (rejects 0) — sleep never engaged",
             static_cast<unsigned>(record.windows));
   }
@@ -161,9 +166,16 @@ void Guard::finalize() {
 void handleCommand(const char* command) {
   if (command == nullptr || strcmp(command, "GATESTAT") != 0) return;
   ensureValidRecord();
-  LOG_INF(TAG, "windows=%u entries=%u rejects=%u noSleep=%u sleepUs=%u", static_cast<unsigned>(record.windows),
-          static_cast<unsigned>(record.entries), static_cast<unsigned>(record.rejects),
-          static_cast<unsigned>(record.noSleepRuns), static_cast<unsigned>(record.sleepUs));
+  if (kGateLightSleepEnabled) {
+    LOG_INF(TAG, "windows=%u entries=%u rejects=%u noSleep=%u sleepUs=%u", static_cast<unsigned>(record.windows),
+            static_cast<unsigned>(record.entries), static_cast<unsigned>(record.rejects),
+            static_cast<unsigned>(record.noSleepRuns), static_cast<unsigned>(record.sleepUs));
+  } else {
+    // Control build: the counters describe earlier experimental flashes only —
+    // a window without light sleep is the design here, not a metrics failure.
+    LOG_INF(TAG, "Gate automatic light sleep OFF (control build: windows=%u is not accumulated here)",
+            static_cast<unsigned>(record.windows));
+  }
   LOG_INF(TAG, "last window: ble=%s end=%s", stateName(record.lastBleState), outcomeName(record.lastOutcome));
   // The persisted dispatch verdict of the last timer wake: the inputs the
   // policy saw, its decision, and (for Run) why the window attempt ended.

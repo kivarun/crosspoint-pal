@@ -309,6 +309,31 @@ TEST(GateAccounting, NoSleepWindowIsCounted) {
   EXPECT_EQ(record.noSleepRuns, 2u);
 }
 
+TEST(GateAccounting, ControlWindowIsNeverCounted) {
+  // The P1-B3 control build runs the identical window flow with light sleep
+  // off by design: its zero delta must not accumulate into the sleep totals
+  // (that would be indistinguishable from the experimental build's "sleep
+  // never engaged" signal), and a metrics failure must not count either way.
+  WindowDelta delta;
+  delta.entries = 0;
+  delta.rejects = 0;
+  delta.modeUs = 0;
+  EXPECT_FALSE(companiongatepower::windowCounts(false, true, true, true));
+  EXPECT_FALSE(companiongatepower::windowCounts(false, false, true, true));
+  EXPECT_FALSE(companiongatepower::windowCounts(false, true, false, false));
+  GatePowerRecord record = fresh();
+  companiongatepower::commitWindow(record, delta, companiongatepower::windowCounts(false, true, true, true), 3,
+                                   companiongatepower::WindowTimeout);
+  EXPECT_EQ(record.windows, 0u);
+  EXPECT_EQ(record.noSleepRuns, 0u);
+  EXPECT_EQ(record.lastBleState, 3u);  // the end state is still recorded
+  EXPECT_EQ(record.lastOutcome, companiongatepower::WindowTimeout);
+  EXPECT_TRUE(companiongatepower::windowCounts(true, true, true, true));
+  EXPECT_FALSE(companiongatepower::windowCounts(true, false, true, true));
+  EXPECT_FALSE(companiongatepower::windowCounts(true, true, false, true));
+  EXPECT_FALSE(companiongatepower::windowCounts(true, true, true, false));
+}
+
 TEST(GateAccounting, ModeTimeWrapContributesNothing) {
   // A wrap-suspected mode delta contributes nothing but still counts entries.
   SleepSample entry;

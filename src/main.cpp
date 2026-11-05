@@ -604,7 +604,8 @@ static void runCompanionGate(const bool diagnostic) {
   // every exit; the poll period below follows whether the window can sleep.
   companiongatepower::Guard gateWindow(gate);
 #ifdef CROSSPOINT_COMPANION_GATE_AUTOLS
-  LOG_INF("GATE", "Gate window automatic light sleep on, poll %u ms",
+  LOG_INF("GATE", "Gate window automatic light sleep %s, poll %u ms",
+          companiongatepower::autoLightSleepEnabled() ? "on" : "OFF (control build)",
           companiongatepower::gatePollMs(gateWindow.configured()));
 #endif
   const unsigned long deadline = millis() + GATE_WINDOW_MS;
