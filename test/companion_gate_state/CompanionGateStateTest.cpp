@@ -80,7 +80,7 @@ TEST(DispatchVerdict, MagicsStayDistinct) {
 }
 
 TEST(DispatchVerdict, RoundTripsEveryInputCombination) {
-  for (uint32_t mask = 0; mask < 256u; ++mask) {
+  for (uint32_t mask = 0; mask < 512u; ++mask) {
     for (int decision = 0; decision <= static_cast<int>(companiongate::Action::Run); ++decision) {
       for (int outcome = 0; outcome <= static_cast<int>(companiongate::RunOutcome::NoBond); ++outcome) {
         const companiongate::DispatchVerdict in{(mask & 1u) != 0,
@@ -92,7 +92,8 @@ TEST(DispatchVerdict, RoundTripsEveryInputCombination) {
                                                 (mask & 64u) != 0,
                                                 (mask & 128u) != 0,
                                                 static_cast<companiongate::Action>(decision),
-                                                static_cast<companiongate::RunOutcome>(outcome)};
+                                                static_cast<companiongate::RunOutcome>(outcome),
+                                                (mask & 256u) != 0};
         companiongate::DispatchVerdict out{};
         ASSERT_TRUE(companiongate::unpackDispatchVerdict(companiongate::packDispatchVerdict(in), out));
         EXPECT_EQ(out.wakeTimer, in.wakeTimer);
@@ -105,6 +106,7 @@ TEST(DispatchVerdict, RoundTripsEveryInputCombination) {
         EXPECT_EQ(out.battery, in.battery);
         EXPECT_EQ(out.decision, in.decision);
         EXPECT_EQ(out.outcome, in.outcome);
+        EXPECT_EQ(out.sessionEstablished, in.sessionEstablished);
       }
     }
   }
@@ -170,8 +172,14 @@ TEST(DispatchVerdict, RejectsGarbage) {
                                             companiongate::RunOutcome::NotRun};
   companiongate::DispatchVerdict out{};
   EXPECT_FALSE(companiongate::unpackDispatchVerdict(0xFFFFFFFFu, out));
-  EXPECT_FALSE(companiongate::unpackDispatchVerdict(1u << 14, out));  // reserved bit set
+  EXPECT_FALSE(companiongate::unpackDispatchVerdict(1u << 15, out));  // reserved bit set
   EXPECT_FALSE(companiongate::unpackDispatchVerdict(1u << 31, out));
+  // The session bit alone is a legal payload: an old-build record (bit 14 at
+  // zero) and a just-marked session both read.
+  EXPECT_TRUE(companiongate::unpackDispatchVerdict(1u << 14, out));
+  EXPECT_EQ(out.sessionEstablished, true);
+  EXPECT_EQ(out.decision, companiongate::Action::Ordinary);
+  EXPECT_EQ(out.outcome, companiongate::RunOutcome::NotRun);
   const uint32_t badDecision = companiongate::packDispatchVerdict(base) | (0x5u << 8);
   EXPECT_FALSE(companiongate::unpackDispatchVerdict(badDecision, out));
   const uint32_t badOutcome = companiongate::packDispatchVerdict(base) | (0x6u << 11);
@@ -207,4 +215,50 @@ TEST(DispatchVerdict, NamesAreDistinctAndNonNull) {
       EXPECT_STRNE(outcomes[i], outcomes[j]);
     }
   }
+}
+
+// The M3 bit rides in the payload's guarded region: a verdict written by a
+// pre-B4 build (bit 14 at zero) must still read, with the session flag false.
+TEST(DispatchVerdict, OldPayloadWithoutSessionBitReads) {
+  const companiongate::DispatchVerdict preM3{true,
+                                             true,
+                                             false,
+                                             false,
+                                             false,
+                                             false,
+                                             true,
+                                             true,
+                                             companiongate::Action::Run,
+                                             companiongate::RunOutcome::WindowTimeout,
+                                             false};
+  const uint32_t payload = companiongate::packDispatchVerdict(preM3);
+  EXPECT_EQ(payload & companiongate::SESSION_ESTABLISHED_FLAG, 0u);
+  companiongate::DispatchVerdict out{};
+  ASSERT_TRUE(companiongate::unpackDispatchVerdict(payload, out));
+  EXPECT_EQ(out.sessionEstablished, false);
+  EXPECT_EQ(out.decision, companiongate::Action::Run);
+  EXPECT_EQ(out.outcome, companiongate::RunOutcome::WindowTimeout);
+}
+
+// The M3 bit is monotonic: setting it twice is the same payload, and it
+// survives the outcome rewrite the window performs at every exit. A fresh
+// dispatch writes the whole verdict, so the bit starts clear again.
+TEST(DispatchVerdict, SessionBitSurvivesOutcomeRewriteAndStaysMonotonic) {
+  const companiongate::DispatchVerdict marked{
+      true, true, false, false, false, false, true, true, companiongate::Action::Run, companiongate::RunOutcome::NotRun,
+      true};
+  const uint32_t payload = companiongate::packDispatchVerdict(marked);
+  EXPECT_NE(payload & companiongate::SESSION_ESTABLISHED_FLAG, 0u);
+  EXPECT_EQ(companiongate::payloadWithSessionEstablished(payload), payload);  // monotonic
+  companiongate::DispatchVerdict fresh = marked;
+  fresh.sessionEstablished = false;
+  const uint32_t unmarked = companiongate::packDispatchVerdict(fresh);
+  EXPECT_EQ(unmarked & companiongate::SESSION_ESTABLISHED_FLAG, 0u);
+  EXPECT_EQ(companiongate::payloadWithSessionEstablished(unmarked), unmarked | companiongate::SESSION_ESTABLISHED_FLAG);
+  const uint32_t afterTimeout = companiongate::payloadWithOutcome(payload, companiongate::RunOutcome::WindowTimeout);
+  EXPECT_EQ(afterTimeout & companiongate::SESSION_ESTABLISHED_FLAG, companiongate::SESSION_ESTABLISHED_FLAG);
+  companiongate::DispatchVerdict out{};
+  ASSERT_TRUE(companiongate::unpackDispatchVerdict(afterTimeout, out));
+  EXPECT_EQ(out.sessionEstablished, true);
+  EXPECT_EQ(out.outcome, companiongate::RunOutcome::WindowTimeout);
 }

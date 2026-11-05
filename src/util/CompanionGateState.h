@@ -91,16 +91,22 @@ struct DispatchVerdict {
   bool battery;
   Action decision;
   RunOutcome outcome;
+  bool sessionEstablished;  // set at the M3 point, monotonic, never stored by dispatch
 };
 
 inline constexpr uint32_t DISPATCH_VERDICT_MAGIC = 0x47425644u;  // 'GBVD'
+
+// The session-established bit (P1-B4): set only through markSessionEstablished
+// once the BLE session is actually up.
+inline constexpr uint32_t SESSION_ESTABLISHED_FLAG = 1u << 14;
 
 // Payload layout (stable across builds):
 //   bit 0..7   wake-timer | arm-valid | diag | recovery | usb | slideshow |
 //              identity | battery
 //   bit 8..10  Action
 //   bit 11..13 RunOutcome
-//   bit 14..31 zero — unpack rejects nonzero, a second guard against a
+//   bit 14     session established (M3)
+//   bit 15..31 zero — unpack rejects nonzero, a second guard against a
 //              coincidental magic hit on cold-boot garbage. Extend this guard
 //              when the payload layout grows.
 inline uint32_t packDispatchVerdict(const DispatchVerdict& verdict) {
@@ -115,12 +121,13 @@ inline uint32_t packDispatchVerdict(const DispatchVerdict& verdict) {
   if (verdict.battery) packed |= 1u << 7;
   packed |= static_cast<uint32_t>(verdict.decision) << 8;
   packed |= static_cast<uint32_t>(verdict.outcome) << 11;
+  if (verdict.sessionEstablished) packed |= SESSION_ESTABLISHED_FLAG;
   return packed;
 }
 
 inline bool unpackDispatchVerdict(const uint32_t payload, DispatchVerdict& out) {
   out = DispatchVerdict{};
-  if ((payload >> 14) != 0) return false;
+  if ((payload >> 15) != 0) return false;
   const uint32_t decision = (payload >> 8) & 0x7u;
   if (decision > static_cast<uint32_t>(Action::Run)) return false;
   const uint32_t outcome = (payload >> 11) & 0x7u;
@@ -135,8 +142,19 @@ inline bool unpackDispatchVerdict(const uint32_t payload, DispatchVerdict& out) 
   out.battery = (payload & (1u << 7)) != 0;
   out.decision = static_cast<Action>(decision);
   out.outcome = static_cast<RunOutcome>(outcome);
+  out.sessionEstablished = (payload & SESSION_ESTABLISHED_FLAG) != 0;
   return true;
 }
+
+// Pure payload rewrites behind the device-side RTC updates, so the M3
+// lifetime rules are host-testable. The outcome rewrite touches only bits
+// 11..13: the session bit survives every outcome update. The session rewrite
+// is monotonic — it can only set the bit.
+inline uint32_t payloadWithOutcome(const uint32_t payload, const RunOutcome outcome) {
+  return (payload & ~(uint32_t{0x7} << 11)) | (static_cast<uint32_t>(outcome) << 11);
+}
+
+inline uint32_t payloadWithSessionEstablished(const uint32_t payload) { return payload | SESSION_ESTABLISHED_FLAG; }
 
 inline const char* gateActionName(const Action action) {
   switch (action) {
@@ -177,7 +195,11 @@ inline const char* runOutcomeName(const RunOutcome outcome) {
 // is false after a cold boot (garbage), after GATEARM re-arms, and whenever no
 // timer wake has stored a verdict yet. updateRunOutcome rewrites only the
 // outcome bits of an existing verdict; it is a no-op without one.
+// markSessionEstablished sets the M3 bit of an existing verdict and is a
+// no-op without one; it is monotonic — no firmware path ever clears it except
+// a new dispatch overwriting the whole verdict.
 void storeDispatchVerdict(const DispatchVerdict& verdict);
 bool readDispatchVerdict(DispatchVerdict& out);
 void updateRunOutcome(const RunOutcome outcome);
+void markSessionEstablished();
 }  // namespace companiongate

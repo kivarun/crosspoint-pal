@@ -193,17 +193,21 @@ void handleCommand(const char* command) {
                  ? "yes"
                  : "n/a";
     }
+    // M3 (the established BLE session) is only meaningful for a window that
+    // actually ran; every other decision reads n/a.
+    const char* m3 =
+        verdict.decision == companiongate::Action::Run ? (verdict.sessionEstablished ? "yes" : "no") : "n/a";
     LOG_INF(TAG,
             "last timer-wake dispatch: wake=%s armed=%d diag=%d recovery=%d usb=%d slideshow=%d identity=%d "
-            "battery=%d -> %s run=%s bond=%s",
+            "battery=%d -> %s run=%s bond=%s m3=%s",
             verdict.wakeTimer ? "timer" : "other", verdict.armValid, verdict.diagnostic, verdict.recovery, verdict.usb,
             verdict.slideshow, verdict.identity, verdict.battery, companiongate::gateActionName(verdict.decision),
-            companiongate::runOutcomeName(verdict.outcome), bond);
+            companiongate::runOutcomeName(verdict.outcome), bond, m3);
     if (!verdict.armValid) {
       LOG_INF(TAG, "  identity/battery not sampled: the wake carried no arm");
     }
   } else {
-    LOG_INF(TAG, "last timer-wake dispatch: none (cold boot, GATEARM pending, or never armed)");
+    LOG_INF(TAG, "last timer-wake dispatch: none (cold boot, GATEARM pending, or never armed) m3=n/a");
   }
   // The live PM-lock snapshot: with automatic light sleep off at boot the
   // dump carries the lock table (the SLEEP mode row stays hidden), which is

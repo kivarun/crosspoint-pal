@@ -59,11 +59,18 @@ bool readDispatchVerdict(DispatchVerdict& out) {
 }
 void updateRunOutcome(const RunOutcome outcome) {
   if (armedRecord.magic != DISPATCH_VERDICT_MAGIC) return;
-  // The magic deliberately stays valid during the rewrite: only the flags byte
-  // carries changed bits, so a concurrent reader always sees the old or the
-  // new verdict, never an invalid record.
-  const uint32_t payload = (verdictPayload() & ~(uint32_t{0x7} << 11)) | (static_cast<uint32_t>(outcome) << 11);
-  writeVerdictPayload(payload);
+  // The magic deliberately stays valid during the rewrite: only the outcome
+  // bits change, so a concurrent reader always sees the old or the new
+  // verdict, never an invalid record.
+  writeVerdictPayload(payloadWithOutcome(verdictPayload(), outcome));
+}
+
+void markSessionEstablished() {
+  if (armedRecord.magic != DISPATCH_VERDICT_MAGIC) return;
+  const uint32_t payload = verdictPayload();
+  if ((payload & SESSION_ESTABLISHED_FLAG) != 0) return;  // monotonic: already set
+  // Same no-torn-record convention as updateRunOutcome: the magic stays valid.
+  writeVerdictPayload(payloadWithSessionEstablished(payload));
 }
 
 }  // namespace companiongate
