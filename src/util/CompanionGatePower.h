@@ -82,8 +82,9 @@ struct SleepSample {
 };
 
 // Parses one captured esp_pm_dump_locks body (the profiling build's text).
-// False when the Sleep stats line is missing entirely (profiling disabled or
-// a truncated capture); the SLEEP mode row is optional and reads as modeUs<0.
+// False when the Sleep stats line is missing entirely (profiling disabled, a
+// truncated capture, or light sleep off — the control twin's dumps never
+// carry the block); the SLEEP mode row is optional and reads as modeUs<0.
 inline bool parseSleepStats(const char* text, SleepSample& out) {
   out = SleepSample{};
   if (text == nullptr) return false;
@@ -218,19 +219,21 @@ inline void commitWindow(GatePowerRecord& record, const WindowDelta& delta, cons
 
 #ifdef CROSSPOINT_COMPANION_GATE_AUTOLS
 
-// Configures 240/80 MHz with automatic light sleep ON for the gate window.
-// False when esp_pm_configure failed: the caller then keeps the stock poll
-// cadence and the window records nothing.
+// Configures 240/80 MHz for the gate window with the build's light-sleep
+// mode: enabled in the experimental build, disabled in the control twin
+// (kGateLightSleepEnabled). False when esp_pm_configure failed: the caller
+// then keeps the stock poll cadence and the window records nothing.
 bool beginWindow();
 
 // One exit of the gate window. finish() is the finalization point: it reads
 // the gate's live radio state (before the caller stops the radio), captures
-// the exit sample while automatic light sleep is still on (the profiling dump
-// carries the SLEEP row only then), commits the window's delta against the
-// entry sample, and restores the OFF state — so a window that ends in the
-// non-returning deep-sleep handoff is accounted before the sleep. The
-// destructor only finalizes windows whose exit path never called finish()
-// (returning abort paths); finalization is idempotent.
+// the exit sample while the window's esp_pm mode still holds (the profiling
+// dump carries the Sleep stats block only while light sleep is enabled; the
+// control twin's capture reads as a failure by design), commits the window's
+// delta against the entry sample, and restores the OFF state — so a window
+// that ends in the non-returning deep-sleep handoff is accounted before the
+// sleep. The destructor only finalizes windows whose exit path never called
+// finish() (returning abort paths); finalization is idempotent.
 class Guard {
  public:
   explicit Guard(blecompanion::BleCompanion& gate);
