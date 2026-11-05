@@ -91,7 +91,7 @@ struct DispatchVerdict {
   bool battery;
   Action decision;
   RunOutcome outcome;
-  bool sessionEstablished;  // set at the M3 point, monotonic, never stored by dispatch
+  bool sessionEstablished;  // set at the M3 point, monotonic; dispatch always stores it false
 };
 
 inline constexpr uint32_t DISPATCH_VERDICT_MAGIC = 0x47425644u;  // 'GBVD'

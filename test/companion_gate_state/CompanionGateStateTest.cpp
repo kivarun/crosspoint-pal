@@ -174,8 +174,7 @@ TEST(DispatchVerdict, RejectsGarbage) {
   EXPECT_FALSE(companiongate::unpackDispatchVerdict(0xFFFFFFFFu, out));
   EXPECT_FALSE(companiongate::unpackDispatchVerdict(1u << 15, out));  // reserved bit set
   EXPECT_FALSE(companiongate::unpackDispatchVerdict(1u << 31, out));
-  // The session bit alone is a legal payload: an old-build record (bit 14 at
-  // zero) and a just-marked session both read.
+  // The session bit alone is a legal payload: a just-marked session reads.
   EXPECT_TRUE(companiongate::unpackDispatchVerdict(1u << 14, out));
   EXPECT_EQ(out.sessionEstablished, true);
   EXPECT_EQ(out.decision, companiongate::Action::Ordinary);
@@ -217,8 +216,9 @@ TEST(DispatchVerdict, NamesAreDistinctAndNonNull) {
   }
 }
 
-// The M3 bit rides in the payload's guarded region: a verdict written by a
-// pre-B4 build (bit 14 at zero) must still read, with the session flag false.
+// The M3 bit took the first formerly-guarded payload bit: a verdict written
+// by a pre-B4 build (bit 14 at zero) must still read, with the session flag
+// false.
 TEST(DispatchVerdict, OldPayloadWithoutSessionBitReads) {
   const companiongate::DispatchVerdict preM3{true,
                                              true,

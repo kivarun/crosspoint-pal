@@ -614,8 +614,8 @@ static void runCompanionGate(const bool diagnostic) {
     gate.loop();
     if (!sessionLogged && gate.status().sessionActive) {
       sessionLogged = true;
-      // The M3 fact must outlive the deep sleep that ends this window, so it
-      // lands in the verdict before anything else.
+      // The M3 fact must outlive the deep sleep that ends this window: every
+      // exit path below (power abort, timeout) must find it already stored.
       companiongate::markSessionEstablished();
       LOG_INF("GATE", "Session established (M3 measurement point)");
     }
