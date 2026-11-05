@@ -13,7 +13,9 @@
 // state in the firmware: the radio advertises for the bounded window with the
 // identity/bond/battery/USB preconditions already checked by
 // companiongate::dispatch. This module adds, per build flag, automatic light
-// sleep across that window: esp_pm_configure(240/80, ON) at window open and
+// sleep across that window: esp_pm_configure(240/80) at window open — with
+// light sleep enabled in the experimental build, disabled in the control twin
+// (CROSSPOINT_COMPANION_GATE_NO_LIGHT_SLEEP) — and
 // OFF again on every exit, a main-loop poll period that leaves tickless idle
 // windows above the 8 ms esp_pm sleep gate, and persistent (RTC) sleep
 // accounting read from the esp_pm profiling dump.
@@ -53,10 +55,10 @@ inline constexpr bool kGateLightSleepEnabled = true;
 inline bool autoLightSleepEnabled() { return kGateLightSleepEnabled; }
 
 // Whether one window accumulates into the sleep totals. A control window
-// (light sleep off by design) counts nothing — its zero delta must not be
-// mistaken for the experimental build's "sleep never engaged" signal — and a
-// metrics failure (missing samples or an invalid delta) records only the end
-// state.
+// (light sleep off by design) counts nothing — its dump carries no Sleep
+// stats block at all, so it must not be mistaken for the experimental build's
+// metrics failure — and a metrics failure (missing samples or an invalid
+// delta) records only the end state.
 inline bool windowCounts(const bool lightSleepEnabled, const bool entrySampled, const bool exitSampled,
                          const bool deltaValid) {
   return lightSleepEnabled && entrySampled && exitSampled && deltaValid;

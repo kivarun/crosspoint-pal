@@ -140,7 +140,9 @@ void Guard::finalize() {
   }
   // The exit sample must be captured while automatic light sleep is still
   // enabled: the profiling dump prints the SLEEP mode row and the Sleep stats
-  // block only then.
+  // block only then. In the control twin the dump hides the Sleep stats block
+  // entirely, so the sample reads as a failure — that is the design, and
+  // windowCounts keeps such windows out of the totals.
   bool sampled = false;
   const SleepSample end = captureSample(sampled);
   ensureValidRecord();
