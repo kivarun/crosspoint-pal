@@ -44,6 +44,12 @@ std::string functionBody(const std::string& all, const std::string& signature, c
   return stripLineComments(all.substr(begin, end - begin));
 }
 
+size_t countOccurrences(const std::string& text, const std::string& needle) {
+  size_t count = 0;
+  for (auto pos = text.find(needle); pos != std::string::npos; pos = text.find(needle, pos + 1)) ++count;
+  return count;
+}
+
 }  // namespace
 
 TEST(CompanionPilotContract, PilotSitsBehindTheCompileTimeFlag) {
@@ -176,4 +182,145 @@ TEST(CompanionPilotContract, PilotFlagIsDefinedOnlyInTheExperimentalEnv) {
     ++occurrences;
   }
   EXPECT_EQ(occurrences, 1u) << "the pilot flag is a single experimental env, default builds stay off";
+}
+
+// --- P1-B9: the continuous standby experiment (analysis revision 3) ----------
+
+TEST(CompanionStandbyContract, StandbyFlagIsOneExperimentalEnvOnThePilot) {
+  const std::string ini = readAll(fs::path(REPO_ROOT_PATH) / "platformio.ini");
+  size_t occurrences = 0;
+  for (auto pos = ini.find("-DCROSSPOINT_COMPANION_GATE_STANDBY"); pos != std::string::npos;
+       pos = ini.find("-DCROSSPOINT_COMPANION_GATE_STANDBY", pos + 1)) {
+    ++occurrences;
+  }
+  EXPECT_EQ(occurrences, 1u) << "the standby flag belongs to exactly one experimental env";
+  const auto standbyEnv = ini.find("[env:x4c-bleautols-standby]");
+  ASSERT_NE(standbyEnv, std::string::npos);
+  const auto extends = ini.find("extends = env:x4c-bleautols-pilot", standbyEnv);
+  EXPECT_NE(extends, std::string::npos) << "the standby env inherits the accepted pilot configuration";
+}
+
+std::string standbyLoopSource(const std::string& main) {
+  const auto begin = main.find("static void runCompanionGate");
+  if (begin == std::string::npos) return "";
+  const auto end = main.find("void setupDisplayAndFonts", begin);
+  if (end == std::string::npos) return "";
+  return stripLineComments(main.substr(begin, end - begin));
+}
+
+TEST(CompanionStandbyContract, StandbyReplacesOnlyTheDeadline) {
+  const std::string main = readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp");
+  const std::string body = standbyLoopSource(main);
+  ASSERT_FALSE(body.empty()) << "the gate loop must exist";
+  // The deadline is the only structural difference: the same loop, the same
+  // poll, no teardown per connection.
+  EXPECT_NE(body.find("standbydiag::standbyCapMs()"), std::string::npos);
+  const auto guard = body.find("Gate window open");
+  ASSERT_NE(guard, std::string::npos);
+  // The radio is stopped only on refusal/exit paths, never per connection:
+  // radio failure, no bond, USB exit, power abort and the window end.
+  EXPECT_EQ(countOccurrences(body, "gate.stop();"), 5u)
+      << "the standby loop must not tear the radio down between sessions";
+  EXPECT_EQ(countOccurrences(body, "sleepAfterGate();"), 4u)
+      << "exits stay button-only deep sleeps; only exits, never sessions";
+}
+
+TEST(CompanionStandbyContract, UsbExitFollowsTheAbortShape) {
+  const std::string main = readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp");
+  const std::string body = standbyLoopSource(main);
+  ASSERT_FALSE(body.empty());
+  const auto usbCheck = body.find("gpio.isUsbConnected()");
+  ASSERT_NE(usbCheck, std::string::npos) << "the approved USB-plug exit must be checked in the loop";
+  const auto noteExit = body.find("standbydiag::noteExit(standbydiag::ExitKind::Usb);", usbCheck);
+  ASSERT_NE(noteExit, std::string::npos);
+  const auto stop = body.find("gate.stop();", noteExit);
+  ASSERT_NE(stop, std::string::npos);
+  EXPECT_LT(noteExit, stop)
+      << "the exit is recorded first, so the final PM capture runs while the Guard's light sleep is still on";
+  const auto branchReturn = body.find("return;", stop);
+  ASSERT_NE(branchReturn, std::string::npos);
+  const std::string usbBranch = body.substr(usbCheck, branchReturn - usbCheck);
+  EXPECT_EQ(usbBranch.find("sleepAfterGate();"), std::string::npos)
+      << "the USB exit returns into the ordinary boot; it never sleeps";
+}
+
+TEST(CompanionStandbyContract, CapExitRecordsThenSleepsWithoutAnyReadback) {
+  const std::string main = readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp");
+  const std::string body = standbyLoopSource(main);
+  ASSERT_FALSE(body.empty());
+  const auto capNote = body.find("standbydiag::ExitKind::Cap");
+  ASSERT_NE(capNote, std::string::npos) << "the 24 h diagnostic cap must be classified at its exit";
+  const auto sleep = body.find("sleepAfterGate();", capNote);
+  ASSERT_NE(sleep, std::string::npos);
+  EXPECT_LT(capNote, sleep) << "the cap exit is recorded before the non-returning sleep";
+  // The cap path must not attempt any console readback: the evidence is
+  // discarded there by design (deep sleep), and the verdict rule handles the
+  // absent evidence as INCONCLUSIVE.
+  EXPECT_EQ(body.find("SBDS", capNote), std::string::npos);
+  EXPECT_EQ(body.find("notifyRetained", capNote), std::string::npos);
+}
+
+TEST(CompanionStandbyContract, ReadbackIsOperatorControlledAfterTheOrdinaryBoot) {
+  const std::string main = readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp");
+  // The readback lives in loop(): a once-per-boot retained-evidence notice
+  // and the operator's SBDS serial commands — never inside the headless gate
+  // window, and never an automatic dump (C1 blocker 2: the dump must not
+  // destroy the only RAM copy).
+  const std::string gate = standbyLoopSource(main);
+  EXPECT_EQ(gate.find("notifyRetained"), std::string::npos) << "the gate window must not announce or read back";
+  EXPECT_EQ(gate.find("handleCommand"), std::string::npos) << "the gate window must not read back";
+  const auto notice = main.find("standbydiag::notifyRetained();");
+  const auto loopFn = main.find("void loop()");
+  ASSERT_NE(notice, std::string::npos);
+  ASSERT_NE(loopFn, std::string::npos);
+  EXPECT_GT(notice, loopFn) << "the notice must be a loop()-time recovery path";
+  const auto command = main.find("standbydiag::handleCommand(cmd.c_str());", loopFn);
+  ASSERT_NE(command, std::string::npos) << "the SBDS commands must be dispatched from loop()";
+}
+
+TEST(CompanionStandbyContract, GateLogiMapsToNoOpInTheStandbyEnv) {
+  const std::string main = readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp");
+  const auto guard = main.find("#ifdef CROSSPOINT_COMPANION_GATE_STANDBY");
+  ASSERT_NE(guard, std::string::npos);
+  const auto noOp = main.find("#define GATE_LOGI(...) ((void)0)", guard);
+  ASSERT_NE(noOp, std::string::npos) << "the standby env must compile the routine gate lines out";
+  const auto elsePos = main.find("#else", guard);
+  ASSERT_NE(elsePos, std::string::npos);
+  EXPECT_LT(noOp, elsePos) << "the no-op mapping must be the standby branch, not the fallback";
+  const auto logInf = main.find("LOG_INF(\"GATE\", __VA_ARGS__)", elsePos);
+  ASSERT_NE(logInf, std::string::npos) << "the non-standby envs must keep the ordinary log line";
+}
+
+TEST(CompanionStandbyContract, StandbyGatePathEmitsNoRoutineConsoleLines) {
+  const std::string main = readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp");
+  const std::string body = standbyLoopSource(main);
+  ASSERT_FALSE(body.empty());
+  // The zero-console rule (analysis revision 3 §5.5): every routine GATE log
+  // line is compiled out of the standby env through GATE_LOGI; only the
+  // radio-start LOG_ERR failure signal remains.
+  EXPECT_EQ(countOccurrences(body, "LOG_INF(\"GATE\""), 0u) << "routine gate lines must be GATE_LOGI";
+  EXPECT_EQ(countOccurrences(body, "LOG_ERR(\"GATE\""), 1u) << "only the radio-start failure keeps its error line";
+}
+
+TEST(CompanionStandbyContract, GuardExitLinesAreSuppressedInTheStandbyEnv) {
+  const std::string power = readAll(fs::path(REPO_ROOT_PATH) / "src" / "util" / "CompanionGatePower.cpp");
+  const std::string body = functionBody(power, "void Guard::finalize", "void handleCommand");
+  ASSERT_FALSE(body.empty());
+  const auto guard = body.find("#ifndef CROSSPOINT_COMPANION_GATE_STANDBY");
+  ASSERT_NE(guard, std::string::npos) << "the Guard's routine exit lines must be compiled out of the standby env";
+  const auto logInf = body.find("LOG_INF", guard);
+  ASSERT_NE(logInf, std::string::npos);
+  const auto endif = body.find("#endif", logInf);
+  ASSERT_NE(endif, std::string::npos) << "the suppression must close before the PM restore";
+}
+
+TEST(CompanionStandbyContract, ClockEvidenceIsReadAfterTheRadioIsUp) {
+  const std::string main = readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp");
+  const std::string body = standbyLoopSource(main);
+  ASSERT_FALSE(body.empty());
+  const auto begin = body.find("gate.begin(");
+  const auto sessionBegin = body.find("standbydiag::sessionBegin(millis())");
+  ASSERT_NE(begin, std::string::npos);
+  ASSERT_NE(sessionBegin, std::string::npos);
+  EXPECT_LT(begin, sessionBegin) << "the LPCLK read must follow controller initialization";
 }

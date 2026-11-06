@@ -112,6 +112,12 @@ SleepSample captureSample(bool& ok) {
 
 }  // namespace
 
+bool captureSleepSample(SleepSample& out) {
+  bool ok = false;
+  out = captureSample(ok);
+  return ok;
+}
+
 Guard::Guard(blecompanion::BleCompanion& gate) : gate_(&gate), configured_(beginWindow()) {
   if (!configured_) return;
   // The entry sample anchors the window's delta in THIS boot: the esp_pm
@@ -150,6 +156,10 @@ void Guard::finalize() {
   const bool deltaValid = entrySampled_ && sampled && windowDelta(start_, end, delta);
   const bool counted = windowCounts(kGateLightSleepEnabled, entrySampled_, sampled, deltaValid);
   commitWindow(record, delta, counted, bleState_, outcome_);
+  // P1-B9 zero-console rule: the standby env compiles the Guard's routine
+  // exit lines out (the diagnostic buffer records the exit); error paths and
+  // the other envs are unchanged.
+#ifndef CROSSPOINT_COMPANION_GATE_STANDBY
   if (!kGateLightSleepEnabled) {
     LOG_INF(TAG, "window ended: ble=%s end=%s (light sleep off — counters not accumulated)", stateName(bleState_),
             outcomeName(outcome_));
@@ -157,6 +167,7 @@ void Guard::finalize() {
     LOG_INF(TAG, "window %u: no light sleep entry (rejects 0) — sleep never engaged",
             static_cast<unsigned>(record.windows));
   }
+#endif
   esp_pm_config_t pm = {};
   pm.max_freq_mhz = kGateMaxFreqMhz;
   pm.min_freq_mhz = kGateMinFreqMhz;

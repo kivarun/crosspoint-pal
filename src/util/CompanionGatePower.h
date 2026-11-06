@@ -261,6 +261,12 @@ class Guard {
 // state and outcome, and a full PM-lock dump snapshot.
 void handleCommand(const char* command);
 
+// One boot-relative esp_pm profiling capture (the same sample the Guard
+// takes at window entry/exit), for the P1-B9 standby interval diagnostics.
+// False when the dump did not parse; the caller then treats the span as
+// unattributable (Mixed), never as zero sleep.
+bool captureSleepSample(SleepSample& out);
+
 #else  // builds without the flag: the stock window, no accounting
 
 class Guard {

@@ -57,6 +57,7 @@
 #include "util/CompanionGatePower.h"
 #include "util/CompanionGateState.h"
 #include "util/CompanionIdentityMirror.h"
+#include "util/CompanionStandbyDiag.h"
 #include "util/PluginEvents.h"
 #include "util/PmOnlyDiag.h"
 #include "util/RtcClockDiag.h"
@@ -598,6 +599,17 @@ constexpr unsigned long GATE_WINDOW_MS = 15000;
 // init: SDCard.shutdown() no-ops when never mounted, the display controller
 // stays in its retained deep sleep, and the ESP rail keep-alive keys on the
 // (zero) timer argument. Never returns.
+// P1-B9 zero-console rule (analysis revision 3 §5.5): the standby battery
+// phase must issue no console bytes, so the gate's own routine lines are
+// compiled out of the standby env — the diagnostic buffer records the
+// equivalent events (transitions, snapshots, exit flags). Error paths keep
+// their LOG_ERR; non-standby envs are unchanged.
+#ifdef CROSSPOINT_COMPANION_GATE_STANDBY
+#define GATE_LOGI(...) ((void)0)
+#else
+#define GATE_LOGI(...) LOG_INF("GATE", __VA_ARGS__)
+#endif
+
 static void sleepAfterGate() {
   Storage.prepareForDeepSleep();
   powerManager.startDeepSleep(gpio, false, 0);
@@ -613,7 +625,7 @@ static void sleepAfterGate() {
 static void runCompanionGate(const bool diagnostic) {
   companionidentity::StoredIdentity identity{};
   if (!companionidentity::load(identity)) {
-    LOG_INF("GATE", "No stored companion identity; the radio stays off");
+    GATE_LOGI("No stored companion identity; the radio stays off");
     companiongate::updateRunOutcome(companiongate::RunOutcome::NoIdentity);
     sleepAfterGate();
   }
@@ -631,23 +643,38 @@ static void runCompanionGate(const bool diagnostic) {
   // mirror ∩ bond: a named peer without a secure bond record cannot
   // authenticate — end the window instead of advertising pointlessly.
   if (!companionidentity::gateMayProceed(true, gate.storedIdentityBonded())) {
-    LOG_INF("GATE", "No secure bond for the stored identity; returning to sleep");
+    GATE_LOGI("No secure bond for the stored identity; returning to sleep");
     companiongate::updateRunOutcome(companiongate::RunOutcome::NoBond);
     gate.stop();
     sleepAfterGate();
   }
 
-  LOG_INF("GATE", "Gate window open for %lu ms%s", GATE_WINDOW_MS, diagnostic ? " (diagnostic USB override)" : "");
+#ifdef CROSSPOINT_COMPANION_GATE_STANDBY
+  GATE_LOGI("Gate window open (standby, cap %lu ms)", standbydiag::standbyCapMs());
+#else
+  GATE_LOGI("Gate window open for %lu ms%s", GATE_WINDOW_MS, diagnostic ? " (diagnostic USB override)" : "");
+#endif
   // P1-B2a (experimental build flag): automatic light sleep across the
   // window. The guard pairs the configure with the sample-and-restore on
   // every exit; the poll period below follows whether the window can sleep.
   companiongatepower::Guard gateWindow(gate);
 #ifdef CROSSPOINT_COMPANION_GATE_AUTOLS
-  LOG_INF("GATE", "Gate window automatic light sleep %s, poll %u ms",
-          companiongatepower::autoLightSleepEnabled() ? "on" : "OFF (control build)",
-          companiongatepower::gatePollMs(gateWindow.configured()));
+  GATE_LOGI("Gate window automatic light sleep %s, poll %u ms",
+            companiongatepower::autoLightSleepEnabled() ? "on" : "OFF (control build)",
+            companiongatepower::gatePollMs(gateWindow.configured()));
 #endif
+#ifdef CROSSPOINT_COMPANION_GATE_STANDBY
+  // P1-B9: the standby session replaces the bounded window. The loop runs
+  // until an explicit exit — power button (existing), USB plug (approved
+  // policy: USB reclaims the machine for interactive use) — or the 24 h
+  // diagnostic cap. No exit re-arms anything; the arm was consumed above.
+  // The deadline arithmetic is safe only because the gate always runs on a
+  // reset-fresh millis() (every entry follows a deep-sleep wake).
+  const unsigned long deadline = millis() + standbydiag::standbyCapMs();
+  standbydiag::sessionBegin(millis());
+#else
   const unsigned long deadline = millis() + GATE_WINDOW_MS;
+#endif
   bool sessionLogged = false;
   while (millis() < deadline) {
     gate.loop();
@@ -656,10 +683,28 @@ static void runCompanionGate(const bool diagnostic) {
       // The M3 fact must outlive the deep sleep that ends this window: every
       // exit path below (power abort, timeout) must find it already stored.
       companiongate::markSessionEstablished();
-      LOG_INF("GATE", "Session established (M3 measurement point)");
+      GATE_LOGI("Session established (M3 measurement point)");
     }
+#ifdef CROSSPOINT_COMPANION_GATE_STANDBY
+    standbydiag::tick(millis(), static_cast<uint8_t>(gate.status().state));
+    if (gpio.isUsbConnected()) {
+      GATE_LOGI("USB connected: exiting standby into the ordinary boot");
+      // The USB exit records the same RunOutcome::PowerAbort shape as the
+      // power exit (the RTC verdict keeps its layout; the true driver lives
+      // in the standby buffer's exit flag) and returns into the ordinary
+      // boot.
+      standbydiag::noteExit(standbydiag::ExitKind::Usb);
+      companiongate::updateRunOutcome(companiongate::RunOutcome::PowerAbort);
+      gateWindow.finish(companiongatepower::WindowPowerAbort);
+      gate.stop();
+      return;
+    }
+#endif
     if (gpio.isPowerButtonPhysicallyPressed()) {
-      LOG_INF("GATE", "Power pressed: aborting the gate window");
+      GATE_LOGI("Power pressed: aborting the gate window");
+#ifdef CROSSPOINT_COMPANION_GATE_STANDBY
+      standbydiag::noteExit(standbydiag::ExitKind::Power);
+#endif
       companiongate::updateRunOutcome(companiongate::RunOutcome::PowerAbort);
       gateWindow.finish(companiongatepower::WindowPowerAbort);
       gate.stop();
@@ -671,18 +716,32 @@ static void runCompanionGate(const bool diagnostic) {
     delay(companiongatepower::gatePollMs(gateWindow.configured()));
   }
 
+#ifdef CROSSPOINT_COMPANION_GATE_STANDBY
+  // The loop ended on the 24 h cap. The physical Power re-check below still
+  // allows the ordinary boot, where the buffered evidence stays recoverable,
+  // so the cap exit is noted only once the sleep handoff actually proceeds.
+#endif
   companiongate::updateRunOutcome(companiongate::RunOutcome::WindowTimeout);
   gateWindow.finish(companiongatepower::WindowTimeout);
   gate.stop();
   // Physical Power re-check immediately before the sleep handoff, to shrink
   // the race between the last poll and startDeepSleep().
   if (gpio.isPowerButtonPhysicallyPressed()) {
-    LOG_INF("GATE", "Power pressed at the sleep handoff: aborting the gate window");
+    GATE_LOGI("Power pressed at the sleep handoff: aborting the gate window");
+#ifdef CROSSPOINT_COMPANION_GATE_STANDBY
+    standbydiag::noteExit(standbydiag::ExitKind::Power);
+#endif
     companiongate::updateRunOutcome(companiongate::RunOutcome::PowerAbort);
     wakePowerReleasePending = true;
     return;
   }
-  LOG_INF("GATE", "Gate window closed; returning to sleep");
+#ifdef CROSSPOINT_COMPANION_GATE_STANDBY
+  // The 24 h cap ends in deep sleep: the RAM evidence is expected to be lost
+  // (analysis revision 3) — the session is INCONCLUSIVE unless a console is
+  // actually attached here, and no stale evidence can ever be flushed later.
+  standbydiag::noteExit(standbydiag::ExitKind::Cap);
+#endif
+  GATE_LOGI("Gate window closed; returning to sleep");
   sleepAfterGate();
 }
 
@@ -1242,6 +1301,13 @@ void loop() {
   // console is back after a wake.
   rtcclockdiag::flushBufferedLog();
 #endif
+#ifdef CROSSPOINT_COMPANION_GATE_STANDBY
+  // P1-B9: retained standby evidence is announced once per boot and read
+  // back only through the operator's SBDS serial commands (review C1): the
+  // dump is repeatable and never destroys the RAM evidence. A diagnostic-cap
+  // exit discarded the buffer, so nothing is announced after a cap.
+  standbydiag::notifyRetained();
+#endif
   if (logSerial.available() > 0) {
     String line = logSerial.readStringUntil('\n');
     if (line.startsWith("CMD:")) {
@@ -1289,6 +1355,12 @@ void loop() {
         // P1-B2a: gate-window sleep accounting and a PM-lock snapshot.
         companiongatepower::handleCommand(cmd.c_str());
       }
+#endif
+#ifdef CROSSPOINT_COMPANION_GATE_STANDBY
+      // P1-B9 experimental readback: "SBDS" (repeatable dump), "SBDSACK
+      // <crc32>" (clear on a CRC match), "SBDSCLR" (explicit discard). Only
+      // reachable from an attached terminal; handled by the diag module.
+      standbydiag::handleCommand(cmd.c_str());
 #endif
 #ifdef CROSSPOINT_PM_ONLY_DIAG
       if (cmd == "PMSTAT") {
