@@ -19,57 +19,65 @@ namespace {
 // the x4c-bleautols-standby env. No heap allocation, no other env carries it.
 Buffer buffer;
 
-// Seconds since the session started (unsigned arithmetic absorbs millis()
-// wrap; the session is bounded by the 24 h cap, far below the 49.7 d wrap).
+// Milliseconds since the session started (session-relative, unsigned
+// arithmetic absorbs a millis() wrap; the 24 h cap keeps the value far
+// inside u32 — pinned by static_assert in the header).
 unsigned long sessionStartMs = 0;
 bool sessionActive = false;
 
 uint8_t lastRadioState = kRadioStopped;
 bool lastSampled = false;
 companiongatepower::SleepSample lastSample{};
-uint32_t lastSampleSec = 0;
+uint32_t lastSampleMs = 0;
 unsigned long lastPmMs = 0;
 unsigned long lastHeartbeatMs = 0;
 bool exitNoted = false;
 
 constexpr unsigned long kPmPeriodMs = 5UL * 60 * 1000;
 constexpr unsigned long kHeartbeatPeriodMs = 60UL * 1000;
-constexpr unsigned long kStandbyCapMs = 24UL * 60 * 60 * 1000;
 
-uint32_t sessionSec(const unsigned long nowMs) { return static_cast<uint32_t>((nowMs - sessionStartMs) / 1000); }
+uint32_t sessionMs(const unsigned long nowMs) { return sessionRelMs(nowMs, sessionStartMs); }
 
-// One closed interval: capture the exit sample, classify the span by the
-// radio state that held during it, accumulate the wall time and (with valid
-// samples) the 64-bit sleep counters, and store the record. A capture or
-// counter failure keeps the span in its state class with samplesValid=0 —
-// its wall time stays in that class's measurement population, its sleep is
-// not counted, so residency and coverage can only drop (C1 blocker 1). A
-// transition at the span's end boundary does not matter: the
-// sample-at-both-ends contract tags the span with the state that held inside
-// it (analysis revision 3 §5.2).
-void closeInterval(const unsigned long nowMs, const bool transitionDriven) {
-  const uint32_t startSec = lastSampleSec;
-  const uint32_t endSec = sessionSec(nowMs);
-  const uint32_t wallSec = endSec > startSec ? endSec - startSec : 0;
-
+// One closed interval. ORDER MATTERS: the PM sample is captured FIRST and the
+// boundary timestamp is taken immediately AFTER the capture returns. The
+// counters are read during the dump, so a boundary timestamped before the
+// capture would let the sleep delta include time beyond the recorded end
+// (the timing bias family behind the C2 101.76% failure). With the timestamp
+// after the capture, each interval's sleep span [capture_i, capture_{i+1}]
+// sits inside the wall span [ts_i, ts_{i+1}] up to the symmetric dump-duration
+// offset of both ends; any residual violation is caught by
+// intervalConsistent() and demoted to an unmeasured span (wall counted, sleep
+// not), plus an error record for visibility — never clamped, never PASS.
+void closeInterval(const bool transitionDriven) {
   companiongatepower::SleepSample sample{};
   const bool sampled = companiongatepower::captureSleepSample(sample);
+  const uint32_t endMs = sessionMs(millis());
+  const uint32_t startMs = lastSampleMs;
+  const uint32_t wallMs = endMs > startMs ? endMs - startMs : 0;
+  const IntervalClass cls = classifyInterval(lastRadioState);
+
   bool samplesValid = false;
-  IntervalTotals totals{wallSec, 0, 0, 0};
+  IntervalTotals totals{wallMs, 0, 0, 0};
   if (lastSampled && sampled) {
     companiongatepower::WindowDelta delta{};
     if (companiongatepower::windowDelta(lastSample, sample, delta)) {
-      totals = IntervalTotals{wallSec, static_cast<uint32_t>(delta.entries), static_cast<uint32_t>(delta.rejects),
-                              delta.modeUs};
-      samplesValid = true;
+      if (intervalConsistent(wallMs, delta.modeUs)) {
+        totals = IntervalTotals{wallMs, static_cast<uint32_t>(delta.entries), static_cast<uint32_t>(delta.rejects),
+                                delta.modeUs};
+        samplesValid = true;
+      } else {
+        // Physically impossible for aligned sample points: sampling
+        // uncertainty, not a zero-sleep span. The wall time still counts;
+        // the sleep does not (conservative), and the operator sees why.
+        (void)appendError(buffer, endMs, kErrSampleBeyondWall, static_cast<uint16_t>(cls), wallMs);
+      }
     }
   }
-  const IntervalClass cls = classifyInterval(lastRadioState);
   accumulateInterval(buffer, cls, totals, samplesValid);
 
   PmRecord record;
-  record.startSec = startSec;
-  record.endSec = endSec;
+  record.startMs = startMs;
+  record.endMs = endMs;
   record.entriesDelta = totals.entriesDelta;
   record.rejectsDelta = totals.rejectsDelta;
   record.modeUsDelta = totals.modeUsDelta;
@@ -79,11 +87,8 @@ void closeInterval(const unsigned long nowMs, const bool transitionDriven) {
 
   lastSample = sample;
   lastSampled = sampled;
-  lastSampleSec = endSec;
-  lastPmMs = nowMs;
+  lastSampleMs = endMs;
 }
-
-void sampleNow(const unsigned long nowMs) { closeInterval(nowMs, false); }
 
 const char* stateName(const uint8_t state) {
   switch (state) {
@@ -137,6 +142,11 @@ const char* exitKindName(const uint16_t headerFlags) {
   return "none";
 }
 
+// Session-relative milliseconds printed as seconds with three decimals.
+void printSec(char* out, const size_t size, const uint32_t ms) {
+  snprintf(out, size, "%u.%03u", static_cast<unsigned>(ms / 1000), static_cast<unsigned>(ms % 1000));
+}
+
 // The once-per-boot readback: dump without destroying, counts and a CRC-32 to
 // detect truncation, and a clear only on operator command (C1 blocker 2).
 void dumpEvidence() {
@@ -166,19 +176,21 @@ void dumpEvidence() {
   // Two separate results (C1 correction 1): the measured residency and the
   // BLE clock validity. The overall line names their conjunction, so a
   // MAIN_XTAL fallback can never read as B9 acceptance.
-  const uint64_t wall = classSeconds(buffer, IntervalClass::Advertising);
-  uint64_t covered = 0, advertisingSleepUs = 0;
-  storedAdvertisingEvidence(buffer, covered, advertisingSleepUs);
-  const uint64_t residency = residencyPermyriad(advertisingSleepUs, wall);
+  const uint64_t wallMs = classMillis(buffer, IntervalClass::Advertising);
+  uint64_t coveredMs = 0, advertisingSleepUs = 0;
+  storedAdvertisingEvidence(buffer, coveredMs, advertisingSleepUs);
+  const uint64_t residency = residencyPermyriad(advertisingSleepUs, wallMs);
   const uint64_t coverage = advertisingCoveragePermyriad(buffer);
   const Verdict residencyVerdict = advertisingResidencyVerdict(buffer);
+  char wallText[16], coveredText[16];
+  printSec(wallText, sizeof(wallText), static_cast<uint32_t>(wallMs));
+  printSec(coveredText, sizeof(coveredText), static_cast<uint32_t>(coveredMs));
   logSerial.printf(
-      "SBDS| residency: %s advWall=%llu s measured=%llu s sleepUs=%lld residency=%llu.%02llu%% "
+      "SBDS| residency: %s advWall=%s s measured=%s s sleepUs=%lld residency=%llu.%02llu%% "
       "coverage=%llu.%02llu%%\n",
-      verdictName(residencyVerdict), static_cast<unsigned long long>(wall), static_cast<unsigned long long>(covered),
-      static_cast<long long>(advertisingSleepUs), static_cast<unsigned long long>(residency / 100),
-      static_cast<unsigned long long>(residency % 100), static_cast<unsigned long long>(coverage / 100),
-      static_cast<unsigned long long>(coverage % 100));
+      verdictName(residencyVerdict), wallText, coveredText, static_cast<long long>(advertisingSleepUs),
+      static_cast<unsigned long long>(residency / 100), static_cast<unsigned long long>(residency % 100),
+      static_cast<unsigned long long>(coverage / 100), static_cast<unsigned long long>(coverage % 100));
   const StartupRecord startup = readStartup(buffer);
   const ClockVerdict clock = clockVerdict(buffer);
   logSerial.printf("SBDS| clock: lpclk=%u (%s) verdict=%s crystal=%u\n", static_cast<unsigned>(startup.lpclk),
@@ -186,10 +198,12 @@ void dumpEvidence() {
   logSerial.printf("SBDS| overall: %s (PASS requires residency PASS and lpclk=EXT_32K_XTAL)\n",
                    verdictName(standbyAcceptanceVerdict(buffer)));
 
-  logSerial.printf("SBDS| session end kind=%s advSec=%u connSec=%u otherSec=%u entries=%llu sleepUs=%lld\n",
-                   exitKindName(flags(buffer)), static_cast<unsigned>(classSeconds(buffer, IntervalClass::Advertising)),
-                   static_cast<unsigned>(classSeconds(buffer, IntervalClass::Connected)),
-                   static_cast<unsigned>(classSeconds(buffer, IntervalClass::Other)),
+  char advText[16], connText[16], otherText[16];
+  printSec(advText, sizeof(advText), classMillis(buffer, IntervalClass::Advertising));
+  printSec(connText, sizeof(connText), classMillis(buffer, IntervalClass::Connected));
+  printSec(otherText, sizeof(otherText), classMillis(buffer, IntervalClass::Other));
+  logSerial.printf("SBDS| session end kind=%s adv=%s s conn=%s s other=%s s entries=%llu sleepUs=%lld\n",
+                   exitKindName(flags(buffer)), advText, connText, otherText,
                    static_cast<unsigned long long>(entriesTotal(buffer)), static_cast<long long>(sleepUsTotal(buffer)));
 
   PmValidity counted{};
@@ -201,38 +215,47 @@ void dumpEvidence() {
   const uint32_t snapshotCount = count(buffer, kHdrSnapshotCount);
   for (uint32_t i = 0; i < snapshotCount; ++i) {
     const uint8_t* p = buffer.bytes + kSnapshotOffset + i * kSnapshotSize;
-    logSerial.printf("SBDS|SNAP[%u] %u heap=%u largest=%u kind=%s\n", static_cast<unsigned>(i + 1),
-                     static_cast<unsigned>(loadLE32(p)), static_cast<unsigned>(loadLE32(p + 4)),
-                     static_cast<unsigned>(loadLE32(p + 8)), p[12] == 2 ? "exit" : "start");
+    char when[16];
+    printSec(when, sizeof(when), loadLE32(p));
+    logSerial.printf("SBDS|SNAP[%u] %s s heap=%u largest=%u kind=%s\n", static_cast<unsigned>(i + 1), when,
+                     static_cast<unsigned>(loadLE32(p + 4)), static_cast<unsigned>(loadLE32(p + 8)),
+                     p[12] == 2 ? "exit" : "start");
   }
   const uint32_t heartbeatCount = count(buffer, kHdrHeartbeatCount);
   for (uint32_t i = 0; i < heartbeatCount; ++i) {
     const uint8_t* p = buffer.bytes + kHeartbeatOffset + i * kHeartbeatSize;
-    logSerial.printf("SBDS|HB[%u] %u %s heap=%u largest=%u\n", static_cast<unsigned>(i + 1),
-                     static_cast<unsigned>(loadLE32(p)), stateName(p[4]), static_cast<unsigned>(loadLE32(p + 8)),
-                     static_cast<unsigned>(loadLE32(p + 12)));
+    char when[16];
+    printSec(when, sizeof(when), loadLE32(p));
+    logSerial.printf("SBDS|HB[%u] %s s %s heap=%u largest=%u\n", static_cast<unsigned>(i + 1), when, stateName(p[4]),
+                     static_cast<unsigned>(loadLE32(p + 8)), static_cast<unsigned>(loadLE32(p + 12)));
   }
   const uint32_t transitionCount = count(buffer, kHdrTransitionCount);
   for (uint32_t i = 0; i < transitionCount; ++i) {
     const uint8_t* p = buffer.bytes + kTransitionOffset + i * kTransitionSize;
-    logSerial.printf("SBDS|EVT[%u] %u %s->%s\n", static_cast<unsigned>(i + 1), static_cast<unsigned>(loadLE32(p)),
-                     stateName(p[4]), stateName(p[5]));
+    char when[16];
+    printSec(when, sizeof(when), loadLE32(p));
+    logSerial.printf("SBDS|EVT[%u] %s s %s->%s\n", static_cast<unsigned>(i + 1), when, stateName(p[4]),
+                     stateName(p[5]));
   }
   const uint32_t errorCount = count(buffer, kHdrErrorCount);
   for (uint32_t i = 0; i < errorCount; ++i) {
     const uint8_t* p = buffer.bytes + kErrorOffset + i * kErrorSize;
-    logSerial.printf("SBDS|ERR[%u] %u code=%u ctx=%u aux=%u\n", static_cast<unsigned>(i + 1),
-                     static_cast<unsigned>(loadLE32(p)), static_cast<unsigned>(loadLE16(p + 4)),
-                     static_cast<unsigned>(loadLE16(p + 6)), static_cast<unsigned>(loadLE32(p + 8)));
+    char when[16];
+    printSec(when, sizeof(when), loadLE32(p));
+    logSerial.printf("SBDS|ERR[%u] %s s code=%u ctx=%u aux=%u\n", static_cast<unsigned>(i + 1), when,
+                     static_cast<unsigned>(loadLE16(p + 4)), static_cast<unsigned>(loadLE16(p + 6)),
+                     static_cast<unsigned>(loadLE32(p + 8)));
   }
   const uint32_t pmCounts[2] = {count(buffer, kHdrPeriodicPmCount), count(buffer, kHdrTransitionPmCount)};
   for (int bucket = 0; bucket < 2; ++bucket) {
     const uint8_t* base = bucket == 0 ? buffer.bytes + kPeriodicPmOffset : buffer.bytes + kTransitionPmOffset;
     for (uint32_t i = 0; i < pmCounts[bucket]; ++i) {
       const uint8_t* p = base + i * kPmSampleSize;
-      logSerial.printf("SBDS|PM[%u] %c %u-%u cls=%u v=%u ent=%u rej=%u us=%lld\n", static_cast<unsigned>(i + 1),
-                       bucket == 0 ? 'P' : 'T', static_cast<unsigned>(loadLE32(p)),
-                       static_cast<unsigned>(loadLE32(p + 4)), static_cast<unsigned>(p[24]),
+      char startText[16], endText[16];
+      printSec(startText, sizeof(startText), loadLE32(p));
+      printSec(endText, sizeof(endText), loadLE32(p + 4));
+      logSerial.printf("SBDS|PM[%u] %c %s-%s s cls=%u v=%u ent=%u rej=%u us=%lld\n", static_cast<unsigned>(i + 1),
+                       bucket == 0 ? 'P' : 'T', startText, endText, static_cast<unsigned>(p[24]),
                        static_cast<unsigned>(p[25]), static_cast<unsigned>(loadLE32(p + 8)),
                        static_cast<unsigned>(loadLE32(p + 12)), static_cast<long long>(loadLE64(p + 16)));
     }
@@ -259,7 +282,7 @@ static_assert(static_cast<uint8_t>(blecompanion::RadioState::Connected) == kRadi
 // measurement (analysis revision 3, §5.3b).
 uint8_t readLpclkSource() { return static_cast<uint8_t>(esp_bt_get_lpclk_src()); }
 
-unsigned long standbyCapMs() { return kStandbyCapMs; }
+unsigned long standbyCapMs() { return kSessionCapMs; }
 
 void sessionBegin(const unsigned long nowMs) {
   reset(buffer);
@@ -267,7 +290,7 @@ void sessionBegin(const unsigned long nowMs) {
   sessionActive = true;
   exitNoted = false;
   lastRadioState = kRadioStopped;
-  lastSampleSec = 0;
+  lastSampleMs = 0;
   lastPmMs = nowMs;
   lastHeartbeatMs = nowMs;
   const uint8_t lpclk = readLpclkSource();
@@ -289,16 +312,19 @@ void sessionBegin(const unsigned long nowMs) {
 void tick(const unsigned long nowMs, const uint8_t radioState) {
   if (!sessionActive) return;
   if (radioState != lastRadioState) {
-    closeInterval(nowMs, /*transitionDriven=*/true);
-    appendTransition(buffer, sessionSec(nowMs), lastRadioState, radioState);
+    closeInterval(/*transitionDriven=*/true);
+    appendTransition(buffer, sessionMs(nowMs), lastRadioState, radioState);
     lastRadioState = radioState;
   }
   if (nowMs - lastHeartbeatMs >= kHeartbeatPeriodMs) {
     lastHeartbeatMs = nowMs;
-    appendHeartbeat(buffer, sessionSec(nowMs), radioState, heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
+    appendHeartbeat(buffer, sessionMs(nowMs), radioState, heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
                     heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
   }
-  if (nowMs - lastPmMs >= kPmPeriodMs) sampleNow(nowMs);
+  if (nowMs - lastPmMs >= kPmPeriodMs) {
+    lastPmMs = nowMs;
+    closeInterval(false);
+  }
 }
 
 void noteExit(const ExitKind kind) {
@@ -306,8 +332,8 @@ void noteExit(const ExitKind kind) {
   exitNoted = true;
   sessionActive = false;
   // The final PM capture runs while the Guard's light sleep is still on.
-  closeInterval(millis(), false);
-  (void)appendSnapshot(buffer, sessionSec(millis()), heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
+  closeInterval(false);
+  (void)appendSnapshot(buffer, sessionMs(millis()), heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
                        heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT), true);
   switch (kind) {
     case ExitKind::Power:

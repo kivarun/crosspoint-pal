@@ -2,14 +2,18 @@
 
 // P1-B9 continuous standby diagnostics (experimental): the pure record format,
 // interval attribution, accounting and acceptance logic for the standby soak
-// (analysis revision 3, corrected by review C1). No device headers: host tests
-// include this file directly. The device side — the static buffer instance, PM
-// sampling, the radio-state feed and the operator-controlled readback — lives
-// in the .cpp behind CROSSPOINT_COMPANION_GATE_STANDBY.
+// (analysis revision 3; corrected by reviews C1 and C2). No device headers:
+// host tests include this file directly. The device side — the static buffer
+// instance, PM sampling, the radio-state feed and the operator-controlled
+// readback — lives in the .cpp behind CROSSPOINT_COMPANION_GATE_STANDBY.
 //
 // Measurement contract (revision 3, as corrected):
 // - authoritative duration is the 64-bit running total in the header, never
 //   the wrapped 32-bit GatePowerRecord.sleepUs;
+// - every timestamp is session-relative MILLISECONDS (format version 3): the
+//   C2 hardware failure showed whole-second boundary truncation producing a
+//   101.76% "residency" PASS on a subsecond interval; millisecond boundaries
+//   aligned with the actual PM sample points keep wall time >= sleep;
 // - a span is attributed to the radio state that held during it, whether or
 //   not its PM capture succeeded: an invalid capture keeps its state class
 //   (samplesValid=0), so its wall time stays in that class's measurement
@@ -17,6 +21,9 @@
 //   disappearing from the denominator (C1 blocker 1);
 // - residency is judged over the advertising class wall time, and the >=90%
 //   criterion requires >=98% valid-sample coverage of that wall time;
+// - measurements that are physically impossible (sleep beyond the wall time,
+//   coverage beyond the wall time) are classified INCONCLUSIVE, never
+//   clamped and never a PASS (C2);
 // - the residency verdict and the BLE clock-source verdict are separate
 //   results: only EXT_32K_XTAL validates the electrical claim, and a
 //   MAIN_XTAL fallback can never read as overall acceptance (C1 correction 1);
@@ -29,7 +36,8 @@
 namespace companionstandbydiag {
 
 // --- Record geometry ---------------------------------------------------------
-// PM sample packed fields: 4+4+4+4+8+1+1 = 26 bytes.
+// PM sample packed fields: 4+4+4+4+8+1+1 = 26 bytes. The first two fields are
+// session-relative MILLISECONDS since version 3 (seconds before that).
 inline constexpr size_t kPmSampleSize = 26;
 inline constexpr size_t kHeartbeatSize = 16;
 inline constexpr size_t kTransitionSize = 8;
@@ -53,6 +61,11 @@ inline constexpr uint32_t kSnapshotCapacity = 4;
 // The strict static budget (analysis revision 3): 40 KiB.
 inline constexpr size_t kBufferBudget = 40960;
 
+// The session is capped at 24 h; session-relative milliseconds must fit u32
+// across the whole cap, with wrap absorbed by unsigned subtraction.
+inline constexpr uint32_t kSessionCapMs = 24UL * 60 * 60 * 1000;
+static_assert(kSessionCapMs < 0xFFFFFFFFu, "session-relative milliseconds must fit u32 across the 24 h cap");
+
 // Region offsets (header first, then the record classes).
 inline constexpr size_t kPeriodicPmOffset = kHeaderSize;
 inline constexpr size_t kTransitionPmOffset = kPeriodicPmOffset + kPeriodicPmCapacity * kPmSampleSize;
@@ -69,9 +82,13 @@ static_assert(kBufferNeeded <= kBufferBudget, "standby diagnostic buffer exceeds
 static_assert(kPeriodicPmCapacity == 288 && kHeartbeatCapacity == 1440, "24 h cadence contract");
 
 inline constexpr uint32_t kBufferMagic = 0x53424453u;  // 'SBDS'
-inline constexpr uint16_t kBufferVersion = 2;
+// v2: state-class attribution with a separate validity bit, snapshot records,
+// CRC readback. v3: every timestamp is session-relative milliseconds (same
+// record sizes, different field semantics — hence the version bump).
+inline constexpr uint16_t kBufferVersion = 3;
 
-// Header field offsets inside the 84-byte header.
+// Header field offsets inside the 84-byte header. The three class wall-time
+// fields are MILLISECONDS since version 3.
 inline constexpr size_t kHdrMagic = 0;
 inline constexpr size_t kHdrVersion = 4;
 inline constexpr size_t kHdrFlags = 6;
@@ -87,9 +104,9 @@ inline constexpr size_t kHdrDroppedTransition = 40;
 inline constexpr size_t kHdrDroppedError = 44;
 inline constexpr size_t kHdrEntriesTotal = 48;  // u64
 inline constexpr size_t kHdrSleepUsTotal = 56;  // i64
-inline constexpr size_t kHdrAdvertisingSec = 64;
-inline constexpr size_t kHdrConnectedSec = 68;
-inline constexpr size_t kHdrOtherSec = 72;
+inline constexpr size_t kHdrAdvertisingMs = 64;
+inline constexpr size_t kHdrConnectedMs = 68;
+inline constexpr size_t kHdrOtherMs = 72;
 inline constexpr size_t kHdrSnapshotCount = 76;
 inline constexpr size_t kHdrDroppedSnapshot = 80;
 
@@ -98,6 +115,9 @@ inline constexpr uint16_t kFlagTransitionOverflow = 1u << 0;  // the transition 
 inline constexpr uint16_t kFlagClockRecorded = 1u << 1;       // the LPCLK source was read and stored
 inline constexpr uint16_t kFlagExitPower = 1u << 2;
 inline constexpr uint16_t kFlagExitUsb = 1u << 3;
+
+// Error record codes.
+inline constexpr uint16_t kErrSampleBeyondWall = 1;  // a valid delta slept longer than its wall time
 
 // Interval classes (record tag values are stable across builds). The retired
 // "Mixed" class is gone: an invalid capture keeps its state class and is
@@ -185,14 +205,14 @@ inline uint16_t flags(const Buffer& b) { return loadLE16(b.bytes + kHdrFlags); }
 inline void setFlags(Buffer& b, const uint16_t mask) { storeLE16(b.bytes + kHdrFlags, flags(b) | mask); }
 inline uint64_t entriesTotal(const Buffer& b) { return loadLE64(b.bytes + kHdrEntriesTotal); }
 inline int64_t sleepUsTotal(const Buffer& b) { return static_cast<int64_t>(loadLE64(b.bytes + kHdrSleepUsTotal)); }
-inline uint32_t classSeconds(const Buffer& b, const IntervalClass cls) {
+inline uint32_t classMillis(const Buffer& b, const IntervalClass cls) {
   switch (cls) {
     case IntervalClass::Advertising:
-      return loadLE32(b.bytes + kHdrAdvertisingSec);
+      return loadLE32(b.bytes + kHdrAdvertisingMs);
     case IntervalClass::Connected:
-      return loadLE32(b.bytes + kHdrConnectedSec);
+      return loadLE32(b.bytes + kHdrConnectedMs);
     default:
-      return loadLE32(b.bytes + kHdrOtherSec);
+      return loadLE32(b.bytes + kHdrOtherMs);
   }
 }
 
@@ -204,6 +224,12 @@ inline uint32_t totalRecords(const Buffer& b) {
 // CRC over the whole used region (header + record areas): deterministic for a
 // finished session, changes with any recorded byte.
 inline uint32_t bufferCrc32(const Buffer& b) { return crc32(b.bytes, kBufferNeeded); }
+
+// Session-relative milliseconds: unsigned subtraction absorbs a millis()
+// wrap, and the 24 h cap keeps the result far inside u32 (pinned above).
+inline uint32_t sessionRelMs(const unsigned long nowMs, const unsigned long sessionStartMs) {
+  return static_cast<uint32_t>(nowMs - sessionStartMs);
+}
 
 // --- Interval attribution -----------------------------------------------------
 // The device side samples at every state transition and at the periodic
@@ -224,11 +250,12 @@ inline IntervalClass classifyInterval(const uint8_t stateAtSampleStart) {
 }
 
 // Wall time and 64-bit sleep accounting for one closed interval. Wall time is
-// always accumulated into the span's state class; the sleep counters move only
-// with valid samples, so an invalid span lowers both coverage and residency
-// (conservative) instead of fabricating sleep or leaving the population.
+// always accumulated into the span's state class (milliseconds, never
+// truncated); the sleep counters move only with valid samples, so an invalid
+// span lowers both coverage and residency (conservative) instead of
+// fabricating sleep or leaving the population.
 struct IntervalTotals {
-  uint32_t wallSec = 0;
+  uint32_t wallMs = 0;
   uint32_t entriesDelta = 0;
   uint32_t rejectsDelta = 0;
   int64_t modeUsDelta = 0;
@@ -239,26 +266,35 @@ inline void accumulateInterval(Buffer& b, const IntervalClass cls, const Interva
   size_t offset;
   switch (cls) {
     case IntervalClass::Advertising:
-      offset = kHdrAdvertisingSec;
+      offset = kHdrAdvertisingMs;
       break;
     case IntervalClass::Connected:
-      offset = kHdrConnectedSec;
+      offset = kHdrConnectedMs;
       break;
     default:
-      offset = kHdrOtherSec;
+      offset = kHdrOtherMs;
       break;
   }
-  storeLE32(b.bytes + offset, loadLE32(b.bytes + offset) + in.wallSec);
+  storeLE32(b.bytes + offset, loadLE32(b.bytes + offset) + in.wallMs);
   if (samplesValid) {
     storeLE64(b.bytes + kHdrEntriesTotal, entriesTotal(b) + in.entriesDelta);
     storeLE64(b.bytes + kHdrSleepUsTotal, static_cast<uint64_t>(sleepUsTotal(b) + in.modeUsDelta));
   }
 }
 
+// A valid delta's sleep cannot exceed the wall time it is attributed to: the
+// counters are read at the sample points that also bound the wall span. A
+// violation means sampling uncertainty (the counter read lagged the boundary
+// timestamp by more than the span itself) — the span must not be measured.
+// Pure so the device closeInterval and the host tests share one rule.
+inline bool intervalConsistent(const uint32_t wallMs, const int64_t sleepUsDelta) {
+  return sleepUsDelta <= static_cast<int64_t>(wallMs) * 1000;
+}
+
 // --- Record appends (bounded, drop-counting) ---------------------------------
 struct PmRecord {
-  uint32_t startSec = 0;
-  uint32_t endSec = 0;
+  uint32_t startMs = 0;
+  uint32_t endMs = 0;
   uint32_t entriesDelta = 0;
   uint32_t rejectsDelta = 0;
   int64_t modeUsDelta = 0;
@@ -267,8 +303,8 @@ struct PmRecord {
 };
 
 inline void encodePmSample(uint8_t* p, const PmRecord& r) {
-  storeLE32(p + 0, r.startSec);
-  storeLE32(p + 4, r.endSec);
+  storeLE32(p + 0, r.startMs);
+  storeLE32(p + 4, r.endMs);
   storeLE32(p + 8, r.entriesDelta);
   storeLE32(p + 12, r.rejectsDelta);
   storeLE64(p + 16, static_cast<uint64_t>(r.modeUsDelta));
@@ -291,7 +327,7 @@ inline bool appendPmSample(Buffer& b, const PmRecord& r, const bool transitionDr
   return true;
 }
 
-inline bool appendHeartbeat(Buffer& b, const uint32_t sec, const uint8_t radioState, const uint32_t freeHeap,
+inline bool appendHeartbeat(Buffer& b, const uint32_t ms, const uint8_t radioState, const uint32_t freeHeap,
                             const uint32_t largestBlock) {
   const uint32_t index = loadLE32(b.bytes + kHdrHeartbeatCount);
   if (index >= kHeartbeatCapacity) {
@@ -299,7 +335,7 @@ inline bool appendHeartbeat(Buffer& b, const uint32_t sec, const uint8_t radioSt
     return false;
   }
   uint8_t* p = b.bytes + kHeartbeatOffset + index * kHeartbeatSize;
-  storeLE32(p + 0, sec);
+  storeLE32(p + 0, ms);
   p[4] = radioState;
   p[5] = 0;
   storeLE32(p + 8, freeHeap);
@@ -308,7 +344,7 @@ inline bool appendHeartbeat(Buffer& b, const uint32_t sec, const uint8_t radioSt
   return true;
 }
 
-inline bool appendTransition(Buffer& b, const uint32_t sec, const uint8_t fromState, const uint8_t toState) {
+inline bool appendTransition(Buffer& b, const uint32_t ms, const uint8_t fromState, const uint8_t toState) {
   const uint32_t index = loadLE32(b.bytes + kHdrTransitionCount);
   if (index >= kTransitionCapacity) {
     storeLE32(b.bytes + kHdrDroppedTransition, loadLE32(b.bytes + kHdrDroppedTransition) + 1);
@@ -316,7 +352,7 @@ inline bool appendTransition(Buffer& b, const uint32_t sec, const uint8_t fromSt
     return false;
   }
   uint8_t* p = b.bytes + kTransitionOffset + index * kTransitionSize;
-  storeLE32(p + 0, sec);
+  storeLE32(p + 0, ms);
   p[4] = fromState;
   p[5] = toState;
   p[6] = 0;
@@ -325,15 +361,14 @@ inline bool appendTransition(Buffer& b, const uint32_t sec, const uint8_t fromSt
   return true;
 }
 
-inline bool appendError(Buffer& b, const uint32_t sec, const uint16_t code, const uint16_t context,
-                        const uint32_t aux) {
+inline bool appendError(Buffer& b, const uint32_t ms, const uint16_t code, const uint16_t context, const uint32_t aux) {
   const uint32_t index = loadLE32(b.bytes + kHdrErrorCount);
   if (index >= kErrorCapacity) {
     storeLE32(b.bytes + kHdrDroppedError, loadLE32(b.bytes + kHdrDroppedError) + 1);
     return false;
   }
   uint8_t* p = b.bytes + kErrorOffset + index * kErrorSize;
-  storeLE32(p + 0, sec);
+  storeLE32(p + 0, ms);
   storeLE16(p + 4, code);
   storeLE16(p + 6, context);
   storeLE32(p + 8, aux);
@@ -370,7 +405,7 @@ inline StartupRecord readStartup(const Buffer& b) {
 // Heap snapshot at the actual session boundaries (C1 correction 2): one at
 // sessionBegin, one at noteExit, independent of the 1-minute heartbeat ticks.
 // Tag: 1 = session start, 2 = session exit.
-inline bool appendSnapshot(Buffer& b, const uint32_t sec, const uint32_t freeHeap, const uint32_t largestBlock,
+inline bool appendSnapshot(Buffer& b, const uint32_t ms, const uint32_t freeHeap, const uint32_t largestBlock,
                            const bool atExit) {
   const uint32_t index = loadLE32(b.bytes + kHdrSnapshotCount);
   if (index >= kSnapshotCapacity) {
@@ -378,7 +413,7 @@ inline bool appendSnapshot(Buffer& b, const uint32_t sec, const uint32_t freeHea
     return false;
   }
   uint8_t* p = b.bytes + kSnapshotOffset + index * kSnapshotSize;
-  storeLE32(p + 0, sec);
+  storeLE32(p + 0, ms);
   storeLE32(p + 4, freeHeap);
   storeLE32(p + 8, largestBlock);
   p[12] = atExit ? 2 : 1;
@@ -390,11 +425,13 @@ inline bool appendSnapshot(Buffer& b, const uint32_t sec, const uint32_t freeHea
 }
 
 // --- Acceptance logic ---------------------------------------------------------
-// Residency in per-ten-thousand: sleepUs over the class wall time. Computed
-// in 64-bit; no floating point, no current inference.
-inline uint64_t residencyPermyriad(const uint64_t sleepUs, const uint64_t wallSec) {
-  if (wallSec == 0) return 0;
-  return sleepUs / (wallSec * 100);  // sleepUs / (wallSec * 1e6) * 1e4
+// Residency in per-ten-thousand: sleepUs over the class wall time in
+// milliseconds, computed entirely in 64-bit integers (no floating point, no
+// current inference). sleepUs <= 8.64e10 and wallMs*1000 <= 8.64e10 across
+// the 24 h cap, so both products stay far inside u64.
+inline uint64_t residencyPermyriad(const uint64_t sleepUs, const uint64_t wallMs) {
+  if (wallMs == 0) return 0;
+  return sleepUs * 10000 / (wallMs * 1000);
 }
 
 // Wall-time coverage of the stored VALID advertising samples against the
@@ -406,14 +443,14 @@ inline uint64_t residencyPermyriad(const uint64_t sleepUs, const uint64_t wallSe
 // header carries only the overall 64-bit total), so a dropped or invalid
 // record lowers both coverage and measured sleep — conservative, never a
 // false PASS.
-inline void storedAdvertisingEvidence(const Buffer& b, uint64_t& coveredSec, uint64_t& sleepUs) {
-  coveredSec = 0;
+inline void storedAdvertisingEvidence(const Buffer& b, uint64_t& coveredMs, uint64_t& sleepUs) {
+  coveredMs = 0;
   sleepUs = 0;
   const uint32_t periodic = count(b, kHdrPeriodicPmCount);
   for (uint32_t i = 0; i < periodic; ++i) {
     const uint8_t* p = b.bytes + kPeriodicPmOffset + i * kPmSampleSize;
     if (p[24] == static_cast<uint8_t>(IntervalClass::Advertising) && p[25] != 0) {
-      coveredSec += static_cast<uint64_t>(loadLE32(p + 4)) - loadLE32(p);
+      coveredMs += static_cast<uint64_t>(loadLE32(p + 4)) - loadLE32(p);
       sleepUs += static_cast<uint64_t>(loadLE64(p + 16));
     }
   }
@@ -421,13 +458,13 @@ inline void storedAdvertisingEvidence(const Buffer& b, uint64_t& coveredSec, uin
   for (uint32_t i = 0; i < transitioned; ++i) {
     const uint8_t* p = b.bytes + kTransitionPmOffset + i * kPmSampleSize;
     if (p[24] == static_cast<uint8_t>(IntervalClass::Advertising) && p[25] != 0) {
-      coveredSec += static_cast<uint64_t>(loadLE32(p + 4)) - loadLE32(p);
+      coveredMs += static_cast<uint64_t>(loadLE32(p + 4)) - loadLE32(p);
       sleepUs += static_cast<uint64_t>(loadLE64(p + 16));
     }
   }
 }
 
-inline uint64_t storedAdvertisingSec(const Buffer& b) {
+inline uint64_t storedAdvertisingMs(const Buffer& b) {
   uint64_t covered = 0, sleep = 0;
   storedAdvertisingEvidence(b, covered, sleep);
   return covered;
@@ -435,9 +472,9 @@ inline uint64_t storedAdvertisingSec(const Buffer& b) {
 
 // Coverage in per-ten-thousand of the advertising class wall time.
 inline uint64_t advertisingCoveragePermyriad(const Buffer& b) {
-  const uint64_t wall = classSeconds(b, IntervalClass::Advertising);
+  const uint64_t wall = classMillis(b, IntervalClass::Advertising);
   if (wall == 0) return 0;
-  return storedAdvertisingSec(b) * 10000 / wall;
+  return storedAdvertisingMs(b) * 10000 / wall;
 }
 
 // Sample-validity census of the recovered evidence (C1 correction 4): how
@@ -474,18 +511,22 @@ inline void pmValidity(const Buffer& b, PmValidity& out) {
 // The residency verdict judges ONLY the measured advertising residency: a
 // valid measurement below 90% is a FAIL; insufficient measured evidence
 // (no advertising wall time, coverage below 98%, an overflowed transition
-// history) is INCONCLUSIVE — never a false PASS. The BLE clock-source
-// validity is a separate verdict below (C1 correction 1).
+// history) is INCONCLUSIVE — never a false PASS. A physically impossible
+// measurement (sleep or valid coverage beyond the wall time — residual
+// sampling uncertainty) is INCONCLUSIVE, never clamped (C2). The BLE
+// clock-source validity is a separate verdict below (C1 correction 1).
 enum class Verdict : uint8_t { Pass, Fail, Inconclusive };
 
 inline Verdict advertisingResidencyVerdict(const Buffer& b) {
   if ((flags(b) & kFlagTransitionOverflow) != 0) return Verdict::Inconclusive;
-  const uint64_t wall = classSeconds(b, IntervalClass::Advertising);
-  if (wall == 0) return Verdict::Inconclusive;
-  uint64_t covered = 0, advertisingSleepUs = 0;
-  storedAdvertisingEvidence(b, covered, advertisingSleepUs);
-  if (covered * 10000 < wall * 9800) return Verdict::Inconclusive;
-  return residencyPermyriad(advertisingSleepUs, wall) >= 9000 ? Verdict::Pass : Verdict::Fail;
+  const uint64_t wallMs = classMillis(b, IntervalClass::Advertising);
+  if (wallMs == 0) return Verdict::Inconclusive;
+  uint64_t coveredMs = 0, advertisingSleepUs = 0;
+  storedAdvertisingEvidence(b, coveredMs, advertisingSleepUs);
+  if (coveredMs > wallMs) return Verdict::Inconclusive;
+  if (coveredMs * 10000 < wallMs * 9800) return Verdict::Inconclusive;
+  if (advertisingSleepUs > wallMs * 1000) return Verdict::Inconclusive;
+  return residencyPermyriad(advertisingSleepUs, wallMs) >= 9000 ? Verdict::Pass : Verdict::Fail;
 }
 
 // The BLE sleep-clock verdict, separate from residency: only EXT_32K_XTAL
