@@ -117,6 +117,7 @@ add_subdirectory(ble_companion)
 
 add_subdirectory(companion_gate_state)
 add_subdirectory(companion_gate_power)
+add_subdirectory(companion_gate_poll150)
 add_subdirectory(companion_gate_policy)
 add_subdirectory(companion_gate_pilot)
 add_subdirectory(companion_standby_diag)

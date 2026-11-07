@@ -37,9 +37,18 @@ inline constexpr int kGateMinFreqMhz = 80;
 
 // Main-loop poll period inside the window: the stock 2 ms cadence never gives
 // the idle task the 8 ms window esp_pm's sleep gate needs (pm_impl.c:872), so
-// an automatic-light-sleep window polls at 15 ms.
+// an automatic-light-sleep window polls at 15 ms. The P1-B9-E2 poll150 A/B
+// experiment overrides the period at compile time in its dedicated
+// environment; every other build keeps the 15 ms default.
 inline constexpr unsigned kStockPollMs = 2;
+#ifdef CROSSPOINT_COMPANION_GATE_POLL_MS
+#if CROSSPOINT_COMPANION_GATE_POLL_MS <= 8
+#error "the gate poll period must leave idle windows above the 8 ms esp_pm sleep gate"
+#endif
+inline constexpr unsigned kAutolsPollMs = CROSSPOINT_COMPANION_GATE_POLL_MS;
+#else
 inline constexpr unsigned kAutolsPollMs = 15;
+#endif
 inline unsigned gatePollMs(const bool autolsWindow) { return autolsWindow ? kAutolsPollMs : kStockPollMs; }
 
 // P1-B3 control twin: the gate window keeps the identical flow, cadence and

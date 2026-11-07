@@ -200,6 +200,9 @@ TEST(CompanionStandbyContract, StandbyFlagIsOneExperimentalEnvOnThePilot) {
   EXPECT_NE(extends, std::string::npos) << "the standby env inherits the accepted pilot configuration";
 }
 
+// --- P1-B9-E2: the standby poll-interval A/B experiment ----------------------
+// Placed after standbyLoopSource's definition; see the E2 tests at the end.
+
 std::string standbyLoopSource(const std::string& main) {
   const auto begin = main.find("static void runCompanionGate");
   if (begin == std::string::npos) return "";
@@ -323,4 +326,75 @@ TEST(CompanionStandbyContract, ClockEvidenceIsReadAfterTheRadioIsUp) {
   ASSERT_NE(begin, std::string::npos);
   ASSERT_NE(sessionBegin, std::string::npos);
   EXPECT_LT(begin, sessionBegin) << "the LPCLK read must follow controller initialization";
+}
+
+// --- P1-B9-E2: the standby poll-interval A/B experiment ----------------------
+
+// Ini text with the ';' comment lines removed, so documentation comments can
+// never satisfy or break a code contract below.
+std::string stripIniComments(const std::string& ini) {
+  std::string code;
+  size_t start = 0;
+  while (start <= ini.size()) {
+    const auto end = ini.find('\n', start);
+    const auto lineEnd = end == std::string::npos ? ini.size() : end;
+    if (ini[start] != ';') code.append(ini, start, lineEnd - start + 1);
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  return code;
+}
+
+TEST(CompanionStandbyContract, Poll150OverridesThePeriodInExactlyOneEnv) {
+  const std::string ini = stripIniComments(readAll(fs::path(REPO_ROOT_PATH) / "platformio.ini"));
+  size_t occurrences = 0;
+  for (auto pos = ini.find("-DCROSSPOINT_COMPANION_GATE_POLL_MS"); pos != std::string::npos;
+       pos = ini.find("-DCROSSPOINT_COMPANION_GATE_POLL_MS", pos + 1)) {
+    ++occurrences;
+  }
+  EXPECT_EQ(occurrences, 1u) << "the poll override belongs to exactly one experimental env";
+  const auto env = ini.find("[env:x4c-bleautols-standby-poll150]");
+  ASSERT_NE(env, std::string::npos);
+  const auto define = ini.find("-DCROSSPOINT_COMPANION_GATE_POLL_MS=150", env);
+  EXPECT_NE(define, std::string::npos) << "the experimental env carries the 150 ms configuration";
+}
+
+TEST(CompanionStandbyContract, Poll150InheritsTheStandbyConfiguration) {
+  const std::string ini = stripIniComments(readAll(fs::path(REPO_ROOT_PATH) / "platformio.ini"));
+  const auto env = ini.find("[env:x4c-bleautols-standby-poll150]");
+  ASSERT_NE(env, std::string::npos);
+  const auto extends = ini.find("extends = env:x4c-bleautols-standby", env);
+  EXPECT_NE(extends, std::string::npos) << "the A/B env must inherit the accepted standby configuration";
+  const auto flags = ini.find("${env:x4c-bleautols-standby.build_flags}", extends);
+  EXPECT_NE(flags, std::string::npos) << "the inherited flags must be referenced, not duplicated";
+}
+
+TEST(CompanionStandbyContract, ControlStandbyEnvKeepsTheDefaultPeriod) {
+  const std::string ini = stripIniComments(readAll(fs::path(REPO_ROOT_PATH) / "platformio.ini"));
+  const auto standby = ini.find("[env:x4c-bleautols-standby]");
+  const auto poll150 = ini.find("[env:x4c-bleautols-standby-poll150]");
+  ASSERT_NE(standby, std::string::npos);
+  ASSERT_NE(poll150, std::string::npos);
+  EXPECT_LT(standby, poll150) << "the control env must stay before the experimental env";
+  // The control env's own text (up to the experimental env's header) must
+  // carry no poll override: it keeps the 15 ms default.
+  const std::string controlEnv = ini.substr(standby, poll150 - standby);
+  EXPECT_EQ(controlEnv.find("CROSSPOINT_COMPANION_GATE_POLL_MS"), std::string::npos)
+      << "the control standby env must keep the 15 ms default (no override)";
+}
+
+TEST(CompanionStandbyContract, PollPeriodOverrideReachesTheGatePollOnly) {
+  // The mechanism is the single compile-time parameter in CompanionGatePower.h;
+  // the gate loop's poll call site must stay the unmodified shared one.
+  const std::string header = readAll(fs::path(REPO_ROOT_PATH) / "src" / "util" / "CompanionGatePower.h");
+  const auto guard = header.find("#ifdef CROSSPOINT_COMPANION_GATE_POLL_MS");
+  ASSERT_NE(guard, std::string::npos) << "the period must be overridable at compile time";
+  const auto fallback = header.find("inline constexpr unsigned kAutolsPollMs = 15;", guard);
+  EXPECT_NE(fallback, std::string::npos) << "builds without the override keep the 15 ms default";
+  const std::string main = readAll(fs::path(REPO_ROOT_PATH) / "src" / "main.cpp");
+  const std::string body = standbyLoopSource(main);
+  ASSERT_FALSE(body.empty());
+  const auto poll = body.find("delay(companiongatepower::gatePollMs(gateWindow.configured()))");
+  ASSERT_NE(poll, std::string::npos) << "the gate loop must poll through the shared period helper";
+  EXPECT_EQ(countOccurrences(body, "delay("), 1u) << "the poll period stays the loop's only delay";
 }
