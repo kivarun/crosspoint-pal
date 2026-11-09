@@ -25,6 +25,7 @@
 #include <memory>
 
 #include "BleCompanionJson.h"
+#include "CompanionAdvInterval.h"
 #include "CompanionPeer.h"
 #include "CompanionSession.h"
 #include "ConnectionHandle.h"
@@ -612,6 +613,17 @@ bool BleCompanion::Impl::begin(const char* storedPeerAddr, const uint8_t storedP
   advertising->setName(DEVICE_NAME);
   advertising->addServiceUUID(SERVICE_UUID);
   advertising->enableScanResponse(true);
+#ifdef CROSSPOINT_COMPANION_ADV_INTERVAL_MS
+  // The experimental interval is set here, before the first start(): NimBLE
+  // deinit deletes the shared NimBLEAdvertising object, so every fresh stack
+  // bring-up must re-apply it. resumeAdvertising() reuses the same object and
+  // never calls reset(), so the interval survives every resume unaided.
+  static_assert(CROSSPOINT_COMPANION_ADV_INTERVAL_MS > 0, "advertising interval must be positive milliseconds");
+  static_assert(advertisingUnitsExact(CROSSPOINT_COMPANION_ADV_INTERVAL_MS) >= BLE_HCI_ADV_ITVL_MIN &&
+                    advertisingUnitsExact(CROSSPOINT_COMPANION_ADV_INTERVAL_MS) <= BLE_HCI_ADV_ITVL_MAX,
+                "advertising interval must fit the legacy advertising range");
+  advertising->setAdvertisingInterval(advertisingUnitsFromMs(CROSSPOINT_COMPANION_ADV_INTERVAL_MS));
+#endif
   if (!advertising->start()) {
     LOG_ERR(TAG, "Advertising failed");
     stop();

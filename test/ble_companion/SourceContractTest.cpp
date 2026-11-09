@@ -18,7 +18,7 @@ namespace fs = std::filesystem;
 
 const std::set<std::string> kOwn = {"BleCompanion.h",     "BleCompanionProtocol.h", "BleCompanionJson.h",
                                     "CompanionSession.h", "CompanionPeer.h",        "ConnectionHandle.h",
-                                    "PoisonedHandles.h"};
+                                    "PoisonedHandles.h",  "CompanionAdvInterval.h"};
 const std::set<std::string> kStd = {"array", "cstddef", "cstdint", "cstdio", "cstring", "initializer_list", "memory"};
 const std::set<std::string> kAdapterOnly = {"NimBLEDevice.h", "esp_random.h", "Memory.h"};
 

@@ -123,6 +123,7 @@ add_subdirectory(companion_standby_diag)
 add_subdirectory(companion_identity_mirror)
 add_subdirectory(companion_gate_contract)
 add_subdirectory(companion_pilot_contract)
+add_subdirectory(companion_adv_interval)
 add_subdirectory(rtcclk_diag_core)
 add_subdirectory(msc_diag_core)
 
