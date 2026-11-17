@@ -21,8 +21,8 @@
 #include "activities/settings/SettingsActivity.h"
 #include "components/UITheme.h"
 #include "util/DictionaryRegistry.h"
-#include "util/SlideshowCapability.h"
 #include "util/SlideSwitch.h"
+#include "util/SlideshowCapability.h"
 
 // Build the font family setting dynamically. When registry is non-null, SD card fonts
 // are appended after the built-in fonts. Otherwise only built-in fonts are listed.

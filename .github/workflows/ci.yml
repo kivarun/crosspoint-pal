@@ -34,7 +34,9 @@ jobs:
           git diff --exit-code || (echo "Please run 'bin/clang-format-fix' to fix formatting issues" && exit 1)
 
   cppcheck:
-    runs-on: ubuntu-latest
+    # Pinned to 24.04: ubuntu-26.04 runners no longer ship libpcre3, which
+    # pioarduino's cppcheck binary links against.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:

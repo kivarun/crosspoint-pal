@@ -29,9 +29,7 @@ Inputs row(const WakeKind wake = WakeKind::Timer, const bool armed = true) {
 
 }  // namespace
 
-TEST(CompanionGateDispatch, RunsTheWindowOnACleanTimerWake) {
-  EXPECT_EQ(companiongate::dispatch(row()), Action::Run);
-}
+TEST(CompanionGateDispatch, RunsTheWindowOnACleanTimerWake) { EXPECT_EQ(companiongate::dispatch(row()), Action::Run); }
 
 TEST(CompanionGateDispatch, RecoveryAlwaysWins) {
   auto in = row();
